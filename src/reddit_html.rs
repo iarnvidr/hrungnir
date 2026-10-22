@@ -1,0 +1,322 @@
+//! Classic Reddit response parser. No JavaScript execution or browser IPC.
+use crate::{
+    browsing::{classic_url, PageCapture},
+    Comment, Result, Thread,
+};
+use scraper::{ElementRef, Html, Selector};
+use std::io::Read;
+use url::Url;
+
+fn selector(value: &str) -> Selector {
+    Selector::parse(value).expect("static selector")
+}
+fn text(node: ElementRef<'_>, limit: usize) -> String {
+    node.text()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(limit)
+        .collect()
+}
+fn first_text(node: ElementRef<'_>, query: &str, limit: usize) -> String {
+    node.select(&selector(query))
+        .next()
+        .map(|node| text(node, limit))
+        .unwrap_or_default()
+}
+fn resolve(base: &Url, input: &str) -> Option<String> {
+    let mut url = base.join(input).ok()?;
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    url.set_fragment(None);
+    Some(url.to_string())
+}
+
+pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<PageCapture> {
+    let mut base = Url::parse(&classic_url(&response.url)?)?;
+    if !crate::browsing::public_content_path(base.path()) {
+        return Err("Only public listing and post response paths are captured".into());
+    }
+    let searching = crate::browsing::search_path(base.path());
+    if !searching {
+        base.set_query(None);
+    }
+    let subreddit = if base.path().starts_with("/r/") {
+        base.path().split('/').nth(2).unwrap_or_default().to_owned()
+    } else {
+        String::new()
+    };
+    let post_id = base
+        .path()
+        .contains("/comments/")
+        .then(|| base.path().split('/').nth(4).map(|id| format!("t3_{id}")))
+        .flatten();
+    let mut decoded = Vec::new();
+    match response.encoding.as_str() {
+        "" | "identity" => decoded = response.bytes,
+        "gzip" => {
+            flate2::read::GzDecoder::new(response.bytes.as_slice())
+                .take(8 * 1024 * 1024 + 1)
+                .read_to_end(&mut decoded)?;
+        }
+        _ => return Err("Unsupported source content encoding".into()),
+    }
+    if decoded.len() > 8 * 1024 * 1024 {
+        return Err("Decompressed source exceeds 8 MiB".into());
+    }
+    let html = std::str::from_utf8(&decoded)?;
+    let document = Html::parse_document(html);
+    let mut page = PageCapture {
+        url: base.to_string(),
+        scroll_y: 0.0,
+        threads: Vec::new(),
+        layout: Some("classic".into()),
+        layout_preference: None,
+    };
+    for node in document
+        .select(&selector(".thing.link[data-fullname], .search-result-link"))
+        .take(100)
+    {
+        if page.threads.len() >= 25 {
+            break;
+        }
+        if node
+            .value()
+            .classes()
+            .any(|class| matches!(class, "promoted" | "promotedlink"))
+            || node.value().attr("data-promoted") == Some("true")
+        {
+            continue;
+        }
+        let Some(title) = node.select(&selector("a.title, a.search-title")).next() else {
+            continue;
+        };
+        let title_text = text(title, 1000);
+        if title_text.is_empty() {
+            continue;
+        }
+        let comments_link = node
+            .select(&selector("a.comments, a.search-comments"))
+            .next();
+        let candidate_permalink = comments_link
+            .and_then(|link| link.value().attr("href"))
+            .and_then(|href| resolve(&base, href))
+            .or_else(|| {
+                node.value()
+                    .attr("data-permalink")
+                    .and_then(|href| resolve(&base, href))
+            })
+            .or_else(|| {
+                if searching {
+                    title
+                        .value()
+                        .attr("href")
+                        .and_then(|href| resolve(&base, href))
+                } else {
+                    node.value()
+                        .attr("data-fullname")
+                        .filter(|id| id.starts_with("t3_"))
+                        .and_then(|id| {
+                            resolve(&base, &format!("/r/{subreddit}/comments/{}/", &id[3..]))
+                        })
+                }
+            });
+        let Some(permalink) = candidate_permalink.filter(|url| crate::browsing::reddit_url(url))
+        else {
+            continue;
+        };
+        let mut permalink = Url::parse(&permalink)?;
+        let parts: Vec<_> = permalink.path().trim_matches('/').split('/').collect();
+        if !(4..=6).contains(&parts.len())
+            || parts[0] != "r"
+            || parts[2] != "comments"
+            || crate::browsing::subreddit_url(parts[1]).is_err()
+            || parts[3].is_empty()
+            || !parts[3].bytes().all(|b| b.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        let actual_subreddit = parts[1].to_owned();
+        let id = format!("t3_{}", parts[3]);
+        if (!subreddit.is_empty() && !actual_subreddit.eq_ignore_ascii_case(&subreddit))
+            || node
+                .value()
+                .attr("data-fullname")
+                .is_some_and(|declared| declared != id)
+            || page.threads.iter().any(|thread| thread.id == id)
+        {
+            continue;
+        }
+        permalink.set_host(Some("www.reddit.com"))?;
+        permalink.set_query(None);
+        let link_url = node
+            .select(&selector("a.search-link[href]"))
+            .next()
+            .unwrap_or(title)
+            .value()
+            .attr("href")
+            .and_then(|href| resolve(&base, href));
+        let thumbnail_url = node
+            .select(&selector(
+                "a.thumbnail img[src], .search-result-thumbnail img[src]",
+            ))
+            .next()
+            .and_then(|image| image.value().attr("src"))
+            .and_then(|src| resolve(&base, src))
+            .filter(|url| crate::link_preview::thumbnail_url(url).is_some());
+        let empty = comments_link.is_some_and(|link| {
+            link.value().classes().any(|class| class == "empty")
+                || text(link, 100).trim_start().starts_with("0 comment")
+        });
+        let mut media_urls = Vec::new();
+        let mut collect_media = |media: ElementRef<'_>| {
+            if let Some(url) = media
+                .value()
+                .attr("src")
+                .and_then(|src| resolve(&base, src))
+                .filter(|url| {
+                    url.len() <= 2048
+                        && Url::parse(url).is_ok_and(|url| {
+                            url.host_str()
+                                .is_some_and(crate::media::media_candidate_host)
+                        })
+                })
+            {
+                if media_urls.len() < 4 && !media_urls.contains(&url) {
+                    media_urls.push(url);
+                }
+            }
+        };
+        // Listing thumbnails and flair are decorations, not downloaded content.
+        for media in node.select(&selector(".expando video[src], .expando source[src], .expando img[src], .usertext-body .md img[src]")) {
+            collect_media(media);
+        }
+        for expando in node.select(&selector(".expando[data-cachedhtml], .expando[data-cached-html], .expando [data-cachedhtml], .expando [data-cached-html]")) {
+            if let Some(markup) = expando
+                .value()
+                .attr("data-cachedhtml")
+                .or_else(|| expando.value().attr("data-cached-html"))
+            {
+                let fragment = Html::parse_fragment(markup);
+                for media in fragment.select(&selector("video[src],source[src],img[src]")) {
+                    collect_media(media);
+                }
+            }
+        }
+        let mut thread = Thread {
+            id: id.clone(),
+            subreddit: actual_subreddit,
+            title: title_text,
+            body: first_text(
+                node,
+                ".expando .usertext-body .md, .search-result-body",
+                if post_id.is_some() { 16000 } else { 2000 },
+            ),
+            captured_at: 0,
+            comments: Vec::new(),
+            missing: Vec::new(),
+            permalink: Some(permalink.to_string()),
+            link_url,
+            thumbnail_url,
+            source: Some("proxy".into()),
+            comments_status: Some(
+                if empty {
+                    "empty_confirmed"
+                } else {
+                    "not_loaded"
+                }
+                .into(),
+            ),
+            media_urls,
+        };
+        if post_id.as_deref() == Some(id.as_str()) {
+            let mut budget = 0;
+            for comment in document
+                .select(&selector(".thing.comment[data-fullname]"))
+                .take(300)
+            {
+                let Some(comment_id) = comment
+                    .value()
+                    .attr("data-fullname")
+                    .filter(|id| id.starts_with("t1_"))
+                else {
+                    continue;
+                };
+                let body = comment
+                    .select(&selector(".usertext-body .md"))
+                    .find(|body| {
+                        body.ancestors()
+                            .filter_map(ElementRef::wrap)
+                            .find(|ancestor| {
+                                ancestor.value().classes().any(|class| class == "comment")
+                            })
+                            .and_then(|ancestor| ancestor.value().attr("data-fullname"))
+                            == Some(comment_id)
+                    })
+                    .map(|body| text(body, 3000))
+                    .unwrap_or_default();
+                if body.is_empty() {
+                    continue;
+                }
+                budget += body.len();
+                if budget > 350000 {
+                    break;
+                }
+                let parent_id = comment
+                    .ancestors()
+                    .skip(1)
+                    .filter_map(ElementRef::wrap)
+                    .find(|parent| parent.value().classes().any(|class| class == "comment"))
+                    .and_then(|parent| parent.value().attr("data-fullname"))
+                    .unwrap_or(&id)
+                    .to_owned();
+                if !thread
+                    .comments
+                    .iter()
+                    .any(|existing| existing.id == comment_id)
+                {
+                    thread.comments.push(Comment {
+                        id: comment_id.into(),
+                        parent_id,
+                        body,
+                    });
+                }
+            }
+            let ids: std::collections::HashSet<_> = thread
+                .comments
+                .iter()
+                .map(|comment| comment.id.clone())
+                .collect();
+            for comment in &mut thread.comments {
+                if comment.parent_id != id && !ids.contains(&comment.parent_id) {
+                    comment.parent_id = id.clone();
+                }
+            }
+            if !thread.comments.is_empty() {
+                thread.comments_status = Some("partial_proxy".into());
+            }
+        }
+        page.threads.push(thread);
+        if serde_json::to_vec(&page)?.len() > 500000 {
+            page.threads.pop();
+            break;
+        }
+    }
+    if page.threads.is_empty()
+        && !(searching
+            && document
+                .select(&selector(
+                    ".search-result-listing, .searchpane, .search-result-group",
+                ))
+                .next()
+                .is_some())
+    {
+        return Err("Response did not contain classic public posts".into());
+    }
+    page.validate()?;
+    Ok(page)
+}

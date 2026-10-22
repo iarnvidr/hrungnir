@@ -1,0 +1,2 @@
+# Preserve bundled upstream license bytes, including their original line endings.
+reader/fonts/*-OFL.txt -whitespace

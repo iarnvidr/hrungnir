@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --target aarch64-apple-darwin && rustup default stable
+
+      - name: Check tag matches app version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
+          test "$TAG" = "v$version" || { echo "Tag $TAG does not match app version $version" >&2; exit 1; }
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Fetch media helpers
+        run: python3 scripts/fetch-media-tools.py
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build (unsigned)
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "14.0"
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --release --target aarch64-apple-darwin --features custom-protocol
+
+      - name: Assemble and ad-hoc sign app bundle
+        run: |
+          python3 scripts/package-macos.py
+          app="artifacts/Hrungnir.app"
+          codesign --force --sign - "$app/Contents/Resources/bin/yt-dlp"
+          codesign --force --sign - "$app/Contents/Resources/bin/ffmpeg"
+          codesign --force --sign - "$app"
+          codesign --verify --strict --verbose=2 "$app"
+
+      - name: Archive
+        run: python3 scripts/archive-macos.py
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hrungnir-macos-arm64
+          path: |
+            artifacts/*.zip
+            artifacts/*.zip.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: hrungnir-macos-arm64
+          path: dist
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/*.zip dist/*.zip.sha256 \
+            --title "Hrungnir ${TAG#v}" \
+            --notes "Apple Silicon build (macOS 14+). Ad-hoc signed, not notarized. Verify with the attached SHA-256 file."

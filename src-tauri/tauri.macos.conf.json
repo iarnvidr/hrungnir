@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "resources": {
+      "../var/media-tools/yt-dlp": "bin/yt-dlp",
+      "../var/media-tools/ffmpeg": "bin/ffmpeg"
+    }
+  }
+}

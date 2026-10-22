@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="data:,">
+  <title>Hrungnir — Offline Reader</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to reader content</a>
+  <header class="masthead">
+    <a class="wordmark" href="#browse-panel" aria-label="Hrungnir home"><img src="hrungnir.png" alt=""><span><b>Hrungnir</b><small>OFFLINE READER</small></span></a>
+    <form id="header-search-form" class="header-search" role="search" autocomplete="off">
+      <label class="sr-only" for="cache-search-input">Search Reddit; cached matches appear while typing</label>
+      <input id="cache-search-input" type="search" autocomplete="off" placeholder="Search Reddit or cached posts…" aria-label="Search Reddit; cached matches appear while typing" aria-controls="cache-search-results thread-list" aria-autocomplete="list">
+      <button id="header-search-submit" class="button" type="submit">Search</button>
+      <button id="cache-search-clear" class="button secondary" type="button" aria-label="Clear search" title="Clear search">Clear</button>
+      <div id="cache-search-results" class="cache-search-results" role="listbox" aria-label="Cached matches" hidden></div>
+    </form>
+    <button id="settings-open" class="button settings-open" type="button" aria-haspopup="dialog" aria-controls="settings-dialog">Settings</button>
+    <button id="diagnostics-open" class="button diagnostics-open" type="button">Diagnostics</button>
+    <div class="masthead-status"><span class="status-dot" aria-hidden="true"></span><span id="connection-status">Checking native cache…</span></div>
+  </header>
+
+  <div class="section-tabs-row">
+    <nav class="reader-tabs" role="tablist" aria-label="Reader sections">
+      <button id="tab-browse" role="tab" aria-selected="true" aria-controls="browse-panel" data-tab="browse">Subreddits &amp; posts</button>
+      <button id="tab-reader" role="tab" aria-selected="false" aria-controls="reader-panel" data-tab="reader">Post reader</button>
+      <button id="tab-library" role="tab" aria-selected="false" aria-controls="library-panel" data-tab="library">Library</button>
+    </nav>
+    <button id="new-browse-tab" class="button secondary new-browse-tab" type="button" title="Start a new subreddit search (⌘T / Ctrl+T)">＋ New tab</button>
+  </div>
+  <nav id="post-tabs" class="post-tabs" role="tablist" aria-label="Open posts" hidden></nav>
+  <div id="reader-feedback" class="browse-feedback" role="status" aria-live="polite" hidden></div>
+
+  <main id="main-content" tabindex="-1">
+    <section id="browse-panel" class="browse-layout" role="tabpanel" aria-labelledby="tab-browse">
+      <aside class="rail" aria-label="Subreddit lists and cache actions">
+        <section class="rail-section subreddit-fetch-section">
+          <h1>Fetch subreddit</h1>
+          <form id="browse-form" class="browse-form" autocomplete="off">
+            <label class="sr-only" for="subreddit-input">Subreddit</label>
+            <input id="subreddit-input" name="subreddit" value="/r/soccer" placeholder="/r/soccer" aria-label="Subreddit, such as /r/soccer" spellcheck="false" autocapitalize="off" autocorrect="off">
+            <div class="browse-actions">
+              <button id="browse-submit" data-testid="browse-subreddit" type="submit">Fetch posts</button>
+              <button id="browse-refresh" data-testid="refresh-subreddit" type="button" aria-label="Fetch this subreddit again" title="Fetch this subreddit again">↻</button>
+            </div>
+          </form>
+        </section>
+        <section class="rail-section">
+          <div class="section-heading"><h1>Subreddits</h1><button id="favorite-current" class="link-button" type="button" aria-pressed="false">☆ Favorite current</button></div>
+          <label class="small muted" for="subreddit-group-filter">Group</label>
+          <select id="subreddit-group-filter" class="select-control"><option value="">All subreddits</option></select>
+          <label class="small muted" for="subreddit-order">Order</label>
+          <select id="subreddit-order" class="select-control"><option value="recent">Recent</option><option value="favorites">Favorites</option><option value="alphabetical">A–Z</option></select>
+          <nav id="subreddit-list" class="subreddit-list" aria-label="Favorite and recent subreddits"></nav>
+          <p id="subreddit-empty" class="muted empty">Fetched subreddits will appear here.</p>
+        </section>
+
+        <details class="advanced rail-section">
+          <summary>Advanced · import and cache</summary>
+          <div class="tools-section">
+            <button id="demo-import" data-testid="import-fixture" class="button" type="button">Import synthetic example</button>
+            <button id="file-import" data-testid="import-json" class="button" type="button">Import JSON file…</button>
+            <input id="json-file" type="file" accept="application/json,.json" hidden>
+            <button id="clear-cache" data-testid="clear-cache" class="button danger" type="button">Clear cached posts…</button>
+            <p class="small muted">JSON import limit: 4 MiB. Synthetic example import uses a fixed 10 MiB cache budget.</p>
+          </div>
+        </details>
+      </aside>
+
+      <section class="post-browser" aria-label="Subreddit posts">
+        <div class="browser-heading">
+          <div><h1 id="current-subreddit">Choose a subreddit</h1><p id="thread-count" class="muted">0 posts</p></div>
+          <div class="listing-controls">
+            <div class="sort-controls">
+            <label>Posts <select id="post-sort" class="select-control"><option value="hot" data-sort-scope="subreddit">Hot</option><option value="new">New</option><option value="top">Top</option><option value="rising" data-sort-scope="subreddit">Rising</option><option value="relevance" data-sort-scope="search">Relevance</option><option value="comments" data-sort-scope="search">Most comments</option></select></label>
+            <label id="top-period-wrap"><span id="top-period-label">Top period</span> <select id="top-period" class="select-control"><option value="hour">Hour</option><option value="day" selected>Day</option><option value="week">Week</option><option value="month">Month</option><option value="year">Year</option><option value="all">All time</option></select></label>
+            </div>
+            <div class="listing-media-tools">
+              <button id="fetch-all-media" class="button secondary" type="button" disabled>Fetch all media</button>
+              <span id="fetch-all-media-status" class="small muted" role="status" aria-live="polite"></span>
+            </div>
+          </div>
+        </div>
+        <p id="sort-contract-note" class="small muted" hidden>Top period applies only when Posts is set to Top.</p>
+        <div id="thread-list" class="thread-list" aria-label="Fetched post list"></div>
+        <p id="empty-state" class="muted empty">Fetch a subreddit above. Previously fetched posts remain available here.</p>
+      </section>
+    </section>
+
+    <section id="reader-panel" class="reader" role="tabpanel" aria-labelledby="tab-reader" hidden>
+      <div id="reader-state" class="reader-state" role="status" aria-live="polite">Choose a post to read.</div>
+      <article id="thread-view" class="thread-view" hidden></article>
+    </section>
+
+    <section id="library-panel" class="library-layout" role="tabpanel" aria-labelledby="tab-library" hidden>
+      <div class="library-heading">
+        <div><h1>Saved library</h1><p id="library-count" class="muted">Loading saved items…</p></div>
+        <div class="library-actions">
+          <button id="library-export" class="button" type="button">Export library…</button>
+          <button id="library-import" class="button" type="button">Import library…</button>
+        </div>
+      </div>
+      <details id="save-link-details" class="library-add-link">
+        <summary>Add linked content…</summary>
+        <div class="library-link-fields">
+          <label for="save-link-url">Public link URL</label>
+          <input id="save-link-url" class="select-control" type="url" placeholder="Paste one public URL">
+          <label for="save-link-kind">Content type</label>
+          <select id="save-link-kind" class="select-control"><option value="article">Article</option><option value="video">Video</option><option value="image">Image</option></select>
+          <label for="save-link-collection">Collection</label>
+          <input id="save-link-collection" class="select-control" value="Saved" maxlength="80">
+          <label class="library-link-forever" for="save-link-forever"><input id="save-link-forever" type="checkbox" checked> Keep forever</label>
+          <button id="save-link-button" class="button primary" type="button">Save linked content</button>
+          <p id="save-link-status" class="small muted" role="status" aria-live="polite"></p>
+        </div>
+      </details>
+      <div class="library-filters">
+        <label>Search library <input id="library-search" type="search" autocomplete="off" placeholder="Title or saved text"></label>
+        <label>Collection <select id="library-collection-filter" class="select-control"><option value="">All collections</option></select></label>
+        <label>Type <select id="library-kind-filter" class="select-control"><option value="">All types</option><option value="post">Posts</option><option value="article">Articles</option><option value="video">Videos</option><option value="image">Images</option></select></label>
+      </div>
+      <p id="library-status" class="small muted" role="status" aria-live="polite"></p>
+      <div class="library-columns">
+        <div id="library-items" class="library-items" aria-label="Saved items"></div>
+        <article id="library-detail" class="library-detail" aria-live="polite"><p class="muted">Choose a saved item to read it here. Saved content opens from disk only.</p></article>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="diagnostics-dialog" class="diagnostics-dialog" aria-labelledby="diagnostics-title">
+    <div class="dialog-heading"><h2 id="diagnostics-title">Local diagnostics</h2><button id="diagnostics-close" class="button secondary" type="button">Close</button></div>
+    <p class="small muted">Application, source, proxy, cache, media, and recent operation details from this app.</p>
+    <section class="performance-panel" aria-labelledby="performance-title">
+      <h3 id="performance-title">Recent operation history</h3>
+      <p class="small muted">Recent recorded operations; entries may include work from an earlier session.</p>
+      <ul id="performance-summary" class="performance-summary"><li class="muted">No recent operations.</li></ul>
+    </section>
+    <p id="diagnostics-status" class="diagnostics-status small muted" role="status" aria-live="polite"></p>
+    <section id="trust-recovery-panel" class="trust-recovery-panel" aria-labelledby="trust-recovery-title" hidden>
+      <h3 id="trust-recovery-title">Reddit source certificate</h3>
+      <p id="trust-recovery-explanation" class="small muted">This adds Hrungnir’s own SSL certificate authority (CA) for www.reddit.com to your login Keychain. Other apps in your user account may also use this trust for that host. Confirmation is required; macOS may also ask for approval. The app will not fetch again automatically.</p>
+      <button id="trust-recovery-button" class="button secondary" type="button" aria-describedby="trust-recovery-explanation">Allow proxy certificate…</button>
+      <p id="trust-recovery-status" class="small muted" role="status" aria-live="polite"></p>
+    </section>
+    <dl id="diagnostics" class="diagnostics"></dl>
+    <p id="diagnostic-mode" class="small muted"></p>
+    <pre id="diagnostics-detail" class="diagnostics-detail">Waiting for snapshot…</pre>
+    <div class="diagnostics-actions">
+      <button id="support-export" class="button primary" type="button">Export support ZIP…</button>
+      <button id="diagnostics-refresh" class="button" type="button">Refresh diagnostics</button>
+      <button id="diagnostics-copy" class="button secondary" type="button">Copy JSON</button>
+      <details class="json-export-option"><summary>Optional JSON file</summary><button id="diagnostics-export" class="button secondary" type="button">Export JSON</button></details>
+    </div>
+  </dialog>
+  <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
+    <div class="dialog-heading"><h2 id="settings-title">Settings</h2><button id="settings-close" class="button secondary" type="button">Close</button></div>
+    <fieldset class="settings-group">
+      <legend>Appearance</legend>
+      <label for="theme-select">Theme</label>
+      <select id="theme-select" class="select-control">
+        <option value="system">System</option>
+        <option value="classified">Classified dark</option>
+        <option value="classified_light">Classified light</option>
+      </select>
+      <label for="accent-select">Accent</label>
+      <select id="accent-select" class="select-control">
+        <option value="blue">Blue</option><option value="red">Red</option>
+        <option value="amber">Amber</option><option value="teal">Teal</option>
+      </select>
+    </fieldset>
+    <fieldset class="settings-group">
+      <legend>Reader</legend>
+      <label for="reader-text-scale">Text size</label>
+      <div class="range-setting"><input id="reader-text-scale" type="range" min="85" max="140" step="5" aria-describedby="reader-text-scale-value"><output id="reader-text-scale-value" for="reader-text-scale">100%</output></div>
+      <label for="reader-ui-scale">Element size</label>
+      <div class="range-setting"><input id="reader-ui-scale" type="range" min="85" max="125" step="5" aria-describedby="reader-ui-scale-value"><output id="reader-ui-scale-value" for="reader-ui-scale">100%</output></div>
+      <label for="media-presentation">Media presentation</label>
+      <select id="media-presentation" class="select-control"><option value="inline">Inline</option><option value="collapsed">Collapsed</option></select>
+      <p class="small muted">Media stays local. Inline players load on request and never autoplay.</p>
+      <p class="small muted">Text size changes type independently. Element size changes controls and spacing. Inline media uses the available width, keeps its aspect ratio, and remains uncropped.</p>
+      <p class="small muted">Unwatched downloaded media follows the post lifetime. Videos watched to 95% expire after 24 hours by default; subreddit groups can override both lifetimes. Keep video protects its post and completed media.</p>
+    </fieldset>
+    <fieldset class="settings-group">
+      <legend>Post cache</legend>
+      <label for="post-cache-hours">Post &amp; unwatched media lifetime (hours)</label>
+      <input id="post-cache-hours" class="select-control" type="number" min="1" max="8760" step="1" inputmode="numeric" aria-describedby="post-cache-help cache-settings-status">
+      <p id="post-cache-help" class="small muted">Starts when posts are captured and media finishes downloading. Fully watched videos use a separate 24-hour default. Keep video protects the post and completed media; storage pressure can still remove unprotected media sooner.</p>
+      <div class="settings-actions"><button id="post-cache-apply" class="button primary" type="button">Apply lifetime</button></div>
+      <p id="cache-settings-status" class="small muted" role="status" aria-live="polite"></p>
+    </fieldset>
+    <fieldset class="settings-group group-settings">
+      <legend>Subreddit groups</legend>
+      <label for="group-select">Edit group</label>
+      <select id="group-select" class="select-control"><option value="">New group</option></select>
+      <label for="group-name">Name</label>
+      <input id="group-name" class="select-control" maxlength="80" autocomplete="off">
+      <label for="group-subreddits">Subreddits</label>
+      <textarea id="group-subreddits" class="select-control" rows="3" placeholder="soccer, cooking"></textarea>
+      <label for="group-post-hours">Post &amp; unwatched media lifetime (hours)</label>
+      <input id="group-post-hours" class="select-control" type="number" min="1" max="8760" step="1" value="48" inputmode="numeric">
+      <label for="group-post-forever">Keep posts forever</label>
+      <input id="group-post-forever" type="checkbox">
+      <label for="group-media-hours">Watched media lifetime (hours)</label>
+      <input id="group-media-hours" class="select-control" type="number" min="1" max="8760" step="1" value="24" inputmode="numeric">
+      <label for="group-media-forever">Keep watched media forever</label>
+      <input id="group-media-forever" type="checkbox">
+      <p class="small muted">Each subreddit belongs to one group. Forever applies to that group’s cached posts or watched media.</p>
+      <div class="settings-actions group-actions"><button id="group-delete" class="button danger" type="button" disabled>Delete group</button><button id="group-save" class="button primary" type="button">Save group</button></div>
+      <p id="group-status" class="small muted" role="status" aria-live="polite"></p>
+    </fieldset>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

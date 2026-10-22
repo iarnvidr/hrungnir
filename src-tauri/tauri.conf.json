@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Hrungnir",
+  "version": "0.6.6",
+  "identifier": "xyz.ginnungagaps.offline-reader-exploration",
+  "build": { "frontendDist": "../reader" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [{ "label": "main", "title": "Hrungnir", "width": 1100, "height": 780, "minWidth": 720, "minHeight": 480 }],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: asset: http://asset.localhost http://127.0.0.1:*; media-src asset: http://asset.localhost http://127.0.0.1:*; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'",
+      "assetProtocol": {"enable": true, "scope": ["$APPDATA/media/**"]}
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "resources": { "../licenses/": "licenses/" },
+    "copyright": "Copyright (c) 2026 Esben Thomsen",
+    "license": "Apache-2.0",
+    "licenseFile": "../LICENSE",
+    "shortDescription": "A Reddit reader with downloaded comments and local media",
+    "macOS": { "minimumSystemVersion": "14.0" }
+  }
+}

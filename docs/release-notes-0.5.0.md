@@ -1,0 +1,9 @@
+The app is now **Hrungnir**, using the supplied logo in the reader and native app icon. The existing bundle identifier and data directory are preserved. Appearance matches Muninn's System, Classified Dark and Classified Light modes with four accents and bundled local fonts; the requested UI/UX Pro Max guidance was applied.
+
+**Diagnostics → Export support ZIP** opens a native save dialog. The ZIP contains persistent session logs, stage timing summaries, source/proxy/TLS state, cache/media summaries, download failures and playback evidence. It survives restarts and can also be exported after app exit using `--support-export NEW.zip`. No raw content databases, posts/comments, browser storage, CA keys or media bodies are included.
+
+Removed unnecessary work: per-post listing commits, routine integrity scans, full-library selected-post reads, comment refetches on media-only cache misses, queueing completed media behind downloads, duplicate post requests and the acquisition settling delay. Cached tab reuse validates files still exist after media eviction.
+
+Native Linux checks pass for ZIP save/cancel, archive integrity, persisted logs, theme choices, restart and export after app exit. Cached synthetic-post invokes measured 2–3 ms with no proxy requests; live access and Mac latency are separate. All 41 Rust tests pass, covering support ZIP readability/redaction/rotation/restart, timing aggregation and atomic batch imports. Apple Silicon cross-build, ad-hoc signing, executable/helper and bundle-resource verification pass. Native macOS launch, save dialog, proxy trust, audio and Gatekeeper acceptance remain unverified; no Developer ID signature or notarization is included.
+
+Download **Hrungnir-0.5.0-macos-arm64.zip** and its checksum. Requires Apple Silicon and macOS 14+. Reproduce any slow behavior, export the support ZIP, and attach it with the action and approximate time.

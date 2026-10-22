@@ -1,0 +1,30 @@
+[package]
+name = "reddit-offline"
+version = "0.6.6"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+
+[dependencies]
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "process", "fs"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+getrandom = "0.3"
+url = "2"
+bytes = "1"
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "tls12", "webpki-tokio"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
+http-body-util = "0.1"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
+x509-parser = "0.18"
+time = "0.3"
+flate2 = "1"
+scraper = "0.23"
+tower-service = "0.3"
+zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }

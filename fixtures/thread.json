@@ -1,0 +1,12 @@
+{
+  "id": "t3_fixture",
+  "subreddit": "offline_lab",
+  "title": "Synthetic: a small thread available without a network",
+  "body": "This is invented content. No Reddit account or API was used.",
+  "captured_at": 1792234800,
+  "comments": [
+    {"id":"t1_parent","parent_id":"t3_fixture","body":"A cached parent comment."},
+    {"id":"t1_reply","parent_id":"t1_parent","body":"A cached nested reply."}
+  ],
+  "missing": ["t1_unfetched_a", "t1_unfetched_b"]
+}
