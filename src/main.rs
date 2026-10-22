@@ -9,11 +9,6 @@ fn main() {
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "--cli") {
-        if std::env::var_os("HRUNGNIR_DATA_DIR").is_none() {
-            for line in reddit_offline::identifier_migration::run() {
-                eprintln!("hrungnir: {line}");
-            }
-        }
         let tools = std::env::var_os("HRUNGNIR_MEDIA_TOOLS")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {

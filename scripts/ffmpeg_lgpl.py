@@ -13,19 +13,24 @@ The tarball itself is downloaded and SHA-256-checked by the caller's tool pins.
 
 Notes on the configuration:
 * --disable-gpl --disable-nonfree and no --enable-version3: LGPL 2.1 or later.
-* --disable-autodetect plus an explicit list: only Apple system frameworks and
-  zlib are linked. No x264, x265, fdk-aac, OpenSSL or other third-party library.
+* --disable-autodetect plus an explicit list: Apple system frameworks, zlib and
+  libdav1d (BSD-2-Clause, built here from a pinned source release and linked
+  statically) are the only libraries. No x264, x265, fdk-aac, OpenSSL or other
+  third-party library. dav1d provides software AV1 decoding.
 * h264_videotoolbox / aac_at are Apple's hardware and system encoders; Secure
   Transport provides https. VideoToolbox availability depends on the Mac.
 """
+import hashlib
 import io
 import multiprocessing
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.request
 from pathlib import Path
 
 CONFIGURE_FLAGS = [
@@ -42,7 +47,24 @@ CONFIGURE_FLAGS = [
     "--enable-securetransport",
     "--enable-videotoolbox",
     "--enable-audiotoolbox",
+    "--enable-libdav1d",
+    "--pkg-config-flags=--static",
 ]
+# dav1d (BSD-2-Clause) official source release; the digest is the publisher's own
+# dav1d-1.5.4.tar.xz.sha256 from downloads.videolan.org.
+DAV1D_VERSION = "1.5.4"
+DAV1D_URL = "https://downloads.videolan.org/pub/videolan/dav1d/1.5.4/dav1d-1.5.4.tar.xz"
+DAV1D_SHA256 = "686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5"
+DAV1D_MESON_ARGS = [
+    "--buildtype=release",
+    "--default-library=static",
+    "--libdir=lib",
+    "-Denable_tools=false",
+    "-Denable_tests=false",
+    "-Denable_examples=false",
+    "-Denable_docs=false",
+]
+BUILD_TOOLS = ("meson", "ninja", "pkg-config")
 TARGET_FLAGS = [
     "--arch=arm64",
     "--extra-cflags=-mmacosx-version-min=14.0",
@@ -72,6 +94,16 @@ def configure_args():
     return [*CONFIGURE_FLAGS, *TARGET_FLAGS]
 
 
+def fetch_dav1d():
+    """The pinned dav1d source tarball, verified against its SHA-256."""
+    request = urllib.request.Request(DAV1D_URL, headers={"User-Agent": "ffmpeg-lgpl-build"})
+    with urllib.request.urlopen(request, timeout=300) as response:
+        data = response.read()
+    if hashlib.sha256(data).hexdigest() != DAV1D_SHA256:
+        raise RuntimeError("dav1d source tarball does not match the pinned SHA-256")
+    return data
+
+
 def _extract(tarball, destination):
     with tarfile.open(fileobj=io.BytesIO(tarball), mode="r:xz") as archive:
         archive.extractall(destination, filter="data")
@@ -81,12 +113,21 @@ def _extract(tarball, destination):
     return roots[0]
 
 
-def _run(args, cwd, output):
-    result = subprocess.run(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+def _run(args, cwd, output, env=None):
+    result = subprocess.run(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
     if result.returncode != 0:
         print(result.stdout[-4000:], file=output or sys.stderr)
         raise RuntimeError(f"{' '.join(args[:2])} failed with exit status {result.returncode}")
     return result.stdout
+
+
+def build_dav1d(destination, prefix, output=None, extra_meson_args=()):
+    """Build dav1d statically from the pinned source into `prefix`; returns the env to use."""
+    source = _extract(fetch_dav1d(), destination)
+    env = dict(os.environ, MACOSX_DEPLOYMENT_TARGET="14.0")
+    _run(["meson", "setup", "build", f"--prefix={prefix}", *DAV1D_MESON_ARGS, *extra_meson_args], source, output, env)
+    _run(["ninja", "-C", "build", "install"], source, output, env)
+    return dict(env, PKG_CONFIG_PATH=str(Path(prefix) / "lib" / "pkgconfig"))
 
 
 def build(tarball, jobs=None, output=None):
@@ -97,10 +138,19 @@ def build(tarball, jobs=None, output=None):
             "On another host, build it on a Mac with this script and pass the verified binary "
             "through the FFMPEG_LGPL_BINARY environment variable."
         )
+    missing_tools = [tool for tool in BUILD_TOOLS if shutil.which(tool) is None]
+    if missing_tools:
+        raise BuildUnavailable(
+            "Missing build tools: " + ", ".join(missing_tools) + ". Install them with: brew install meson ninja pkgconf"
+        )
     with tempfile.TemporaryDirectory(prefix="ffmpeg-lgpl-") as work:
-        source = _extract(tarball, Path(work))
-        _run(["./configure", *configure_args()], source, output)
-        _run(["make", f"-j{jobs or multiprocessing.cpu_count()}", "ffmpeg"], source, output)
+        work = Path(work)
+        (work / "dav1d-src").mkdir()
+        (work / "ffmpeg-src").mkdir()
+        env = build_dav1d(work / "dav1d-src", work / "dav1d-prefix", output)
+        source = _extract(tarball, work / "ffmpeg-src")
+        _run(["./configure", *configure_args()], source, output, env)
+        _run(["make", f"-j{jobs or multiprocessing.cpu_count()}", "ffmpeg"], source, output, env)
         binary = source / "ffmpeg"
         verify(binary)
         missing = verify_capabilities(binary)
@@ -164,8 +214,10 @@ def verify(binary):
 
 
 def verify_capabilities(binary):
-    """Features the apps rely on: VideoToolbox H.264 encoding and https. Returns missing names."""
+    """Features the apps rely on: VideoToolbox H.264 encoding, AV1 via dav1d, https. Returns missing names."""
     missing = []
+    if "libdav1d" not in _capture(binary, "-decoders"):
+        missing.append("libdav1d decoder")
     if "h264_videotoolbox" not in _capture(binary, "-encoders"):
         missing.append("h264_videotoolbox encoder")
     if not any(line.split()[:1] == ["https"] for line in _capture(binary, "-protocols").splitlines()):

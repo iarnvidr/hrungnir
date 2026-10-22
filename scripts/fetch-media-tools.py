@@ -63,8 +63,9 @@ if override:
 else:
     stamp = destination / "ffmpeg.source-sha256"
     built = destination / "ffmpeg"
+    recipe = digest + "-" + hashlib.sha256(pathlib.Path(ffmpeg_lgpl.__file__).read_bytes()).hexdigest()[:16]
     try:
-        if not (built.is_file() and stamp.exists() and stamp.read_text().strip() == digest):
+        if not (built.is_file() and stamp.exists() and stamp.read_text().strip() == recipe):
             raise ffmpeg_lgpl.LicenseError("no matching build yet")
         configuration = ffmpeg_lgpl.verify(built)
         print("ffmpeg: reusing the verified build for this source pin")
@@ -75,7 +76,7 @@ else:
         except ffmpeg_lgpl.BuildUnavailable as error:
             raise SystemExit(str(error))
         configuration = ffmpeg_lgpl.verify(built)
-        stamp.write_text(digest + "\n")
+        stamp.write_text(recipe + "\n")
 (destination / "ffmpeg.configuration.txt").write_text(configuration + "\n")
 print(f"ffmpeg {version}: LGPL-only build verified")
 print("configuration: " + configuration)

@@ -12,7 +12,7 @@ Posts, comments and media are downloaded to local storage before they are shown,
 
 ## Build from source
 
-Install the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/), Node.js and a Rust toolchain (1.85+).
+Install the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/), Node.js and a Rust toolchain (1.85+). Building the macOS helpers also needs `brew install meson ninja pkgconf`.
 
 ```sh
 npm ci
@@ -24,7 +24,7 @@ Apple Silicon app bundle, on a Mac:
 
 ```sh
 npm ci
-python3 scripts/fetch-media-tools.py                       # pinned yt-dlp; builds LGPL-only FFmpeg from source (takes a few minutes)
+python3 scripts/fetch-media-tools.py                       # pinned yt-dlp; builds LGPL-only FFmpeg and dav1d from source (a few minutes)
 cargo build --locked --manifest-path src-tauri/Cargo.toml \
   --release --target aarch64-apple-darwin --features custom-protocol
 python3 scripts/package-macos.py                           # assembles artifacts/Hrungnir.app

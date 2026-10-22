@@ -42,7 +42,10 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Fetch media helpers (builds LGPL-only FFmpeg from source)
+      - name: Install helper build tools
+        run: brew install meson ninja pkgconf
+
+      - name: Fetch media helpers (builds LGPL-only FFmpeg and dav1d from source)
         run: python3 scripts/fetch-media-tools.py
 
       - name: Test

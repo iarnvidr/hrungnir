@@ -35,7 +35,7 @@ class RecipeTests(unittest.TestCase):
         self.assertIn("--disable-autodetect", args)
         for flag in recipe.FORBIDDEN_IN_CONFIGURATION:
             self.assertNotIn(flag, args)
-        for needed in ("--enable-videotoolbox", "--enable-securetransport", "--arch=arm64"):
+        for needed in ("--enable-videotoolbox", "--enable-securetransport", "--enable-libdav1d", "--arch=arm64"):
             self.assertIn(needed, args)
 
     @unittest.skipIf(sys.platform == "darwin", "verify() executes the binary on macOS")
@@ -64,6 +64,21 @@ class RecipeTests(unittest.TestCase):
     def test_build_is_refused_off_apple_silicon(self):
         with self.assertRaises(recipe.BuildUnavailable):
             recipe.build(b"")
+
+    def test_dav1d_is_pinned_to_a_release_tarball_with_a_sha256(self):
+        self.assertRegex(recipe.DAV1D_SHA256, r"^[0-9a-f]{64}$")
+        self.assertTrue(recipe.DAV1D_URL.startswith("https://downloads.videolan.org/"))
+        self.assertIn(recipe.DAV1D_VERSION, recipe.DAV1D_URL)
+        self.assertIn("--default-library=static", recipe.DAV1D_MESON_ARGS)
+
+    def test_a_dav1d_download_that_does_not_match_the_pin_is_rejected(self):
+        from unittest import mock
+
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"tampered"
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            with self.assertRaises(RuntimeError):
+                recipe.fetch_dav1d()
 
 
 if __name__ == "__main__":
