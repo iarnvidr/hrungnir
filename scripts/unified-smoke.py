@@ -44,7 +44,7 @@ def wait_disk(predicate,seconds):
     raise AssertionError('Acquisition/download did not publish its completed cache entry')
 
 def cached_threads():
-    db=data/'xyz.ginnungagaps.offline-reader-exploration/cache.sqlite'
+    db=data/'io.github.iarnvidr.hrungnir/cache.sqlite'
     if not db.exists():return []
     with sqlite3.connect(db) as connection:return [json.loads(row[0]) for row in connection.execute('SELECT payload FROM threads')]
 
@@ -66,9 +66,9 @@ try:
         image=next(t for t in threads if any('i.redd.it' in u or 'preview.redd.it' in u for u in t.get('media_urls',[])))
         video=next(t for t in threads if any('v.redd.it' in u for u in t.get('media_urls',[])) or 'streamable.com' in (t.get('link_url') or ''))
         for post in (image,video):
-            assert (data/'xyz.ginnungagaps.offline-reader-exploration/media'/post['id']/'complete.json').exists(),'Fetch an image and video through the app before running this cached-reader check'
+            assert (data/'io.github.iarnvidr.hrungnir/media'/post['id']/'complete.json').exists(),'Fetch an image and video through the app before running this cached-reader check'
         click(f'.thread-item[data-thread-id="{image["id"]}"]')
-        wait_disk(lambda:(data/'xyz.ginnungagaps.offline-reader-exploration/media'/image['id']/'complete.json').exists(),100)
+        wait_disk(lambda:(data/'io.github.iarnvidr.hrungnir/media'/image['id']/'complete.json').exists(),100)
         time.sleep(2)
         wait(lambda:execute("return document.querySelector('#thread-view img')?.naturalWidth > 0"),100)
         assert execute("return document.querySelector('#thread-view img').src.startsWith('http://127.0.0.1:')")
@@ -76,7 +76,7 @@ try:
         print('PASS: real post comments and completed local image displayed',flush=True)
         screenshot('image.png')
         click(f'.thread-item[data-thread-id="{video["id"]}"]')
-        wait_disk(lambda:(data/'xyz.ginnungagaps.offline-reader-exploration/media'/video['id']/'complete.json').exists(),220)
+        wait_disk(lambda:(data/'io.github.iarnvidr.hrungnir/media'/video['id']/'complete.json').exists(),220)
         time.sleep(2)
         wait(lambda:execute("return Boolean(document.querySelector('#thread-view video'))"),220)
         print('PASS: selected real video downloaded before native local player appeared',flush=True)

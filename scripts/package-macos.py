@@ -35,6 +35,8 @@ for name in ('yt-dlp','ffmpeg'):
     if not (tools/name).is_file(): sys.exit('Run scripts/fetch-media-tools.py before packaging')
     shutil.copy2(tools/name,app/'Contents/Resources/bin'/name)
     (app/'Contents/Resources/bin'/name).chmod(0o755)
+if (tools/'ffmpeg.configuration.txt').is_file():
+    shutil.copy2(tools/'ffmpeg.configuration.txt',app/'Contents/Resources/licenses'/'ffmpeg-configuration.txt')
 with (app / "Contents/Info.plist").open("wb") as out:
     plistlib.dump({
         "CFBundleName": product_name,

@@ -1034,7 +1034,17 @@ fn prune_cache(store: State<'_, DesktopStore>, before: i64) -> Result<Snapshot, 
 }
 
 fn main() {
+    // Move data from the previous bundle identifier before anything creates new-identifier
+    // directories. An explicit data directory means the caller manages storage itself.
+    let migration_log = if std::env::var_os("HRUNGNIR_DATA_DIR").is_some() {
+        Vec::new()
+    } else {
+        reddit_offline::identifier_migration::run()
+    };
     if std::env::args().nth(1).as_deref() == Some("--cli") {
+        for line in &migration_log {
+            eprintln!("Hrungnir: {line}");
+        }
         let executable = std::env::current_exe().expect("Could not locate Hrungnir executable");
         #[cfg(target_os = "macos")]
         let tools = executable
@@ -1062,7 +1072,7 @@ fn main() {
     }
     let app = builder
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
+        .setup(move |app| {
             let directory = app.path().app_data_dir()?;
             std::fs::create_dir_all(&directory)?;
             let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -1093,6 +1103,9 @@ fn main() {
             };
             std::fs::create_dir_all(&directory)?;
             diagnostics::init(directory.clone())?;
+            for line in &migration_log {
+                event("app.identifier_migration", serde_json::json!({"detail": line}));
+            }
             let previous = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
                 event("app.panic", serde_json::json!({"error":info.to_string()}));

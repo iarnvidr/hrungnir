@@ -59,7 +59,9 @@ jobs:
         run: cargo test --locked
 
       - name: Packaging policy tests
-        run: python3 scripts/test-macos-policy.py
+        run: |
+          python3 scripts/test-macos-policy.py
+          python3 scripts/test-ffmpeg-lgpl.py
 
       - name: Reader syntax check
         run: node --check reader/app.js

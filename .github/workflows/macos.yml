@@ -41,7 +41,13 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Fetch media helpers
+      - name: Restore media helper cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: var/media-tools
+          key: media-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch-media-tools.py', 'scripts/ffmpeg_lgpl.py') }}
+
+      - name: Fetch media helpers (builds LGPL-only FFmpeg from source)
         run: python3 scripts/fetch-media-tools.py
 
       - name: Build (unsigned)
@@ -50,7 +56,9 @@ jobs:
         run: cargo build --locked --manifest-path src-tauri/Cargo.toml --release --target aarch64-apple-darwin --features custom-protocol
 
       - name: Test
-        run: cargo test --locked
+        run: |
+          cargo test --locked
+          python3 scripts/test-ffmpeg-lgpl.py
 
       - name: Assemble app bundle
         run: python3 scripts/package-macos.py

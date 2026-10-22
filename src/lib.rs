@@ -13,6 +13,7 @@ pub mod ca;
 pub mod cli;
 pub mod desktop;
 pub mod diagnostics;
+pub mod identifier_migration;
 pub mod library;
 pub mod library_bundle;
 pub mod linked_content;

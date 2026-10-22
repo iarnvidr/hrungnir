@@ -29,7 +29,7 @@ pub fn default_root() -> Result<PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(home).join(".local/share"));
-    Ok(base.join("xyz.ginnungagaps.offline-reader-exploration"))
+    Ok(base.join("io.github.iarnvidr.hrungnir"))
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>> {

@@ -24,13 +24,13 @@ Apple Silicon app bundle, on a Mac:
 
 ```sh
 npm ci
-python3 scripts/fetch-media-tools.py                       # pinned, checksum-verified yt-dlp and FFmpeg
+python3 scripts/fetch-media-tools.py                       # pinned yt-dlp; builds LGPL-only FFmpeg from source (takes a few minutes)
 cargo build --locked --manifest-path src-tauri/Cargo.toml \
   --release --target aarch64-apple-darwin --features custom-protocol
 python3 scripts/package-macos.py                           # assembles artifacts/Hrungnir.app
 ```
 
-`scripts/build-macos.sh` does the same as a Linux cross-build inside a container image you provide (`REDDIT_MACOS_BUILD_IMAGE`).
+`scripts/build-macos.sh` does the same as a Linux cross-build inside a container image you provide (`REDDIT_MACOS_BUILD_IMAGE`); build FFmpeg on a Mac first and pass it as `FFMPEG_LGPL_BINARY`. See [licenses/MEDIA-TOOLS.md](licenses/MEDIA-TOOLS.md) for the FFmpeg source and configuration.
 
 ## Documentation
 
