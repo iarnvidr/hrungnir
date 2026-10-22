@@ -80,6 +80,29 @@ class RecipeTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 recipe.fetch_dav1d()
 
+    def test_cli_fails_when_a_required_capability_is_missing(self):
+        import contextlib
+        import io
+        import runpy
+        from types import SimpleNamespace
+        from unittest import mock
+
+        def capture(args, **kwargs):
+            output = {
+                "-version": "configuration: " + " ".join(recipe.configure_args()),
+                "-L": "GNU Lesser General Public License",
+                "-encoders": "h264_videotoolbox",
+                "-protocols": "https",
+            }.get(args[-1], "")  # Deliberately omit the AV1 decoder.
+            return SimpleNamespace(stdout=output, returncode=0)
+
+        with mock.patch.object(sys, "argv", ["ffmpeg_lgpl.py", "verify", "fixture"]), \
+                mock.patch.object(pathlib.Path, "read_bytes", return_value=LGPL_BINARY), \
+                mock.patch("subprocess.run", side_effect=capture), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(SystemExit, "FFmpeg lacks: libdav1d decoder"):
+                runpy.run_path(str(pathlib.Path(recipe.__file__)), run_name="__main__")
+
 
 if __name__ == "__main__":
     unittest.main()

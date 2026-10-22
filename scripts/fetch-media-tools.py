@@ -77,6 +77,10 @@ else:
             raise SystemExit(str(error))
         configuration = ffmpeg_lgpl.verify(built)
         stamp.write_text(recipe + "\n")
+if sys.platform == "darwin":
+    missing = ffmpeg_lgpl.verify_capabilities(destination / "ffmpeg")
+    if missing:
+        raise SystemExit("FFmpeg lacks: " + ", ".join(missing))
 (destination / "ffmpeg.configuration.txt").write_text(configuration + "\n")
 print(f"ffmpeg {version}: LGPL-only build verified")
 print("configuration: " + configuration)

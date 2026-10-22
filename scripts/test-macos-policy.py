@@ -35,7 +35,7 @@ class MacPolicyTests(unittest.TestCase):
 
     def test_packaged_app_preserves_policy_identity_and_version(self):
         config = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text())
-        # Preserve the installed app's cache namespace while changing its branding.
+        # The public app uses its own cache namespace.
         self.assertEqual(config["identifier"], "io.github.iarnvidr.hrungnir")
         self.assertEqual(config["productName"], "Hrungnir")
         shared = plistlib.loads((ROOT / "src-tauri/Info.plist").read_bytes())

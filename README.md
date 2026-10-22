@@ -12,7 +12,7 @@ Posts, comments and media are downloaded to local storage before they are shown,
 
 ## Build from source
 
-Install the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/), Node.js and a Rust toolchain (1.85+). Building the macOS helpers also needs `brew install meson ninja pkgconf`.
+Install the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/), Node.js 22 and a current stable Rust toolchain (1.90+ for the locked desktop dependencies). Building the macOS helpers also needs Python 3.12+ and `brew install meson ninja pkgconf`.
 
 ```sh
 npm ci
@@ -36,7 +36,7 @@ python3 scripts/package-macos.py                           # assembles artifacts
 
 [Architecture](docs/ARCHITECTURE.md) · [macOS build and run](docs/MACOS.md) · [CLI](docs/CLI.md) · [Library](docs/LIBRARY.md) · [App links](docs/APP_LINKS.md) · [Support diagnostics](docs/SUPPORT.md) · [UX](docs/UX.md) · [Next steps](docs/PLAN.md) · [Contributing](CONTRIBUTING.md)
 
-Third-party notices for bundled components are in [`licenses/`](licenses/).
+Run the owner Mac acceptance commands in [the release checklist](docs/RELEASE-CHECKLIST.md) before approving a release. Third-party notices for bundled components are in [`licenses/`](licenses/).
 
 ## License
 

@@ -231,7 +231,8 @@ if __name__ == "__main__":
             print(verify(Path(sys.argv[2])))
         except LicenseError as error:
             sys.exit(f"NOT LGPL-only: {error}")
-        for name in verify_capabilities(Path(sys.argv[2])):
-            print(f"warning: missing {name}", file=sys.stderr)
+        missing = verify_capabilities(Path(sys.argv[2]))
+        if missing:
+            sys.exit("FFmpeg lacks: " + ", ".join(missing))
     else:
         sys.exit(__doc__)
