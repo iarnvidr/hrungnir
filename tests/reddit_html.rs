@@ -83,3 +83,30 @@ fn ca_is_private_reused_and_cannot_issue_unrelated_hosts() {
     }
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn popular_and_all_preserve_actual_subreddits_flairs_and_lazy_thumbnails() {
+    let html = r#"<div class="thing link" data-fullname="t3_a"><a class="title" href="https://example.org/news">News</a><a class="comments" href="/r/space/comments/a/news/">3 comments</a><span class="linkflairlabel">Official Source</span><a class="thumbnail"><img data-src="//b.thumbs.redditmedia.com/photo.jpg" src="data:image/gif;base64,ignored"></a></div>
+<div class="thing link" data-fullname="t3_b"><a class="title" href="/r/soccer/comments/b/clip/">Clip</a><a class="comments" href="/r/soccer/comments/b/clip/">4 comments</a><span class="linkflairlabel">Match Clip</span></div>"#;
+    for route in ["/r/popular/", "/r/all/"] {
+        let page = reddit_html::parse(response(route, html)).unwrap();
+        assert_eq!(page.threads.len(), 2);
+        assert_eq!(page.threads[0].subreddit, "space");
+        assert_eq!(page.threads[0].flair.as_deref(), Some("Official Source"));
+        assert_eq!(page.threads[1].flair.as_deref(), Some("Match Clip"));
+        assert_eq!(page.threads[0].thumbnail_url.as_deref(), Some("https://b.thumbs.redditmedia.com/photo.jpg"));
+        page.validate().unwrap();
+    }
+    assert!(reddit_html::parse(response("/r/unrelated/", html)).is_err());
+}
+
+#[test]
+fn self_post_body_outside_expando_keeps_paragraphs_and_link_destinations() {
+    let html = r#"<div class="thing link" data-fullname="t3_post"><a class="title" href="/r/television/comments/post/discussion/">Episode discussions</a><a class="comments empty" href="/r/television/comments/post/discussion/">0 comments</a><div class="usertext-body"><div class="md"><p>Season five</p><p><a href="/r/television/comments/episode/one/">Episode one</a></p><script>never display this</script></div></div></div>"#;
+    let page = reddit_html::parse(response("/r/television/comments/post/discussion/", html)).unwrap();
+    let post = &page.threads[0];
+    assert!(post.body.contains("Season five\n\nEpisode one"));
+    assert!(post.body.contains("https://www.reddit.com/r/television/comments/episode/one/"));
+    assert!(!post.body.contains("never display"));
+    assert!(reddit_offline::browsing::comments_ready(post));
+}

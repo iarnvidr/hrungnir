@@ -85,6 +85,12 @@
   const mediaByThread = new Map();
   const mediaHintsByThread = new Map();
   const threadDownloadsInFlight = new Map();
+  const postLoadsInFlight = new Map();
+  const readerMediaStates = new Map();
+  const postScrollPositions = new Map();
+  const articleRequests = new Map();
+  let selectedFlair = '';
+  let flairSource = '';
   const cachedThreadOpensInFlight = new Map();
   const playbackEventTimes = new WeakMap();
   const mediaWatchPlayers = new Map();
@@ -194,15 +200,6 @@
     const date = new Date(Number(timestamp) * 1000);
     if (!Number.isFinite(date.getTime())) return 'time unavailable';
     return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-  }
-
-  function formatAge(timestamp) {
-    const seconds = Math.max(0, Math.floor(Date.now() / 1000 - Number(timestamp)));
-    if (!Number.isFinite(seconds)) return 'age unknown';
-    if (seconds < 60) return 'just now';
-    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-    return `${Math.floor(seconds / 86400)}d ago`;
   }
 
   function formatBytes(value) {
@@ -1079,16 +1076,22 @@
     if (!thread) return;
     const collection = $('#save-post-collection').value.trim();
     const keepForever = $('#save-post-forever').checked;
+    const button = $('#save-post-button');
+    const status = $('#save-post-status');
+    button.disabled = true;
+    button.textContent = 'Saving…';
+    status.textContent = 'Downloading an offline copy. You can keep browsing.';
     try {
       await runLibraryMutation('save_library_post', { id: thread.id, collection, keep_forever: keepForever }, 'Post saved in the local library.');
-      $('#save-post-status').textContent = 'Saved in the local library.';
-      const summary = ui.view.querySelector('.reader-save-panel > summary');
-      const button = ui.view.querySelector('.reader-save-panel .button');
-      if (summary) summary.textContent = 'Saved post · edit library options';
-      if (button) button.textContent = 'Update saved post';
+      if (activeId === thread.id) {
+        ui.view.querySelector('.reader-library-actions')?.replaceWith(renderReaderLibraryActions(thread));
+        $('#save-post-status').textContent = 'Saved for offline reading.';
+        const item = libraryState.items.find((item) => item.id === thread.id);
+        if (item?.media?.length) { mediaByThread.set(thread.id, item.media); refreshReaderMedia(thread.id); }
+      }
     } catch (error) {
-      $('#save-post-status').textContent = `Could not save this post. ${explainError(error)}`;
-    }
+      status.textContent = `Could not save this post. ${explainError(error)}`;
+    } finally { if (button.isConnected) { button.disabled = false; button.textContent = 'Save post'; } }
   }
 
   async function saveLinkedContent() {
@@ -1113,6 +1116,8 @@
   function openLibraryLinkForm(thread) {
     const suggestedUrl = String(thread && thread.link_url || '').trim();
     if (suggestedUrl) ui.saveLinkUrl.value = suggestedUrl;
+    const hint = thread && mediaHintsByThread.get(thread.id);
+    ui.saveLinkKind.value = ['video', 'image'].includes(hint?.kind) ? hint.kind : 'article';
     const url = ui.saveLinkUrl.value.trim();
     const kind = ui.saveLinkKind.value;
     const existing = libraryState.items.find((item) => item.kind === kind && String(item.thread && item.thread.link_url || '').trim() === url);
@@ -1181,7 +1186,17 @@
   }
 
   function renderList() {
-    const threads = redditSearch ? redditSearch.threads : (listingBySubreddit.get(activeSubreddit) || []);
+    const sourceThreads = redditSearch ? redditSearch.threads : (listingBySubreddit.get(activeSubreddit) || []);
+    const sourceKey = redditSearch ? `search:${redditSearch.query}` : activeSubreddit;
+    if (flairSource !== sourceKey) { selectedFlair = ''; flairSource = sourceKey; }
+    const flairs = [...new Set(sourceThreads.map((thread) => thread.flair).filter(Boolean))].sort();
+    if (!flairs.includes(selectedFlair)) selectedFlair = '';
+    const filter = $('#flair-filter');
+    filter.replaceChildren(new Option('All flairs', ''));
+    for (const flair of flairs) filter.append(new Option(flair, flair));
+    filter.value = selectedFlair;
+    $('#flair-filter-wrap').hidden = flairs.length === 0;
+    const threads = selectedFlair ? sourceThreads.filter((thread) => thread.flair === selectedFlair) : sourceThreads;
     updateSortNotice();
     ui.postSort.value = redditSearch ? redditSearch.sort : preferences.postSort;
     ui.topPeriod.value = redditSearch ? redditSearch.period : preferences.topPeriod;
@@ -1201,7 +1216,6 @@
       card.setAttribute('aria-busy', String(thread.id === pendingId));
       const sub = element('span', 'thread-subreddit', `r/${thread.subreddit}`);
       const title = element('span', 'thread-title', thread.title);
-      const date = element('span', 'thread-date', `cached · ${formatAge(thread.captured_at)}`);
       const open = element('button', 'thread-open');
       open.type = 'button';
       const preview = snapshot && snapshot.link_previews && snapshot.link_previews[thread.id];
@@ -1217,11 +1231,27 @@
         thumb.append(image);
       }
       const meta = element('span', 'thread-meta');
-      meta.append(sub, date);
+      meta.append(sub);
+      if (isExternalWebLink(thread.link_url)) meta.append(element('span', 'thread-domain', safeDomain(thread.link_url)));
       open.append(thumb, element('span', 'thread-open-copy'));
       open.lastChild.append(title, meta);
-      open.addEventListener('click', () => void selectThread(thread.id, thread.id));
+      open.addEventListener('click', (event) => {
+        if (event.metaKey || event.ctrlKey) openPostInBackground(thread);
+        else void selectThread(thread.id, thread.id);
+      });
+      open.addEventListener('auxclick', (event) => {
+        if (event.button === 1) { event.preventDefault(); openPostInBackground(thread); }
+      });
       const actions = element('div', 'thread-card-actions');
+      if (thread.flair) actions.append(flairButton(thread.flair));
+      const background = element('button', 'link-button background-tab-open', 'Open in background');
+      background.type = 'button';
+      background.textContent = '';
+      background.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="7" y="7" width="14" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h2"/></svg>';
+      background.title = 'Open in background tab (⌘/Ctrl-click or middle-click)';
+      background.setAttribute('aria-label', `Open ${thread.title} in a background tab`);
+      background.addEventListener('click', () => openPostInBackground(thread));
+      actions.append(background);
       const hint = mediaHintsByThread.get(thread.id);
       const assets = mediaByThread.get(thread.id) || [];
       const cachedKinds = [...new Set(assets.map((asset) => asset && asset.kind).filter((kind) => ['image', 'video', 'audio'].includes(kind)))];
@@ -1258,9 +1288,6 @@
         mediaButton.addEventListener('click', () => void toggleInlineMedia(thread.id, card));
         actions.append(mediaButton);
       }
-      if (Date.now() / 1000 - Number(thread.captured_at) > 6 * 3600) {
-        actions.append(element('span', 'stale-badge', 'stale'));
-      }
       const inline = element('div', 'inline-media');
       inline.hidden = !inlineExpanded.has(thread.id) && !expandedArticles.has(thread.id);
       inline.dataset.inlineMediaFor = thread.id;
@@ -1272,6 +1299,21 @@
     const index = threads.findIndex((thread) => thread.id === activeId);
     keyboardThread = index < 0 ? 0 : index;
   }
+
+  function flairButton(flair) {
+    const button = element('button', 'post-flair', flair);
+    button.type = 'button';
+    button.setAttribute('aria-label', `Filter posts by ${flair}`);
+    button.setAttribute('aria-pressed', String(selectedFlair === flair));
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      selectedFlair = selectedFlair === flair ? '' : flair;
+      setTab('browse');
+      renderList();
+    });
+    return button;
+  }
+  $('#flair-filter').addEventListener('change', (event) => { selectedFlair = event.target.value; renderList(); });
 
   function requestLinkPreviews(threads) {
     if (!invoke || !Array.isArray(threads)) return;
@@ -1290,8 +1332,10 @@
   }
 
   async function fetchLinkPreviewBatches(ids) {
-    for (let start = 0; start < ids.length; start += 100) {
-      const batch = ids.slice(start, start + 100);
+    // Publish each small group as it completes instead of waiting for every
+    // thumbnail in the listing (including slow or unavailable hosts).
+    for (let start = 0; start < ids.length; start += 4) {
+      const batch = ids.slice(start, start + 4);
       try {
         const result = await invoke('fetch_link_previews', { ids: batch });
         const previews = result && result.link_previews && typeof result.link_previews === 'object' ? result.link_previews : result;
@@ -1382,10 +1426,11 @@
       if (!url) {
         container.append(document.createTextNode(candidate));
       } else {
-        const link = element('button', 'reader-text-link', candidate);
-        link.type = 'button';
+        const link = element('a', 'reader-text-link', candidate);
+        link.href = url;
         link.setAttribute('aria-label', `Open link ${safeDomain(url)}`);
-        link.addEventListener('click', () => void openWebLink(url));
+        link.addEventListener('click', (event) => { event.preventDefault(); void openTextLink(url, event.metaKey || event.ctrlKey); });
+        link.addEventListener('auxclick', (event) => { if (event.button === 1) { event.preventDefault(); void openTextLink(url, true); } });
         container.append(link);
       }
       cursor = start + candidate.length;
@@ -1411,27 +1456,85 @@
   async function toggleLinkArticle(thread) {
     if (expandedArticles.has(thread.id)) {
       expandedArticles.delete(thread.id);
-      renderList();
+      refreshArticlePanels(thread);
       return;
     }
     expandedArticles.add(thread.id);
-    renderList();
+    refreshArticlePanels(thread);
     const cached = linkArticleStates.get(thread.id);
     if (cached && cached.status === 'loaded') return;
-    linkArticleStates.set(thread.id, { status: 'loading' });
-    renderList();
-    try {
-      const article = await invoke('fetch_link_article', { id: thread.id });
-      linkArticleStates.set(thread.id, { status: 'loaded', article: article || {} });
-    } catch (error) {
-      linkArticleStates.set(thread.id, { status: 'error', message: `Could not load readable article. ${explainError(error)}` });
+    await loadArticle(thread);
+  }
+
+  function refreshArticlePanels(thread) {
+    const card = ui.list.querySelector(`[data-thread-id="${CSS.escape(thread.id)}"]`);
+    if (card) {
+      const region = card.querySelector('.inline-media');
+      const toggle = card.querySelector('.link-article-toggle');
+      const expanded = expandedArticles.has(thread.id);
+      if (toggle) { toggle.textContent = expanded ? 'Hide article' : 'Expand article'; toggle.setAttribute('aria-expanded', String(expanded)); }
+      if (region && !inlineExpanded.has(thread.id)) {
+        region.replaceChildren();
+        region.hidden = !expanded;
+        if (expanded) region.append(renderLinkArticle(thread));
+      }
     }
-    renderList();
+    if (activeId === thread.id) {
+      const slot = ui.view.querySelector('.reader-article-slot');
+      if (slot) slot.replaceChildren(renderLinkArticle(thread));
+    }
+  }
+
+  function loadArticle(thread) {
+    if (articleRequests.has(thread.id)) return articleRequests.get(thread.id);
+    if (linkArticleStates.get(thread.id)?.status === 'loaded') return Promise.resolve();
+    linkArticleStates.set(thread.id, { status: 'loading' });
+    refreshArticlePanels(thread);
+    const pending = invoke('fetch_link_article', { id: thread.id }).then((article) => {
+      linkArticleStates.set(thread.id, { status: 'loaded', article: article || {} });
+    }).catch((error) => {
+      linkArticleStates.set(thread.id, { status: 'error', message: `Could not load article. ${explainError(error)}` });
+    }).finally(() => { articleRequests.delete(thread.id); refreshArticlePanels(thread); });
+    articleRequests.set(thread.id, pending);
+    return pending;
   }
 
   async function openWebLink(url) {
     try { await invoke('open_web_link', { url }); }
     catch (error) { toast(`Could not open link. ${explainError(error)}`); }
+  }
+
+  async function openTextLink(value, background = false) {
+    const url = new URL(value);
+    const reddit = url.hostname === 'reddit.com' || url.hostname.endsWith('.reddit.com');
+    const post = reddit && url.pathname.match(/^\/r\/([a-z0-9_]{2,21})\/comments\/([a-z0-9]+)(?:\/|$)/i);
+    if (!post) {
+      const subreddit = reddit && url.pathname.match(/^\/r\/([a-z0-9_]{2,21})\/?$/i);
+      if (subreddit) return browseSubreddit(`/r/${subreddit[1]}`);
+      return openWebLink(value);
+    }
+    const id = `t3_${post[2]}`;
+    const known = threadCache.get(id);
+    if (known && !unavailableThreadIds.has(id)) {
+      if (background) openPostInBackground(known);
+      else await selectThread(id);
+      return;
+    }
+    const transition = background ? null : ++operationSequence;
+    if (!background) { setTab('reader'); setReaderMessage('Opening linked post…'); }
+    try {
+      const result = await invoke('open_link_post', { url: value });
+      const thread = acceptThreadDownload(result, id, { allowNotLoaded: true });
+      mediaByThread.set(id, result.media);
+      ensurePostTab(thread, id, { activate: !background });
+      if (!background && transition === operationSequence) {
+        activeId = id;
+        browseDraftOpen = false;
+        pendingAnchor = null;
+        draw();
+        window.scrollTo(0, 0);
+      }
+    } catch (error) { toast(`Could not open linked post. ${explainError(error)}`); }
   }
 
   function makeCommentTree(thread) {
@@ -1471,7 +1574,7 @@
     section.setAttribute('aria-label', `Comment ${comment.id}`);
     const card = element('div', 'comment-card');
     const head = element('div', 'comment-head');
-    head.append(element('strong', '', comment.author || comment.id), element('span', '', comment.score === undefined ? '' : `${comment.score} points`));
+    head.append(element('strong', '', comment.author || 'Comment'), element('span', '', comment.score === undefined ? '' : `${comment.score} points`));
     const content = element('div', 'comment-content');
     const body = element('p', 'comment-body');
     appendLinkedText(body, comment.body);
@@ -1669,32 +1772,43 @@
     releaseMediaWatchesWithin(ui.view);
     ui.view.replaceChildren();
     const topline = element('div', 'thread-topline');
-    topline.append(element('span', 'subreddit', `r/${thread.subreddit}`), document.createTextNode(` · fetched ${formatDate(thread.captured_at)}`));
+    topline.append(element('span', 'subreddit', `r/${thread.subreddit}`));
+    if (thread.flair) topline.append(flairButton(thread.flair));
     ui.view.append(topline, element('h1', '', thread.title));
     ui.view.append(renderReaderLibraryActions(thread));
     const body = element('p', 'thread-body');
     appendLinkedText(body, thread.body);
-    ui.view.append(body);
-    ui.view.append(renderMedia(thread.id));
+    if (thread.body) ui.view.append(body);
+    const hint = mediaHintsByThread.get(thread.id);
+    const articleLink = isExternalWebLink(thread.link_url) && !hint && !(mediaByThread.get(thread.id) || []).length;
+    if (articleLink) {
+      const articleSlot = element('div', 'reader-article-slot');
+      articleSlot.append(renderLinkArticle(thread));
+      ui.view.append(articleSlot);
+      void loadArticle(thread);
+    }
+    const mediaSlot = element('div', 'reader-media-slot');
+    ui.view.append(mediaSlot);
+    refreshReaderMedia(thread.id);
     const comments = thread.comments || [];
     const isPartial = thread.comments_status === 'partial_browser' || thread.comments_status === 'partial_proxy';
-    const header = element('div', 'comments-header', `Comments · ${comments.length}`);
+    const header = element('div', 'comments-header', thread.comments_status === 'not_loaded' ? 'Comments' : `${comments.length} ${comments.length === 1 ? 'comment' : 'comments'}`);
     ui.view.append(header);
     if (isPartial) {
-      ui.view.append(element('div', 'comment-note', 'Downloaded comments · additional replies may be unavailable.'));
+      header.title = 'Some additional replies may be unavailable.';
     }
     if (thread.comments_status === 'not_loaded') {
-      ui.view.append(element('p', 'muted comment-note cached-listing-note', 'Cached listing; comments were not downloaded.'));
+      ui.view.append(element('p', 'muted comment-note cached-listing-note', postLoadsInFlight.has(thread.id) ? 'Loading comments…' : 'Open this post to load its discussion.'));
     } else if (comments.length) {
       const list = element('div', 'comment-list');
       const byParent = makeCommentTree(thread);
       for (const root of (byParent.get(thread.id) || [])) list.append(renderComment(thread, root, byParent, 0));
       ui.view.append(list);
     } else {
-      ui.view.append(element('p', 'muted comment-note', 'No comments were found in this post.'));
+      ui.view.append(element('p', 'muted comment-note', 'No comments yet.'));
     }
-    if (anchor) requestAnimationFrame(() => {
-      const target = anchor === thread.id ? ui.view.querySelector('.thread-body') : ui.view.querySelector(`[data-comment-id="${CSS.escape(anchor)}"]`);
+    if (anchor && anchor !== thread.id) requestAnimationFrame(() => {
+      const target = ui.view.querySelector(`[data-comment-id="${CSS.escape(anchor)}"]`);
       if (target) {
         target.classList.add('anchor-target');
         target.scrollIntoView({ block: 'center', behavior: 'auto' });
@@ -1706,8 +1820,14 @@
   function renderReaderLibraryActions(thread) {
     const wrap = element('div', 'reader-library-actions');
     const saved = libraryState.items.some((item) => item.id === thread.id && item.kind === 'post');
+    const save = element('button', 'button primary save-post-button', saved ? 'Saved to Library' : 'Save post');
+    save.id = 'save-post-button';
+    save.type = 'button';
+    save.setAttribute('aria-pressed', String(saved));
+    save.addEventListener('click', () => { if (saved) post.open = !post.open; else void saveCurrentPost(); });
+    wrap.append(save);
     const post = element('details', 'reader-save-panel');
-    const summary = element('summary', '', saved ? 'Saved post · edit library options' : 'Save post to Library');
+    const summary = element('summary', '', 'Save options');
     post.append(summary);
     const postFields = element('div', 'reader-save-fields');
     const collectionLabel = element('label', '', 'Collection');
@@ -1721,24 +1841,64 @@
     forever.type = 'checkbox';
     const existingPost = libraryState.items.find((item) => item.id === thread.id && item.kind === 'post');
     forever.checked = existingPost ? Boolean(existingPost.keep_forever) : true;
-    foreverLabel.append(forever, document.createTextNode('Keep post and its media forever'));
-    const save = element('button', 'button primary', saved ? 'Update saved post' : 'Save post');
-    save.type = 'button';
-    save.addEventListener('click', () => void saveCurrentPost());
+    foreverLabel.append(forever, document.createTextNode('Keep offline until I remove it'));
     const saveStatus = element('p', 'small muted');
     saveStatus.id = 'save-post-status';
     saveStatus.setAttribute('role', 'status');
     saveStatus.setAttribute('aria-live', 'polite');
-    postFields.append(collectionLabel, foreverLabel, save, saveStatus);
+    postFields.append(element('p', 'small muted', 'Saves this post, its comments and media for offline reading.'), collectionLabel, foreverLabel);
+    const update = element('button', 'button secondary', 'Save with these options');
+    update.type = 'button';
+    update.addEventListener('click', () => void saveCurrentPost());
+    postFields.append(update);
+    if (saved) {
+      const remove = element('button', 'link-button', 'Remove from Library');
+      remove.type = 'button';
+      remove.addEventListener('click', async () => { await removeLibraryItem(thread.id); if (activeId === thread.id) ui.view.querySelector('.reader-library-actions')?.replaceWith(renderReaderLibraryActions(thread)); });
+      postFields.append(remove);
+    }
     post.append(postFields);
     wrap.append(post);
 
-    const saveLink = element('button', 'button secondary', 'Save linked content…');
+    const saveLink = element('button', 'button secondary', 'Save article or link separately…');
     saveLink.id = 'reader-save-link';
     saveLink.type = 'button';
     saveLink.addEventListener('click', () => openLibraryLinkForm(thread));
-    wrap.append(saveLink);
+    if (isExternalWebLink(thread.link_url)) postFields.append(saveLink);
+    wrap.append(saveStatus);
     return wrap;
+  }
+
+  function refreshReaderMedia(id) {
+    if (activeId !== id) return;
+    const slot = ui.view.querySelector('.reader-media-slot');
+    if (!slot) return;
+    releaseMediaWatchesWithin(slot);
+    slot.replaceChildren();
+    if ((mediaByThread.get(id) || []).length) { slot.append(renderMedia(id, { collapsible: false, inline: true })); return; }
+    const hint = mediaHintsByThread.get(id);
+    if (!hint) return;
+    const state = readerMediaStates.get(id);
+    const label = { image: 'image', video: 'video', audio: 'audio' }[hint.kind] || 'media';
+    const panel = element('div', 'reader-media-pending');
+    const button = element('button', 'button secondary', state?.loading ? `Loading ${label}…` : `Load ${label}`);
+    button.type = 'button';
+    button.disabled = Boolean(state?.loading);
+    button.addEventListener('click', () => void loadReaderMedia(id));
+    panel.append(button);
+    if (state?.error) panel.append(element('p', 'small error-text', state.error));
+    slot.append(panel);
+  }
+
+  async function loadReaderMedia(id) {
+    if (readerMediaStates.get(id)?.loading) return;
+    readerMediaStates.set(id, { loading: true });
+    refreshReaderMedia(id);
+    try {
+      await getThreadDownload(id);
+      readerMediaStates.delete(id);
+    } catch (error) { readerMediaStates.set(id, { error: `Could not load media. ${explainError(error)}` }); }
+    refreshReaderMedia(id);
   }
 
   function renderPostTabs() {
@@ -1833,7 +1993,7 @@
     else if (action === 'close') handleCloseActivePostTab();
   }
 
-  function ensurePostTab(thread, anchor, { cachedOnly = false } = {}) {
+  function ensurePostTab(thread, anchor, { cachedOnly = false, activate = true } = {}) {
     let tab = preferences.postTabs.find((item) => item.id === thread.id);
     if (!tab) {
       tab = { id: thread.id, anchor: anchor || thread.id, cachedOnly };
@@ -1842,7 +2002,7 @@
       tab.anchor = anchor || tab.anchor || thread.id;
       tab.cachedOnly = cachedOnly;
     }
-    preferences.activePostId = thread.id;
+    if (activate) preferences.activePostId = thread.id;
     savePreferences();
     renderPostTabs();
   }
@@ -2405,7 +2565,6 @@
       const metadata = element('span', 'cache-search-meta');
       metadata.append(element('span', 'cache-search-subreddit', `r/${typeof row.subreddit === 'string' ? row.subreddit : 'unknown'}`));
       if (row.comment_id) metadata.append(element('span', 'cache-search-comment-hit', 'Comment match'));
-      if (Number.isFinite(Number(row.captured_at))) metadata.append(element('time', 'cache-search-age', formatDate(Number(row.captured_at))));
       hit.append(title, metadata);
       if (typeof row.snippet === 'string' && row.snippet) hit.append(element('span', 'cache-search-snippet', row.snippet.slice(0, 320)));
       hit.addEventListener('click', () => void openCachedSearchHit({
@@ -2558,53 +2717,52 @@
     }
     const selected = threadCache.get(id) || [...listingBySubreddit.values()].flat().find((thread) => thread.id === id) || (preferences.postTabs.some((tab) => tab.id === id) ? { id, title: id } : null);
     if (!selected) return;
+    if (activeId && !ui.readerPanel.hidden) postScrollPositions.set(activeId, window.scrollY);
     const transition = ++operationSequence;
     const startedAt = performance.now();
     pendingId = id;
     const tab = preferences.postTabs.find((item) => item.id === id);
     const cachedOnly = Boolean(intent === 'restore' && tab && tab.cachedOnly);
-    renderList();
-    const message = cachedOnly ? `Opening cached copy of “${selected.title}”…` : `Checking cached post and media for “${selected.title}”…`;
-    setFeedback(message);
-    setStatus(message);
-    startOperationProgress(cachedOnly ? 'Opening cached post' : 'Checking cached post and media', transition);
-    if (!currentThread()) setReaderMessage(message);
+    const pendingDownload = cachedOnly ? getCachedThreadDownload(id) : getPostDownload(id);
+    if (tab && !cachedOnly) tab.cachedOnly = false;
+    activeId = id;
+    browseDraftOpen = false;
+    loadedThreadIds.add(id);
+    ensurePostTab(selected, anchor, { cachedOnly });
+    pendingAnchor = anchor !== id ? anchor : null;
+    draw();
+    if (switchToReader) setTab('reader');
+    if (!ui.readerPanel.hidden) window.scrollTo(0, postScrollPositions.get(id) || 0);
+    setFeedback('');
+    setStatus('Opening post…');
     try {
-      let download;
-      if (cachedOnly) {
-        download = await getCachedThreadDownload(id);
-      } else {
-        if (tab) tab.cachedOnly = false;
-        download = await getThreadDownload(id);
-      }
+      const download = await pendingDownload;
       if (transition !== operationSequence) return;
       if (browseDraftOpen) browseDraftOpen = false;
       const downloadedThread = download.thread;
       pendingId = null;
       activeId = id;
-      pendingAnchor = anchor || id;
+      pendingAnchor = anchor && anchor !== id ? anchor : null;
       ensurePostTab(downloadedThread, anchor || id, { cachedOnly: Boolean(cachedOnly) });
       const renderStartedAt = performance.now();
+      const readerScroll = window.scrollY;
       draw();
+      requestAnimationFrame(() => { if (activeId === id) window.scrollTo(0, readerScroll); });
       recordClientEvent('reader_render', performance.now() - renderStartedAt, downloadedThread.comments.length + download.media.length);
       await focusAnchor(id, anchor, null);
-      if (switchToReader) setTab('reader');
       setFeedback('');
       const elapsed = performance.now() - startedAt;
       recordClientEvent('post_fetch', elapsed, downloadedThread.comments.length + download.media.length);
-      setStatus(cachedOnly
-        ? 'Opened cached post · no source fetch'
-        : download.cached
-          ? `Opened from cache · ${download.media.length} local media item${download.media.length === 1 ? '' : 's'} · ${formatElapsed(elapsed)}`
-          : `Post ready · ${download.media.length} local media item${download.media.length === 1 ? '' : 's'} · ${formatElapsed(elapsed)}`, 'ready');
+      setStatus('Ready', 'ready');
+      if (!cachedOnly && !ui.readerPanel.hidden && mediaHintsByThread.has(id) && !(mediaByThread.get(id) || []).length) void loadReaderMedia(id);
     } catch (error) {
       if (transition !== operationSequence) return;
       recordClientEvent('post_fetch', performance.now() - startedAt, 0);
       pendingId = null;
       renderList();
       if (!currentThread()) setReaderMessage('This post could not be loaded.', true);
-      setFeedback(`Could not load this post. Your previous reader content is preserved. ${explainError(error)}`, true, () => void selectThread(id, anchor, true, cachedOnly ? 'restore' : 'normal'));
-      setStatus('Post fetch failed', 'error');
+      setFeedback(`Could not load the discussion. ${explainError(error)}`, true, () => void selectThread(id, anchor, true, cachedOnly ? 'restore' : 'normal'));
+      setStatus('Discussion unavailable', 'error');
     } finally {
       stopOperationProgress(transition);
     }
@@ -2612,6 +2770,24 @@
     if (item) keyboardThread = Number(item.dataset.threadIndex);
     const thread = currentThread();
     if (thread) ui.input.value = `/r/${thread.subreddit}`;
+  }
+
+  function getPostDownload(id) {
+    let pending = postLoadsInFlight.get(id);
+    if (!pending) {
+      pending = invoke('fetch_thread', { id, include_media: false }).then((result) => {
+        const thread = acceptThreadDownload(result, id, { allowNotLoaded: true });
+        if (result.media.length || !mediaByThread.has(id)) mediaByThread.set(id, result.media);
+        return { cached: result.cache?.comments_hit === true, thread, media: result.media };
+      }).finally(() => postLoadsInFlight.delete(id));
+      postLoadsInFlight.set(id, pending);
+    }
+    return pending;
+  }
+
+  function openPostInBackground(thread) {
+    ensurePostTab(thread, thread.id, { activate: false });
+    void getPostDownload(thread.id).then(() => renderPostTabs()).catch((error) => toast(`Could not load background post. ${explainError(error)}`));
   }
 
   async function getCachedThreadDownload(id) {

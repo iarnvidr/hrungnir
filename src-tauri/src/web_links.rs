@@ -8,7 +8,6 @@ use std::{
     collections::BTreeMap,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
 };
 use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
 
@@ -55,14 +54,12 @@ pub async fn fetch_link_previews(
     }
     drop(cache);
     let started = std::time::Instant::now();
-    let result = tokio::time::timeout(
-        Duration::from_secs(12),
-        reddit_offline::link_preview::download(&links.root, &threads),
-    )
-    .await;
+    // Each image already has a bounded request timeout. A batch-wide deadline
+    // used to cancel later thumbnails before their requests could finish.
+    let result = reddit_offline::link_preview::download(&links.root, &threads).await;
     event(
         "listing.previews",
-        serde_json::json!({"posts":threads.len(),"elapsed_ms":started.elapsed().as_millis(),"complete":matches!(result,Ok(Ok(())))}),
+        serde_json::json!({"posts":threads.len(),"elapsed_ms":started.elapsed().as_millis(),"complete":result.is_ok()}),
     );
     Ok(reddit_offline::link_preview::entries(
         &links.root,

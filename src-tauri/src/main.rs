@@ -149,7 +149,7 @@ async fn open_link_post(
             browser.acquire(target.url, true).await?;
         }
     }
-    fetch_thread(browser, media, id).await
+    fetch_thread(browser, media, id, Some(false)).await
 }
 
 async fn on_main<T: Send + 'static>(
@@ -364,11 +364,14 @@ async fn delete_subreddit_group(
 
 #[tauri::command(rename_all = "snake_case")]
 async fn save_library_post(
+    browser: State<'_, Arc<browser::Browser>>,
     media: State<'_, MediaStore>,
     id: String,
     collection: String,
     keep_forever: bool,
 ) -> Result<serde_json::Value, String> {
+    // Saving is the explicit offline-download action. Opening a post is not.
+    fetch_thread(browser, media.clone(), id.clone(), Some(true)).await?;
     let _guard = media.gate.lock().await;
     let root = media
         .root
@@ -664,13 +667,7 @@ async fn open_cached_thread(
     })
     .await
     .map_err(|e| e.to_string())??;
-    if download.media.iter().any(|asset| asset.kind == "video" && asset.poster.is_none()) {
-        let _guard = media.gate.lock().await;
-        if let Err(error) = reddit_offline::media::ensure_posters(&root, &media.tools, &id).await {
-            event("media.poster_error", serde_json::json!({"thread_id":id,"error":error}));
-        }
-        download.media = completed_assets(&root, &download.snapshot.threads[0]).unwrap_or_default();
-    }
+    // A cache read must never queue behind downloads or poster generation.
     rewrite_media_assets(&mut download.media, &media.server.base, &id);
     Ok(download)
 }
@@ -704,11 +701,12 @@ fn validate_cached_media(
     Ok(comments_hit && media_hit)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn fetch_thread(
     browser: State<'_, Arc<browser::Browser>>,
     media: State<'_, MediaStore>,
     id: String,
+    include_media: Option<bool>,
 ) -> Result<ThreadDownload, String> {
     let started = std::time::Instant::now();
     browser.record_detail(
@@ -768,7 +766,7 @@ async fn fetch_thread(
         // subreddit can be acquired while a selected post's media is downloading.
         let mut assets = completed_assets(&media.root, thread);
         let mut media_reused = assets.is_some();
-        if assets.is_none() {
+        if assets.is_none() && include_media.unwrap_or(true) {
             if thread.source.as_deref()==Some("linked") { return Err("Saved linked files are missing; restore a library backup or save the URL again".into()); }
             let queue = std::time::Instant::now();
             browser.record("media_queue", "running", 0, None);
@@ -791,7 +789,7 @@ async fn fetch_thread(
             }
         }
         let mut assets = assets.unwrap_or_default();
-        if assets.iter().any(|asset| asset.kind == "video" && asset.poster.is_none()) {
+        if include_media.unwrap_or(true) && assets.iter().any(|asset| asset.kind == "video" && asset.poster.is_none()) {
             let _guard = media.gate.lock().await;
             if let Err(error) = reddit_offline::media::ensure_posters(&media.root, &media.tools, &thread.id).await {
                 event("media.poster_error", serde_json::json!({"thread_id":thread.id,"error":error}));
