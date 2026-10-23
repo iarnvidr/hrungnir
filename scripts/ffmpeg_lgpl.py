@@ -205,7 +205,7 @@ def verify(binary):
     if configuration is None:
         raise LicenseError("could not read the configure string from `ffmpeg -version`")
     _check_flags(configuration)
-    license_text = _capture(binary, "-L")
+    license_text = " ".join(_capture(binary, "-L").split())
     if "GNU Lesser General Public License" not in license_text:
         raise LicenseError("`ffmpeg -L` does not report the LGPL")
     if "GNU General Public License" in license_text.replace("GNU Lesser General Public License", ""):

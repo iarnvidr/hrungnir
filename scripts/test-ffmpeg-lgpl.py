@@ -54,6 +54,17 @@ class RecipeTests(unittest.TestCase):
         self.assertIsNone(recipe.static_configuration(b"not ffmpeg"))
         recipe._check_flags(recipe.static_configuration(LGPL_BINARY))
 
+    def test_native_license_check_accepts_wrapped_lgpl_text(self):
+        from unittest import mock
+
+        configuration = " ".join(recipe.configure_args())
+        with mock.patch.object(sys, "platform", "darwin"), \
+                mock.patch.object(recipe, "_capture", side_effect=[
+                    "configuration: " + configuration,
+                    "GNU Lesser General Public\nLicense version 2.1",
+                ]):
+            self.assertEqual(recipe.verify(self.write(LGPL_BINARY)), configuration)
+
     @unittest.skipIf(sys.platform == "darwin", "verify() executes the binary on macOS")
     def test_verify_requires_the_lgpl_marker(self):
         configuration_only = b"\0" + " ".join(recipe.configure_args()).encode() + b"\0"
