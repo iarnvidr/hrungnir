@@ -131,15 +131,21 @@ open /path/to/extracted/Hrungnir.app
 
 | Evidence | Result |
 | --- | --- |
-| Reviewed commit | Pending |
-| Mac model / macOS / Rust / Python | Pending |
-| Helper build, merge and poster test | Hosted macOS workflow; results pending |
-| Desktop compile and lint | Hosted CI workflows; results pending |
-| Signed ZIP checksum / extracted signature | Pending owner Mac |
-| Native online / offline / AV1 acceptance | Pending owner Mac |
+| Reviewed source commit | [f85a9a8](https://github.com/iarnvidr/hrungnir/commit/f85a9a8) |
+| Native build environment | Hosted `macos-15`, Apple Silicon, stable Rust; versions in workflow logs |
+| Helper build, merge and poster test | [Passed on macOS](https://github.com/iarnvidr/hrungnir/actions/runs/39999788668) |
+| Core tests | 153 passed, 1 ignored on both macOS and Linux |
+| Desktop compile and lint | macOS release compile passed; [Linux core/desktop clippy passed without warnings](https://github.com/iarnvidr/hrungnir/actions/runs/39999788655) |
+| Signed ZIP / extracted signature / packaged CLI | [Passed; downloadable artifact](https://github.com/iarnvidr/hrungnir/actions/runs/39999788668/artifacts/12521792783) |
+| Native online / offline / AV1 acceptance | Interactive checks remain unverified by hosted CI |
 | Owner release approval | Pending |
 
-Application release readiness requires the native evidence above. The
+The `Hrungnir-0.6.6-macos-arm64.zip` from the recorded run has SHA-256
+`cb433396ad35c50c91f3f157a317f2e19dadbbd2496e7194b01f06d33cb7c735`.
+This is the app ZIP checksum, distinct from GitHub's outer artifact ZIP digest.
+
+Automated build and artifact validation passed on 2026-10-23. Interactive checks
+in section 4 remain separate from compilation and automated media tests. The
 source review found no missing application development to port as of 2026-10-22.
 Hosted workflows are enabled with owner authorization; no self-hosted runners
 are used. The macOS workflow builds, tests, signs and archives the app. Interactive
