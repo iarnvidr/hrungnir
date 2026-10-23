@@ -1,6 +1,6 @@
 # Apple Silicon build and acceptance
 
-Version 0.6.6 requires **macOS 14+ on Apple Silicon** for the native per-view proxy API. Quit the previous version before replacing **Hrungnir.app**, then enter `/r/soccer` in the subreddit panel and fetch posts. The header shows cached matches while typing; press Enter for live Reddit results. Click a post; existing content is reused, with missing comments/media downloaded before the local reader displays it. External article links offer inline text or a separate native webview. The bundle identifier is `io.github.iarnvidr.hrungnir`.
+Version 0.6.7 requires **macOS 14+ on Apple Silicon** for the native per-view proxy API. Quit the previous version before replacing **Hrungnir.app**, then enter `/r/soccer` in the subreddit panel and fetch posts. The header shows cached matches while typing; press Enter for live Reddit results. Click a post; existing content opens immediately, while comments and media load independently. External article links offer inline text or a separate native webview. The bundle identifier is `io.github.iarnvidr.hrungnir`.
 
 Install in Applications to register `hrungnir://open?url=…` links. Direct delivery also uses `open -a Hrungnir 'https://www.reddit.com/r/soccer/'`; see [app links](APP_LINKS.md). Native Mac Launch Services, cold/running delivery and window focus remain acceptance items; Linux tests and packaged scheme metadata do not prove those Mac behaviors.
 
@@ -15,7 +15,7 @@ The user's 0.5.2 Mac screenshot and support ZIP now establish launch, local read
 There is no Developer ID signature or notarization. macOS may require approval in Privacy & Security. On the destination Mac:
 
 ```sh
-shasum -a 256 Hrungnir-0.6.6-macos-arm64.zip
+shasum -a 256 Hrungnir-0.6.7-macos-arm64.zip
 codesign --verify --deep --strict --verbose=2 'Hrungnir.app'
 open 'Hrungnir.app'
 ```
