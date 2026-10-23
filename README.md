@@ -23,7 +23,7 @@ Get the app ZIP and its SHA-256 file from the [latest release](https://github.co
 1. Download both files into the same folder. Verify the ZIP before extracting it:
 
    ```sh
-   shasum -a 256 -c Hrungnir-0.6.6-macos-arm64.zip.sha256
+   shasum -a 256 -c Hrungnir-0.6.7-macos-arm64.zip.sha256
    ```
 
    The result should end in `OK`.

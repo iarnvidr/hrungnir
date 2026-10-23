@@ -442,6 +442,7 @@ pub async fn save(
     };
     let now = (crate::diagnostics::now_ms() / 1000) as i64;
     let thread = Thread {
+        flair: None,
         thumbnail_url: None,
         id: id.clone(),
         subreddit: "saved_links".into(),

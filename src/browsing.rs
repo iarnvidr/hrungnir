@@ -212,7 +212,7 @@ impl PageCapture {
                         && parts[2] == "comments"
                         && thread.id == format!("t3_{}", parts[3])
                 });
-            if subreddit.is_some_and(|name| !thread.subreddit.eq_ignore_ascii_case(name))
+            if subreddit.is_some_and(|name| !matches!(name, "popular" | "all") && !thread.subreddit.eq_ignore_ascii_case(name))
                 || !matches!(thread.source.as_deref(), Some("browser" | "proxy"))
                 || !permalink_valid
             {

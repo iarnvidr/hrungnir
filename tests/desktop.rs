@@ -26,7 +26,7 @@ fn listing_and_search_refresh_do_not_downgrade_ready_discussions_or_media() {
         thread.media_urls = vec!["https://preview.redd.it/fullclip.jpg".into()];
         thread.comments_status = Some(if empty { "empty_confirmed" } else { "partial_proxy" }.into());
         if !empty {
-            thread.comments.push(reddit_offline::Comment { id: "t1_reply".into(), parent_id: thread.id.clone(), body: "Cached discussion".into() });
+            thread.comments.push(reddit_offline::Comment { id: "t1_reply".into(), parent_id: thread.id.clone(), body: "Cached discussion".into(), ..Default::default() });
         }
         capture(&store, thread.permalink.as_deref().unwrap(), &thread);
         let expected_sources = reddit_offline::media::sources(&thread);

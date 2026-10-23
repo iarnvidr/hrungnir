@@ -21,12 +21,6 @@ fn text(node: ElementRef<'_>, limit: usize) -> String {
         .take(limit)
         .collect()
 }
-fn first_text(node: ElementRef<'_>, query: &str, limit: usize) -> String {
-    node.select(&selector(query))
-        .next()
-        .map(|node| text(node, limit))
-        .unwrap_or_default()
-}
 fn resolve(base: &Url, input: &str) -> Option<String> {
     let mut url = base.join(input).ok()?;
     if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
@@ -34,6 +28,45 @@ fn resolve(base: &Url, input: &str) -> Option<String> {
     }
     url.set_fragment(None);
     Some(url.to_string())
+}
+
+// Keep paragraph boundaries and link destinations when converting Reddit's
+// self-post HTML to inert text. The reader never executes source markup.
+fn body_text(node: ElementRef<'_>, base: &Url, limit: usize) -> String {
+    fn walk(node: ElementRef<'_>, base: &Url, out: &mut String, depth: usize) {
+        if depth > 40 || out.len() > 64_000 {
+            return;
+        }
+        for child in node.children() {
+            if let Some(element) = ElementRef::wrap(child) {
+                let tag = element.value().name();
+                if matches!(tag, "script" | "style" | "nav") {
+                    continue;
+                }
+                if matches!(tag, "p" | "li" | "blockquote" | "h1" | "h2" | "h3" | "br") {
+                    out.push('\n');
+                }
+                walk(element, base, out, depth + 1);
+                if tag == "a" {
+                    if let Some(url) = element.value().attr("href").and_then(|href| resolve(base, href)) {
+                        if text(element, 2048) != url {
+                            out.push_str(&format!(" ({url})"));
+                        }
+                    }
+                }
+                if matches!(tag, "p" | "li" | "blockquote" | "h1" | "h2" | "h3") {
+                    out.push('\n');
+                }
+            } else if let scraper::Node::Text(value) = child.value() {
+                out.push_str(value);
+            }
+        }
+    }
+    let mut raw = String::new();
+    walk(node, base, &mut raw, 0);
+    raw.lines().map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n\n")
+        .chars().take(limit).collect()
 }
 
 pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<PageCapture> {
@@ -142,7 +175,7 @@ pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<Page
         }
         let actual_subreddit = parts[1].to_owned();
         let id = format!("t3_{}", parts[3]);
-        if (!subreddit.is_empty() && !actual_subreddit.eq_ignore_ascii_case(&subreddit))
+        if (!subreddit.is_empty() && !matches!(subreddit.as_str(), "popular" | "all") && !actual_subreddit.eq_ignore_ascii_case(&subreddit))
             || node
                 .value()
                 .attr("data-fullname")
@@ -162,10 +195,10 @@ pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<Page
             .and_then(|href| resolve(&base, href));
         let thumbnail_url = node
             .select(&selector(
-                "a.thumbnail img[src], .search-result-thumbnail img[src]",
+                "a.thumbnail img, .search-result-thumbnail img",
             ))
             .next()
-            .and_then(|image| image.value().attr("src"))
+            .and_then(|image| image.value().attr("data-src").or_else(|| image.value().attr("src")))
             .and_then(|src| resolve(&base, src))
             .filter(|url| crate::link_preview::thumbnail_url(url).is_some());
         let empty = comments_link.is_some_and(|link| {
@@ -211,17 +244,17 @@ pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<Page
             id: id.clone(),
             subreddit: actual_subreddit,
             title: title_text,
-            body: first_text(
-                node,
-                ".expando .usertext-body .md, .search-result-body",
-                if post_id.is_some() { 16000 } else { 2000 },
-            ),
+            body: node.select(&selector(".usertext-body .md, .search-result-body")).next()
+                .map(|body| body_text(body, &base, if post_id.is_some() { 16000 } else { 2000 }))
+                .unwrap_or_default(),
             captured_at: 0,
             comments: Vec::new(),
             missing: Vec::new(),
             permalink: Some(permalink.to_string()),
             link_url,
             thumbnail_url,
+            flair: node.select(&selector(".linkflairlabel, .link-flair-text")).next()
+                .map(|flair| text(flair, 120)).filter(|flair| !flair.is_empty()),
             source: Some("proxy".into()),
             comments_status: Some(
                 if empty {
@@ -283,6 +316,19 @@ pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<Page
                         id: comment_id.into(),
                         parent_id,
                         body,
+                        author: comment.select(&selector(".author")).find(|node| {
+                            node.ancestors().filter_map(ElementRef::wrap)
+                                .find(|ancestor| ancestor.value().classes().any(|class| class == "comment"))
+                                .and_then(|ancestor| ancestor.value().attr("data-fullname")) == Some(comment_id)
+                        }).map(|node| text(node, 100)).filter(|value| !value.is_empty()),
+                        author_flair: comment.select(&selector(".flair")).find(|node| {
+                            node.ancestors().filter_map(ElementRef::wrap)
+                                .find(|ancestor| ancestor.value().classes().any(|class| class == "comment"))
+                                .and_then(|ancestor| ancestor.value().attr("data-fullname")) == Some(comment_id)
+                        }).map(|node| {
+                            node.value().attr("title").map(str::to_owned).filter(|value| !value.is_empty())
+                                .unwrap_or_else(|| text(node, 120)).chars().take(120).collect()
+                        }).filter(|value: &String| !value.is_empty()),
                     });
                 }
             }
@@ -298,6 +344,8 @@ pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<Page
             }
             if !thread.comments.is_empty() {
                 thread.comments_status = Some("partial_proxy".into());
+            } else if document.select(&selector(".commentarea .noresults, .commentarea .no-comments")).next().is_some() {
+                thread.comments_status = Some("empty_confirmed".into());
             }
         }
         page.threads.push(thread);
