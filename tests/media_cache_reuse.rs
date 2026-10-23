@@ -24,7 +24,7 @@ impl TestStore {
     fn tools(&self, size: u64, success: bool) -> PathBuf {
         let tools = self.0.join("tools");
         std::fs::create_dir_all(&tools).unwrap();
-        let script=format!("#!/bin/sh\nwhile [ \"$1\" != \"--output\" ]; do shift; done\nshift\noutput=$(printf '%s' \"$1\" | sed 's/%(ext)s/mp4/')\ntruncate -s {size} \"$output\"\nexit {}\n",if success {0}else{7});
+        let script=format!("#!/bin/sh\nwhile [ \"$1\" != \"--output\" ]; do shift; done\nshift\noutput=$(printf '%s' \"$1\" | sed 's/%(ext)s/mp4/')\ndd if=/dev/zero of=\"$output\" bs=1 count=0 seek={size} 2>/dev/null || exit 1\nexit {}\n",if success {0}else{7});
         std::fs::write(tools.join("yt-dlp"), script).unwrap();
         std::fs::set_permissions(tools.join("yt-dlp"), std::fs::Permissions::from_mode(0o755))
             .unwrap();
