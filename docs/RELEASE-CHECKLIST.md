@@ -138,7 +138,7 @@ open /path/to/extracted/Hrungnir.app
 | Desktop compile and lint | macOS release compile passed; [Linux core/desktop clippy passed without warnings](https://github.com/iarnvidr/hrungnir/actions/runs/39999788655) |
 | Signed ZIP / extracted signature / packaged CLI | [Passed; downloadable artifact](https://github.com/iarnvidr/hrungnir/actions/runs/39999788668/artifacts/12521792783) |
 | Native online / offline / AV1 acceptance | Interactive checks remain unverified by hosted CI |
-| Owner release approval | Pending |
+| Owner release approval | Owner requested publication of the release on 2026-10-23 |
 
 The `Hrungnir-0.6.6-macos-arm64.zip` from the recorded run has SHA-256
 `cb433396ad35c50c91f3f157a317f2e19dadbbd2496e7194b01f06d33cb7c735`.
