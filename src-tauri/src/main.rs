@@ -1035,6 +1035,7 @@ fn prune_cache(store: State<'_, DesktopStore>, before: i64) -> Result<Snapshot, 
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--cli") {
+
         let executable = std::env::current_exe().expect("Could not locate Hrungnir executable");
         #[cfg(target_os = "macos")]
         let tools = executable

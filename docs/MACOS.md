@@ -1,6 +1,6 @@
 # Apple Silicon build and acceptance
 
-Version 0.6.6 requires **macOS 14+ on Apple Silicon** for the native per-view proxy API. Quit the previous version before replacing **Hrungnir.app**, then enter `/r/soccer` in the subreddit panel and fetch posts. The header shows cached matches while typing; press Enter for live Reddit results. Click a post; existing content is reused, with missing comments/media downloaded before the local reader displays it. External article links offer inline text or a separate native webview. The existing bundle identifier and cache directory are preserved across updates.
+Version 0.6.6 requires **macOS 14+ on Apple Silicon** for the native per-view proxy API. Quit the previous version before replacing **Hrungnir.app**, then enter `/r/soccer` in the subreddit panel and fetch posts. The header shows cached matches while typing; press Enter for live Reddit results. Click a post; existing content is reused, with missing comments/media downloaded before the local reader displays it. External article links offer inline text or a separate native webview. The bundle identifier is `io.github.iarnvidr.hrungnir`.
 
 Install in Applications to register `hrungnir://open?url=…` links. Direct delivery also uses `open -a Hrungnir 'https://www.reddit.com/r/soccer/'`; see [app links](APP_LINKS.md). Native Mac Launch Services, cold/running delivery and window focus remain acceptance items; Linux tests and packaged scheme metadata do not prove those Mac behaviors.
 
@@ -44,7 +44,7 @@ Choose a new ZIP filename. This fetches a soccer listing and one comments page t
 6. Confirm no ads, cookie overlays, Live/Saved switches or “open live to get comments” notices appear.
 7. Open Settings, switch System/Classified Dark/Classified Light and accents, then reopen to confirm appearance persistence. Check the media presentation preference there. Open Diagnostics and export a support ZIP; check that the native save dialog writes a readable archive. Reproduce slow behavior and attach that ZIP with the action/time; see [SUPPORT.md](SUPPORT.md).
 
-Data lives under `~/Library/Application Support/xyz.ginnungagaps.offline-reader-exploration/`. Structured content is `cache.sqlite`; completed media is in `media/`; website data belongs to the app's own webview store. Text pruning does not delete independently cached media or shrink SQLite allocation.
+Data lives under `~/Library/Application Support/io.github.iarnvidr.hrungnir/`. Structured content is `cache.sqlite`; completed media is in `media/`; website data belongs to the app's own webview store. Text pruning does not delete independently cached media or shrink SQLite allocation.
 
 ## Rebuild and Linux verification
 

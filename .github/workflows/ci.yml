@@ -17,7 +17,7 @@ env:
 
 jobs:
   build-lint-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -31,6 +31,12 @@ jobs:
 
       - name: Install Tauri system dependencies
         run: |
+          # Avoid slow downloads from the runner image's regional HTTP mirror.
+          for apt_source in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources /etc/apt/apt-mirrors*.txt; do
+            if [ -f "$apt_source" ]; then
+              sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$apt_source"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libssl-dev libxdo-dev \
@@ -42,6 +48,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          key: ubuntu-24.04
           workspaces: |
             .
             src-tauri
@@ -59,7 +66,9 @@ jobs:
         run: cargo test --locked
 
       - name: Packaging policy tests
-        run: python3 scripts/test-macos-policy.py
+        run: |
+          python3 scripts/test-macos-policy.py
+          python3 scripts/test-ffmpeg-lgpl.py
 
       - name: Reader syntax check
         run: node --check reader/app.js

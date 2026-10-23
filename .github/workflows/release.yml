@@ -42,11 +42,33 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Fetch media helpers
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            .
+            src-tauri
+
+      - name: Restore media helper cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: var/media-tools
+          key: media-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch-media-tools.py', 'scripts/ffmpeg_lgpl.py') }}
+
+      - name: Install helper build tools
+        run: brew install meson ninja pkgconf
+
+      - name: Fetch media helpers (builds LGPL-only FFmpeg and dav1d from source)
         run: python3 scripts/fetch-media-tools.py
 
+      - name: Exercise media encode, merge and poster generation
+        run: python3 scripts/test-media-tools.py
+
       - name: Test
-        run: cargo test --locked
+        run: |
+          # macOS /var is a system symlink; fixtures need its physical path.
+          export TMPDIR="$(python3 -c 'import pathlib, tempfile; print(pathlib.Path(tempfile.gettempdir()).resolve())')"
+          cargo test --locked
+          python3 scripts/test-ffmpeg-lgpl.py
 
       - name: Build (unsigned)
         env:
@@ -65,6 +87,16 @@ jobs:
       - name: Archive
         run: python3 scripts/archive-macos.py
 
+      - name: Verify extracted app and run packaged CLI
+        run: |
+          (cd artifacts && shasum -a 256 -c Hrungnir-*.zip.sha256)
+          verification_dir="$(mktemp -d "$RUNNER_TEMP/hrungnir-archive.XXXXXX")"
+          ditto -x -k artifacts/Hrungnir-*.zip "$verification_dir"
+          app="$verification_dir/Hrungnir.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          python3 scripts/ffmpeg_lgpl.py verify "$app/Contents/Resources/bin/ffmpeg"
+          "$app/Contents/MacOS/offline-reader-desktop" --cli --data-dir "$verification_dir/cache" doctor
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hrungnir-macos-arm64
@@ -76,7 +108,7 @@ jobs:
   release:
     needs: build
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
@@ -86,12 +118,19 @@ jobs:
           name: hrungnir-macos-arm64
           path: dist
 
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: source
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
+          notes="source/docs/RELEASE-${TAG#v}.md"
           gh release create "$TAG" dist/*.zip dist/*.zip.sha256 \
+            --verify-tag \
             --title "Hrungnir ${TAG#v}" \
-            --notes "Apple Silicon build (macOS 14+). Ad-hoc signed, not notarized. Verify with the attached SHA-256 file."
+            --notes-file "$notes"

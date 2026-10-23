@@ -13,7 +13,12 @@ docker run -d --name "$build_container" --entrypoint sleep "$build_image" infini
 docker exec "$build_container" mkdir -p /work
 tar --exclude=target --exclude=node_modules --exclude=var --exclude=artifacts --exclude=output -cf - . |
   docker exec -i "$build_container" tar -xf - -C /work
-docker exec -w /work "$build_container" python3 scripts/fetch-media-tools.py
+# FFmpeg is built from source on a Mac (scripts/ffmpeg_lgpl.py), not in this container.
+# Build it there, then pass the binary here: FFMPEG_LGPL_BINARY=/path/to/ffmpeg.
+if [[ -n "${FFMPEG_LGPL_BINARY:-}" ]]; then
+  docker cp "$FFMPEG_LGPL_BINARY" "$build_container:/work/ffmpeg-lgpl"
+fi
+docker exec -w /work ${FFMPEG_LGPL_BINARY:+-e FFMPEG_LGPL_BINARY=/work/ffmpeg-lgpl} "$build_container" python3 scripts/fetch-media-tools.py
 docker exec -w /work -e SDKROOT=/opt/macos-sdk/current -e MACOSX_DEPLOYMENT_TARGET=14.0 "$build_container" \
   cargo zigbuild --locked --manifest-path src-tauri/Cargo.toml --release --target aarch64-apple-darwin --features custom-protocol
 docker exec -w /work "$build_container" python3 scripts/package-macos.py

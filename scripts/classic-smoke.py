@@ -17,7 +17,7 @@ import urllib.request
 root = pathlib.Path(__file__).resolve().parents[1]
 data = pathlib.Path(os.environ["XDG_DATA_HOME"]).resolve()
 assert data.is_relative_to(root / "var")
-db = data / "xyz.ginnungagaps.offline-reader-exploration/cache.sqlite"
+db = data / "io.github.iarnvidr.hrungnir/cache.sqlite"
 assert not db.exists(), "Use a fresh test data directory"
 
 

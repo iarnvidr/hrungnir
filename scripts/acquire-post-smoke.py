@@ -35,7 +35,7 @@ try:
     started=time.monotonic()
     subprocess.run(['xdotool','mousemove',str(round(point[0])),str(round(point[1])),'click','1'],check=True)
     end=started+220
-    appdata=data/'xyz.ginnungagaps.offline-reader-exploration'
+    appdata=data/'io.github.iarnvidr.hrungnir'
     manifest=appdata/'media'/post/'complete.json'
     while time.monotonic()<end:
         if manifest.exists(): break

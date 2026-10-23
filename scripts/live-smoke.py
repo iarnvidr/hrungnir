@@ -66,7 +66,7 @@ def click(selector):
     request("POST",f"/session/{session}/element/{element['element-6066-11e4-a52e-4f735466cecf']}/click",{})
 
 def stored_comments(thread_id):
-    directory=pathlib.Path(os.environ['XDG_DATA_HOME'])/'xyz.ginnungagaps.offline-reader-exploration'
+    directory=pathlib.Path(os.environ['XDG_DATA_HOME'])/'io.github.iarnvidr.hrungnir'
     with sqlite3.connect(directory/'cache.sqlite') as database:
         row=database.execute('SELECT payload FROM threads WHERE id=?',(thread_id,)).fetchone()
     thread=json.loads(row[0]) if row else None
