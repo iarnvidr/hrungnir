@@ -2402,8 +2402,10 @@
     const request = ++subredditRequestSequence;
     const startedAt = performance.now();
     pendingId = null;
+    activeSubreddit = subreddit;
+    preferences.lastSubreddit = subreddit;
+    setTab('browse');
     renderList();
-    ui.list.inert = true;
     ui.list.setAttribute('aria-busy', 'true');
     if (bulkMediaRun) bulkMediaRun.cancelled = true;
     updateFetchAllMediaControl();
@@ -2417,7 +2419,7 @@
     startOperationProgress('Fetching subreddit posts', transition);
     try {
       const result = await invoke('fetch_subreddit', { subreddit, sort: preferences.postSort, top_period: preferences.topPeriod });
-      if (!authoritative && transition !== operationSequence) return;
+      if (request !== subredditRequestSequence) return;
       if (!result || !Array.isArray(result.threads) || !result.diagnostics) throw new Error('Native command returned an invalid Snapshot.');
       snapshot = mergeSnapshot(result);
       rememberSnapshotThreads(result);
@@ -2425,34 +2427,34 @@
       preferences.lastSubreddit = subreddit;
       installSourceListing(subreddit, result.threads);
       recordRecent(subreddit);
-      setTab('browse');
+      if (transition === operationSequence) setTab('browse');
       refreshDiagnostics(snapshot);
       renderList();
       renderPostTabs();
       requestLinkPreviews(result.threads);
       const elapsed = performance.now() - startedAt;
       recordClientEvent('source_fetch', elapsed, result.threads.length);
-      setFeedback('');
-      setStatus(`/r/${subreddit} · ${result.threads.length} posts · ${formatElapsed(elapsed)}`, 'ready');
+      if (transition === operationSequence) {
+        setFeedback('');
+        setStatus(`/r/${subreddit} · ${result.threads.length} posts`, 'ready');
+      }
     } catch (error) {
-      if (authoritative || transition === operationSequence) {
+      if (request === subredditRequestSequence && transition === operationSequence) {
         recordClientEvent('source_fetch', performance.now() - startedAt, 0);
         setFeedback(`Could not fetch /r/${subreddit}. Your current reader content is unchanged. ${explainError(error)}${sourceTrustFailureHint()}`, true, () => void browseSubreddit(`/r/${subreddit}`));
         setStatus(`Fetch failed · /r/${subreddit}`, 'error');
       }
     } finally {
       stopOperationProgress(transition);
-      if (authoritative || request === subredditRequestSequence) {
+      if (request === subredditRequestSequence) {
         ui.browse.disabled = false;
         ui.browseRefresh.disabled = false;
         ui.input.disabled = false;
-        if (transition === operationSequence) {
           ui.postSort.disabled = false;
           ui.topPeriod.disabled = false;
           ui.list.inert = false;
           ui.list.removeAttribute('aria-busy');
           updateFetchAllMediaControl();
-        }
       }
     }
   }
