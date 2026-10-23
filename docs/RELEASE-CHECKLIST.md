@@ -24,6 +24,7 @@ node --version                        # v22.x
 rustup toolchain install stable --profile minimal --component clippy --target aarch64-apple-darwin
 rustup override set stable
 rustc --version                       # 1.90 or newer
+export TMPDIR="$(python3 -c 'import pathlib, tempfile; print(pathlib.Path(tempfile.gettempdir()).resolve())')"
 npm ci
 cargo test --locked
 cargo clippy --locked --all-targets
@@ -33,7 +34,7 @@ node --check reader/app.js
 ```
 
 - [ ] All commands exit 0. Core tests: 153 passed in total, one ignored network
-  test; no failures. Policy tests: 2 pass. Recipe tests: 9 total, with host-specific
+  test; no failures. Policy tests: 2 pass. Recipe tests: 10 total, with host-specific
   skips on Mac. JavaScript check prints nothing on success. Review any clippy
   warnings; a missing clippy component is not a successful lint.
 

@@ -63,6 +63,8 @@ jobs:
 
       - name: Test
         run: |
+          # macOS /var is a system symlink; fixtures need its physical path.
+          export TMPDIR="$(python3 -c 'import pathlib, tempfile; print(pathlib.Path(tempfile.gettempdir()).resolve())')"
           cargo test --locked
           python3 scripts/test-ffmpeg-lgpl.py
 
@@ -81,6 +83,15 @@ jobs:
         run: |
           python3 scripts/archive-macos.py
           (cd artifacts && shasum -a 256 -c Hrungnir-*.zip.sha256)
+
+      - name: Verify extracted app and run packaged CLI
+        run: |
+          verification_dir="$(mktemp -d "$RUNNER_TEMP/hrungnir-archive.XXXXXX")"
+          ditto -x -k artifacts/Hrungnir-*.zip "$verification_dir"
+          app="$verification_dir/Hrungnir.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          python3 scripts/ffmpeg_lgpl.py verify "$app/Contents/Resources/bin/ffmpeg"
+          "$app/Contents/MacOS/offline-reader-desktop" --cli --data-dir "$verification_dir/cache" doctor
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
