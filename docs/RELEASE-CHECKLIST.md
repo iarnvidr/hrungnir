@@ -4,7 +4,8 @@ Run from the reviewed PR checkout on an Apple Silicon Mac with macOS 14+.
 Record the commit, macOS version, commands and results below. A checked box needs
 evidence from that revision; earlier builds do not count. Do not merge, tag or
 publish as part of these tests. Keep GitHub Actions disabled while the repository
-is private. Publication and the final commit history require owner approval.
+is private. The owner authorized public visibility and hosted Actions on
+2026-10-23. Publication of a release and the final commit history require owner approval.
 
 ## 1. Native prerequisites and portable checks
 
@@ -131,13 +132,14 @@ open /path/to/extracted/Hrungnir.app
 | --- | --- |
 | Reviewed commit | Pending |
 | Mac model / macOS / Rust / Python | Pending |
-| Helper build, merge and poster test | Pending owner Mac |
-| Desktop compile and lint | Pending owner Mac |
+| Helper build, merge and poster test | Hosted macOS workflow; results pending |
+| Desktop compile and lint | Hosted CI workflows; results pending |
 | Signed ZIP checksum / extracted signature | Pending owner Mac |
 | Native online / offline / AV1 acceptance | Pending owner Mac |
 | Owner release approval | Pending |
 
-Public readiness is blocked until the native evidence above is recorded. The
+Application release readiness requires the native evidence above. The
 source review found no missing application development to port as of 2026-10-22.
-Hosted workflows must be reviewed and enabled only after the owner authorizes
-public operation; no self-hosted runners are used.
+Hosted workflows are enabled with owner authorization; no self-hosted runners
+are used. The macOS workflow builds, tests, signs and archives the app. Interactive
+acceptance remains a separate check from compilation and automated media tests.

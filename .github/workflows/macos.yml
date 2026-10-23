@@ -53,6 +53,9 @@ jobs:
       - name: Fetch media helpers (builds LGPL-only FFmpeg and dav1d from source)
         run: python3 scripts/fetch-media-tools.py
 
+      - name: Exercise media encode, merge and poster generation
+        run: python3 scripts/test-media-tools.py
+
       - name: Build (unsigned)
         env:
           MACOSX_DEPLOYMENT_TARGET: "14.0"
@@ -72,4 +75,17 @@ jobs:
           codesign --force --sign - "$app/Contents/Resources/bin/yt-dlp"
           codesign --force --sign - "$app/Contents/Resources/bin/ffmpeg"
           codesign --force --sign - "$app"
-          codesign --verify --strict --verbose=2 "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+      - name: Archive signed app
+        run: |
+          python3 scripts/archive-macos.py
+          (cd artifacts && shasum -a 256 -c Hrungnir-*.zip.sha256)
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hrungnir-macos-arm64-pr
+          path: |
+            artifacts/*.zip
+            artifacts/*.zip.sha256
+          if-no-files-found: error
