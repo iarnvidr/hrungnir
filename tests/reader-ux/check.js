@@ -1,0 +1,64 @@
+async (page) => {
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  const assert = (value, message) => { if (!value) throw new Error(message); };
+  const row = id => page.locator(`[data-thread-id="${id}"]`);
+  await page.waitForFunction(() => document.querySelectorAll('.thread-item').length === 28);
+  await page.waitForFunction(() => [...document.querySelectorAll('.thread-thumb img')].some(img => img.complete && img.naturalWidth > 0));
+  assert(!/just now|cached ·|fetched \d/i.test(await page.locator('#thread-list').innerText()), 'fetch timestamp clutter remains');
+  await row('t3_article').getByRole('button', {name: 'Filter posts by News', exact: true}).click();
+  assert(await page.locator('.thread-item').count() === 10, 'flair did not filter the listing');
+  await page.locator('#flair-filter').selectOption('');
+  assert(await page.locator('.thread-item').count() === 28, 'flair filter did not reset');
+
+  const expand = row('t3_fixture12').locator('.link-article-toggle');
+  await expand.click();
+  await page.waitForFunction(() => window.__ux.articles.has('t3_fixture12'));
+  const originalButton = await expand.elementHandle();
+  const before = await page.evaluate(() => window.scrollY);
+  await page.evaluate(() => window.__ux.releaseArticle('t3_fixture12'));
+  await page.waitForFunction(() => document.querySelector('[data-thread-id="t3_fixture12"] .link-article-body'));
+  assert(Math.abs(await page.evaluate(() => window.scrollY) - before) <= 2, 'async article expansion moved the viewport');
+  assert(await originalButton.evaluate(node => node.isConnected), 'article expansion rebuilt the listing');
+  await expand.click();
+
+  await row('t3_video').locator('.thread-open').click({modifiers: ['Control']});
+  assert(await page.locator('#reader-panel').isHidden(), 'Ctrl-click stole foreground focus');
+  assert(await page.locator('.post-tab-open').filter({hasText: 'Match highlights'}).count() === 1, 'background tab missing');
+  assert(await page.evaluate(() => JSON.parse(localStorage.getItem('offline-reader.preferences.v1')).activePostId) == null, 'background tab changed active post');
+
+  await row('t3_article').locator('.thread-open').click();
+  assert(await page.locator('#reader-panel').isVisible(), 'post did not open while comments were pending');
+  assert((await page.locator('#thread-view h1').innerText()).includes('readable article'), 'post heading unavailable before fetch completion');
+  await page.waitForFunction(() => window.__ux.articles.has('t3_article'));
+  await page.evaluate(() => window.__ux.releaseArticle('t3_article'));
+  await page.waitForFunction(() => document.querySelector('.reader-article-slot .link-article-body'));
+  assert(await page.locator('#thread-view').getByText('No media was found', {exact: false}).count() === 0, 'empty media section remains');
+  await page.evaluate(() => window.__ux.releasePost('t3_article'));
+  await page.waitForFunction(() => document.querySelectorAll('#thread-view .comment').length === 1);
+  assert((await page.locator('.reader-article-slot').innerText()).includes('Paragraph 1'), 'article disappeared when discussion loaded');
+  assert(await page.locator('.reader-save-panel').getAttribute('open') === null, 'save requires an expanded form');
+  await page.locator('#save-post-button').click();
+  await page.waitForFunction(() => document.querySelector('#save-post-button')?.textContent === 'Saved to Library');
+  const save = await page.evaluate(() => window.__ux.calls.find(call => call.command === 'save_library_post'));
+  assert(save.args.collection === 'Saved' && save.args.keep_forever === true, 'one-click save did not protect offline copy');
+  await page.screenshot({path: '/tmp/hrungnir-reader-article.png', fullPage: true});
+
+  await page.locator('.post-tab-open').filter({hasText: 'Match highlights'}).click();
+  assert((await page.locator('#thread-view h1').innerText()).includes('Match highlights'), 'video post waited for media');
+  await page.evaluate(() => window.__ux.releasePost('t3_video'));
+  await page.waitForFunction(() => document.querySelectorAll('#thread-view .comment').length === 1 && window.__ux.calls.some(c => c.command === 'fetch_thread' && c.args.id === 't3_video' && c.args.include_media !== false));
+  assert((await page.locator('#thread-view').innerText()).includes('A useful discussion'), 'stalled video blocked comments');
+  await page.getByRole('tab', {name: 'Subreddits & posts', exact: true}).click();
+  await row('t3_discussion').locator('.thread-open').click();
+  assert((await page.locator('.thread-body').innerText()).includes('Episode one'), 'self-post content missing');
+  await page.getByRole('tab', {name: 'Subreddits & posts', exact: true}).click();
+  await page.evaluate(() => window.__ux.releasePost('t3_discussion'));
+  await page.waitForFunction(() => !window.__ux.posts.has('irrelevant') && window.__ux.calls.some(c => c.command === 'save_position' && c.args.id === 't3_discussion'));
+  assert(await page.locator('#reader-panel').isHidden(), 'late post response stole focus from browsing');
+  await page.setViewportSize({width: 1000, height: 800});
+  await page.screenshot({path: '/tmp/hrungnir-reader-listing.png', fullPage: false});
+  await page.setViewportSize({width: 500, height: 800});
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'narrow layout overflows horizontally');
+  return {passed: ['no fetch timestamps', 'real thumbnails', 'flair filtering', 'stable inline expansion', 'background tabs', 'immediate post opening', 'article in reader', 'one-click save', 'comments during stalled media', 'self-post body', 'no late focus steal', 'narrow layout'], screenshots: ['/tmp/hrungnir-reader-article.png', '/tmp/hrungnir-reader-listing.png']};
+}

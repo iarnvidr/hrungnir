@@ -155,6 +155,8 @@ button:disabled { opacity: .55; cursor: wait; }
 .comment.depth-3, .comment.depth-4, .comment.depth-5 { margin-left: 20px; border-left-color: var(--line); }
 .comment-card { min-width: 0; padding: 9px 10px; border: 1px solid var(--line); background: var(--panel); }
 .comment-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: var(--muted); font-size: calc(10px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); }
+.comment-identity { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.comment-flair { max-width: 100%; overflow-wrap: anywhere; }
 .comment-content p { margin: 5px 0 8px; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; font-size: calc(12px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); }
 .comment-actions { display: flex; gap: 10px; }
 .comment-actions button { padding: 0; border: 0; background: none; color: var(--link); font: inherit; font-size: calc(10px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); }

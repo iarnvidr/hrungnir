@@ -316,6 +316,19 @@ pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<Page
                         id: comment_id.into(),
                         parent_id,
                         body,
+                        author: comment.select(&selector(".author")).find(|node| {
+                            node.ancestors().filter_map(ElementRef::wrap)
+                                .find(|ancestor| ancestor.value().classes().any(|class| class == "comment"))
+                                .and_then(|ancestor| ancestor.value().attr("data-fullname")) == Some(comment_id)
+                        }).map(|node| text(node, 100)).filter(|value| !value.is_empty()),
+                        author_flair: comment.select(&selector(".flair")).find(|node| {
+                            node.ancestors().filter_map(ElementRef::wrap)
+                                .find(|ancestor| ancestor.value().classes().any(|class| class == "comment"))
+                                .and_then(|ancestor| ancestor.value().attr("data-fullname")) == Some(comment_id)
+                        }).map(|node| {
+                            node.value().attr("title").map(str::to_owned).filter(|value| !value.is_empty())
+                                .unwrap_or_else(|| text(node, 120)).chars().take(120).collect()
+                        }).filter(|value: &String| !value.is_empty()),
                     });
                 }
             }

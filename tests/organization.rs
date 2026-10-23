@@ -465,6 +465,7 @@ fn completed_saved_posts_keep_content_media_comments_and_anchor_during_refresh()
         id: "t1_original".into(),
         parent_id: original.id.clone(),
         body: "Saved comment".into(),
+        ..Default::default()
     });
     original.media_urls = vec!["https://i.redd.it/original.jpg".into()];
     cache.import(&original, 100000).unwrap();
@@ -519,6 +520,7 @@ fn saved_listing_accepts_first_complete_capture_then_freezes() {
         id: "t1_full".into(),
         parent_id: complete.id.clone(),
         body: "Full comment".into(),
+        ..Default::default()
     });
     complete.media_urls = vec!["https://i.redd.it/complete.jpg".into()];
     cache.import(&complete, 100000).unwrap();

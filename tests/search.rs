@@ -10,6 +10,7 @@ fn library_search_matches_full_body_and_comments_beyond_summary_limits() {
         id: "t1_library".into(),
         parent_id: saved.id.clone(),
         body: format!("{} distantcommentmarker", "comment text ".repeat(200)),
+        ..Default::default()
     });
     cache.import(&saved, 1_000_000).unwrap();
     cache
@@ -111,6 +112,7 @@ fn existing_rows_are_backfilled_once_and_reopening_does_not_duplicate() {
         id: "t1_old".into(),
         parent_id: t.id.clone(),
         body: "Backfilledcomment".into(),
+        ..Default::default()
     });
     let payload = serde_json::to_string(&t).unwrap();
     old.execute(
@@ -150,6 +152,7 @@ fn searches_titles_body_subreddit_and_exact_comment_anchor() {
         id: "t1_reply".into(),
         parent_id: t.id.clone(),
         body: "Collimation needs a laser alignment tool".into(),
+        ..Default::default()
     });
     s.cache().import(&t, 1_000_000).unwrap();
     let desktop = s.desktop();
@@ -182,6 +185,7 @@ fn title_matches_rank_first_and_each_post_occurs_once() {
             id: format!("t1_{i}"),
             parent_id: body.id.clone(),
             body: "telescope".into(),
+            ..Default::default()
         });
     }
     s.cache().import_batch(&[body, title], 1_000_000).unwrap();
@@ -302,6 +306,7 @@ fn refresh_prune_budget_and_failed_batch_keep_fts_transactionally_consistent() {
         id: "t1_removed".into(),
         parent_id: t.id.clone(),
         body: "Removedcomment".into(),
+        ..Default::default()
     });
     cache.import(&t, 1_000_000).unwrap();
     t.title = "Replacementword".into();

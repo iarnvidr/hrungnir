@@ -90,6 +90,7 @@ fn excessive_comment_depth_is_rejected_before_rendering() {
             id: id.clone(),
             parent_id,
             body: "nested".into(),
+            ..Default::default()
         });
         parent_id = id;
     }

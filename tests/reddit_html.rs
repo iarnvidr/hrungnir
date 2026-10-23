@@ -60,6 +60,24 @@ fn listing_does_not_claim_comments_and_gzip_is_decoded() {
 }
 
 #[test]
+fn comment_authors_and_club_flair_belong_to_their_own_comment() {
+    let html = HTML.replace(
+        "<div class=\"entry\"><div class=\"usertext-body\"><div class=\"md\">Reply",
+        "<div class=\"entry\"><a class=\"author\">TheBlueTango</a><span class=\"flair flair-chelsea\" title=\"Chelsea\"></span><div class=\"usertext-body\"><div class=\"md\">Reply",
+    );
+    let page = reddit_html::parse(response("/r/soccer/comments/post/title/", &html)).unwrap();
+    let comments = &page.threads[0].comments;
+    assert_eq!(comments[0].author, None);
+    assert_eq!(comments[0].author_flair, None);
+    assert_eq!(comments[1].author.as_deref(), Some("TheBlueTango"));
+    assert_eq!(comments[1].author_flair.as_deref(), Some("Chelsea"));
+    let legacy: reddit_offline::Comment = serde_json::from_str(
+        r#"{"id":"t1_old","parent_id":"t3_post","body":"Saved before author metadata"}"#,
+    ).unwrap();
+    assert_eq!(legacy.author, None);
+}
+
+#[test]
 fn ca_is_private_reused_and_cannot_issue_unrelated_hosts() {
     let directory = std::env::temp_dir().join(format!("reader-ca-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();

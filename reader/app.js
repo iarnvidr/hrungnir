@@ -1574,7 +1574,10 @@
     section.setAttribute('aria-label', `Comment ${comment.id}`);
     const card = element('div', 'comment-card');
     const head = element('div', 'comment-head');
-    head.append(element('strong', '', comment.author || 'Comment'), element('span', '', comment.score === undefined ? '' : `${comment.score} points`));
+    const identity = element('span', 'comment-identity');
+    identity.append(element('strong', '', comment.author || 'Comment'));
+    if (comment.author_flair) identity.append(element('span', 'post-flair comment-flair', comment.author_flair));
+    head.append(identity, element('span', '', comment.score === undefined ? '' : `${comment.score} points`));
     const content = element('div', 'comment-content');
     const body = element('p', 'comment-body');
     appendLinkedText(body, comment.body);
@@ -2012,9 +2015,9 @@
     if (index < 0) return;
     preferences.postTabs.splice(index, 1);
     const wasActive = activeId === id;
-    operationSequence++;
-    pendingId = null;
     if (wasActive) {
+      operationSequence++;
+      pendingId = null;
       activeId = null;
       const next = preferences.postTabs[Math.min(index, preferences.postTabs.length - 1)];
       preferences.activePostId = next ? next.id : null;
@@ -2067,7 +2070,13 @@
     }
     mediaHintsByThread.clear();
     for (const [id, hint] of mergedHints) mediaHintsByThread.set(id, hint);
-    return { ...(snapshot || {}), ...incoming, ...snapshotOverrides, media_hints: Object.fromEntries(mediaHintsByThread) };
+    const previews = { ...((snapshot && snapshot.link_previews) || {}) };
+    for (const [id, preview] of Object.entries(incoming.link_previews || {})) {
+      const previous = previews[id];
+      previews[id] = { ...previous, ...preview };
+      if (previous && previous.thumbnail && !(preview && preview.thumbnail)) previews[id].thumbnail = previous.thumbnail;
+    }
+    return { ...(snapshot || {}), ...incoming, ...snapshotOverrides, link_previews: previews, media_hints: Object.fromEntries(mediaHintsByThread) };
   }
 
   function isSubredditListingThread(thread) {
@@ -2769,7 +2778,6 @@
     const item = [...ui.list.querySelectorAll('.thread-item')].find((card) => card.getAttribute('aria-current') === 'true');
     if (item) keyboardThread = Number(item.dataset.threadIndex);
     const thread = currentThread();
-    if (thread) ui.input.value = `/r/${thread.subreddit}`;
   }
 
   function getPostDownload(id) {
