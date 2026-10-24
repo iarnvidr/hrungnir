@@ -30,6 +30,9 @@ async (page) => {
   await row('t3_article').locator('.thread-open').click();
   assert(await page.locator('#reader-panel').isVisible(), 'post did not open while comments were pending');
   assert((await page.locator('#thread-view h1').innerText()).includes('readable article'), 'post heading unavailable before fetch completion');
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.getByRole('button', {name: 'Copy thread link', exact: true}).click();
+  assert((await page.evaluate(() => navigator.clipboard.readText())).includes('/comments/article/'), 'copied link is not the Reddit thread');
   await page.waitForFunction(() => window.__ux.articles.has('t3_article'));
   await page.evaluate(() => window.__ux.releaseArticle('t3_article'));
   await page.waitForFunction(() => document.querySelector('.reader-article-slot .link-article-body'));
@@ -52,6 +55,12 @@ async (page) => {
   await page.getByRole('tab', {name: 'Subreddits & posts', exact: true}).click();
   await row('t3_discussion').locator('.thread-open').click();
   assert((await page.locator('.thread-body').innerText()).includes('Episode one'), 'self-post content missing');
+  assert((await page.locator('.thread-body a').first().getAttribute('href')).includes('/comments/'), 'episode destination was lost');
+  const subreddit = page.locator('#thread-view .thread-topline .thread-subreddit');
+  assert((await subreddit.getAttribute('href')).includes('/r/space/'), 'reader subreddit has no link');
+  await subreddit.click();
+  await page.waitForFunction(() => window.__ux.calls.some(call => call.command === 'fetch_subreddit' && call.args.subreddit === 'space'));
+  assert(await page.locator('#reader-panel').isHidden(), 'subreddit link did not navigate to listing');
   await page.getByRole('tab', {name: 'Subreddits & posts', exact: true}).click();
   await page.evaluate(() => window.__ux.releasePost('t3_discussion'));
   await page.waitForFunction(() => !window.__ux.posts.has('irrelevant') && window.__ux.calls.some(c => c.command === 'save_position' && c.args.id === 't3_discussion'));

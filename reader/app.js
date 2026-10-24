@@ -1214,7 +1214,7 @@
       card.dataset.threadIndex = String(index);
       card.setAttribute('aria-current', String(thread.id === activeId));
       card.setAttribute('aria-busy', String(thread.id === pendingId));
-      const sub = element('span', 'thread-subreddit', `r/${thread.subreddit}`);
+      const sub = subredditLink(thread.subreddit);
       const title = element('span', 'thread-title', thread.title);
       const open = element('button', 'thread-open');
       open.type = 'button';
@@ -1234,7 +1234,9 @@
       meta.append(sub);
       if (isExternalWebLink(thread.link_url)) meta.append(element('span', 'thread-domain', safeDomain(thread.link_url)));
       open.append(thumb, element('span', 'thread-open-copy'));
-      open.lastChild.append(title, meta);
+      open.lastChild.append(title);
+      const main = element('div', 'thread-main');
+      main.append(open, meta);
       open.addEventListener('click', (event) => {
         if (event.metaKey || event.ctrlKey) openPostInBackground(thread);
         else void selectThread(thread.id, thread.id);
@@ -1293,11 +1295,45 @@
       inline.dataset.inlineMediaFor = thread.id;
       if (inlineExpanded.has(thread.id) && mediaByThread.has(thread.id)) inline.append(renderMedia(thread.id, { collapsible: false, inline: true }));
       if (expandedArticles.has(thread.id)) inline.append(renderLinkArticle(thread));
-      card.append(open, actions, inline);
+      card.append(main, actions, inline);
       ui.list.append(card);
     });
     const index = threads.findIndex((thread) => thread.id === activeId);
     keyboardThread = index < 0 ? 0 : index;
+  }
+
+  function subredditLink(name) {
+    const link = element('a', 'thread-subreddit subreddit', `r/${name}`);
+    link.href = `https://www.reddit.com/r/${encodeURIComponent(name)}/`;
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void browseSubreddit(`/r/${name}`);
+    });
+    return link;
+  }
+
+  function threadPermalink(thread) {
+    return thread.permalink || `https://www.reddit.com/r/${encodeURIComponent(thread.subreddit)}/comments/${thread.id.replace(/^t3_/, '')}/`;
+  }
+
+  async function copyThreadLink(thread) {
+    const url = threadPermalink(thread);
+    try {
+      await navigator.clipboard.writeText(url);
+      toast('Thread link copied');
+    } catch (error) {
+      const input = element('textarea');
+      input.value = url;
+      input.style.position = 'fixed';
+      input.style.opacity = '0';
+      document.body.append(input);
+      input.select();
+      const copied = document.execCommand('copy');
+      input.remove();
+      if (copied) toast('Thread link copied');
+      else toast(`Copy this thread link: ${url}`);
+    }
   }
 
   function flairButton(flair) {
@@ -1775,8 +1811,15 @@
     releaseMediaWatchesWithin(ui.view);
     ui.view.replaceChildren();
     const topline = element('div', 'thread-topline');
-    topline.append(element('span', 'subreddit', `r/${thread.subreddit}`));
+    topline.append(subredditLink(thread.subreddit));
     if (thread.flair) topline.append(flairButton(thread.flair));
+    const copy = element('button', 'link-button copy-thread-link', 'Copy thread link');
+    copy.type = 'button';
+    copy.addEventListener('click', () => void copyThreadLink(thread));
+    const original = element('a', 'original-thread-link', 'Open on Reddit');
+    original.href = threadPermalink(thread);
+    original.addEventListener('click', (event) => { event.preventDefault(); void openWebLink(original.href); });
+    topline.append(copy, original);
     ui.view.append(topline, element('h1', '', thread.title));
     ui.view.append(renderReaderLibraryActions(thread));
     const body = element('p', 'thread-body');
