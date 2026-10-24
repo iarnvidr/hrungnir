@@ -722,7 +722,8 @@ async fn fetch_thread(
             .read(&id)
             .map_err(|e| e.to_string())?
             .ok_or("Post is no longer cached; refresh the subreddit")?;
-        let comments_hit = reddit_offline::browsing::comments_ready(&thread);
+        let comments_hit = reddit_offline::browsing::comments_ready(&thread)
+            && !(thread.body.is_empty() && thread.link_url.as_ref().is_some_and(|url| url.contains(&format!("/comments/{}/", id.trim_start_matches("t3_")))));
         let mut comments_reused = comments_hit;
         let media_hit = completed_assets(&media.root, &thread).is_some();
         event(
@@ -745,7 +746,8 @@ async fn fetch_thread(
                 .read(&id)
                 .map_err(|e| e.to_string())?
                 .ok_or("Post was evicted")?;
-            if !reddit_offline::browsing::comments_ready(&current) {
+            if !reddit_offline::browsing::comments_ready(&current)
+                || (current.body.is_empty() && current.link_url.as_ref().is_some_and(|url| url.contains(&format!("/comments/{}/", id.trim_start_matches("t3_"))))) {
                 browser
                     .acquire(current.permalink.ok_or("Missing post URL")?, true)
                     .await?;

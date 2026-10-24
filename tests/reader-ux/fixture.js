@@ -10,14 +10,14 @@
     link_url: i === 2 ? 'https://www.reddit.com/r/space/comments/discussion/title/' : i === 1 ? 'https://v.redd.it/fixture/' : `https://example.org/story${i}`,
     thumbnail_url: 'https://b.thumbs.redditmedia.com/fixture.jpg', media_urls: [],
   }));
-  const calls = [], posts = new Map(), articles = new Map();
+  const calls = [], completed = [], posts = new Map(), articles = new Map();
   let library = { items: [], groups: [] };
   const prefs = { tab: 'browse', theme: 'classified', lastSubreddit: 'popular', listings: { popular: threads.map(t => t.id) } };
   if (!localStorage.getItem('offline-reader.preferences.v1')) localStorage.setItem('offline-reader.preferences.v1', JSON.stringify(prefs));
   const hints = { t3_video: { kind: 'video', count: 1 } };
   const snap = (rows = threads) => ({ threads: structuredClone(rows), diagnostics: {}, position: null, media_hints: hints, link_previews: {} });
   const wait = (map, id) => new Promise(resolve => map.set(id, resolve));
-  window.__ux = { calls, posts, articles, threads, releasePost: id => posts.get(id)?.(), releaseArticle: id => articles.get(id)?.() };
+  window.__ux = { calls, completed, posts, articles, threads, releasePost: id => posts.get(id)?.(), releaseArticle: id => articles.get(id)?.() };
   window.__TAURI__ = {
     event: { listen: async () => () => {} },
     core: { invoke: async (command, args = {}) => {
@@ -32,6 +32,7 @@
       if (command === 'fetch_thread') {
         if (args.include_media !== false) return new Promise(() => {}); // Simulate a stalled media download.
         await wait(posts, args.id);
+        completed.push(args.id);
         const thread = { ...threads.find(t => t.id === args.id), comments_status: 'partial_proxy', comments: [{ id: 't1_parent', parent_id: args.id, body: 'A useful discussion, available before the video finishes.' }] };
         return { snapshot: snap([thread]), media: [], cache: { comments_hit: false, media_hit: false } };
       }

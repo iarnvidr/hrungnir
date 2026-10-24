@@ -36,7 +36,7 @@ pub fn thumbnail_url(input: &str) -> Option<Url> {
     let host = url.host_str()?;
     (matches!(
         host,
-        "preview.redd.it" | "external-preview.redd.it" | "i.redd.it"
+        "preview.redd.it" | "external-preview.redd.it"
     ) || host
         .strip_suffix(".thumbs.redditmedia.com")
         .is_some_and(|prefix| {

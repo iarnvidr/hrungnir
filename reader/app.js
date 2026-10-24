@@ -100,7 +100,6 @@
   let playbackEventWindowStarted = 0;
   let playbackEventWindowCount = 0;
   const inlineExpanded = new Set();
-  const expandedArticles = new Set();
   const linkArticleStates = new Map();
   const linkPreviewRequests = new Set();
   const linkPreviewCompleted = new Set();
@@ -1214,7 +1213,7 @@
       card.dataset.threadIndex = String(index);
       card.setAttribute('aria-current', String(thread.id === activeId));
       card.setAttribute('aria-busy', String(thread.id === pendingId));
-      const sub = element('span', 'thread-subreddit', `r/${thread.subreddit}`);
+      const sub = subredditLink(thread.subreddit);
       const title = element('span', 'thread-title', thread.title);
       const open = element('button', 'thread-open');
       open.type = 'button';
@@ -1231,10 +1230,13 @@
         thumb.append(image);
       }
       const meta = element('span', 'thread-meta');
+      if (thread.flair) meta.append(flairButton(thread.flair));
       meta.append(sub);
       if (isExternalWebLink(thread.link_url)) meta.append(element('span', 'thread-domain', safeDomain(thread.link_url)));
       open.append(thumb, element('span', 'thread-open-copy'));
-      open.lastChild.append(title, meta);
+      open.lastChild.append(title);
+      const main = element('div', 'thread-main');
+      main.append(open, meta);
       open.addEventListener('click', (event) => {
         if (event.metaKey || event.ctrlKey) openPostInBackground(thread);
         else void selectThread(thread.id, thread.id);
@@ -1243,7 +1245,6 @@
         if (event.button === 1) { event.preventDefault(); openPostInBackground(thread); }
       });
       const actions = element('div', 'thread-card-actions');
-      if (thread.flair) actions.append(flairButton(thread.flair));
       const background = element('button', 'link-button background-tab-open', 'Open in background');
       background.type = 'button';
       background.textContent = '';
@@ -1263,13 +1264,6 @@
       const cue = cachedLabel || hintCue;
       const articleLink = isExternalWebLink(thread.link_url) && !['video', 'image', 'audio'].includes((hint && hint.kind) || '') && !cachedKinds.some((kind) => ['video', 'image', 'audio'].includes(kind));
       if (articleLink) {
-        const expanded = expandedArticles.has(thread.id);
-        const expand = element('button', 'button secondary link-article-toggle', expanded ? 'Hide article' : 'Expand article');
-        expand.type = 'button';
-        expand.setAttribute('aria-expanded', String(expanded));
-        expand.setAttribute('aria-label', `${expanded ? 'Hide' : 'Expand'} linked article for ${thread.title}`);
-        expand.addEventListener('click', (event) => { event.stopPropagation(); void toggleLinkArticle(thread); });
-        actions.append(expand);
         const external = element('button', 'link-button open-web-link', 'Open link');
         external.type = 'button';
         external.setAttribute('aria-label', `Open external link for ${thread.title}`);
@@ -1289,15 +1283,48 @@
         actions.append(mediaButton);
       }
       const inline = element('div', 'inline-media');
-      inline.hidden = !inlineExpanded.has(thread.id) && !expandedArticles.has(thread.id);
+      inline.hidden = !inlineExpanded.has(thread.id);
       inline.dataset.inlineMediaFor = thread.id;
       if (inlineExpanded.has(thread.id) && mediaByThread.has(thread.id)) inline.append(renderMedia(thread.id, { collapsible: false, inline: true }));
-      if (expandedArticles.has(thread.id)) inline.append(renderLinkArticle(thread));
-      card.append(open, actions, inline);
+      card.append(main, actions, inline);
       ui.list.append(card);
     });
     const index = threads.findIndex((thread) => thread.id === activeId);
     keyboardThread = index < 0 ? 0 : index;
+  }
+
+  function subredditLink(name) {
+    const link = element('a', 'thread-subreddit subreddit', `r/${name}`);
+    link.href = `https://www.reddit.com/r/${encodeURIComponent(name)}/`;
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void browseSubreddit(`/r/${name}`);
+    });
+    return link;
+  }
+
+  function threadPermalink(thread) {
+    return thread.permalink || `https://www.reddit.com/r/${encodeURIComponent(thread.subreddit)}/comments/${thread.id.replace(/^t3_/, '')}/`;
+  }
+
+  async function copyThreadLink(thread) {
+    const url = threadPermalink(thread);
+    try {
+      await navigator.clipboard.writeText(url);
+      toast('Thread link copied');
+    } catch (error) {
+      const input = element('textarea');
+      input.value = url;
+      input.style.position = 'fixed';
+      input.style.opacity = '0';
+      document.body.append(input);
+      input.select();
+      const copied = document.execCommand('copy');
+      input.remove();
+      if (copied) toast('Thread link copied');
+      else toast(`Copy this thread link: ${url}`);
+    }
   }
 
   function flairButton(flair) {
@@ -1453,32 +1480,7 @@
     } catch (_) { return false; }
   }
 
-  async function toggleLinkArticle(thread) {
-    if (expandedArticles.has(thread.id)) {
-      expandedArticles.delete(thread.id);
-      refreshArticlePanels(thread);
-      return;
-    }
-    expandedArticles.add(thread.id);
-    refreshArticlePanels(thread);
-    const cached = linkArticleStates.get(thread.id);
-    if (cached && cached.status === 'loaded') return;
-    await loadArticle(thread);
-  }
-
   function refreshArticlePanels(thread) {
-    const card = ui.list.querySelector(`[data-thread-id="${CSS.escape(thread.id)}"]`);
-    if (card) {
-      const region = card.querySelector('.inline-media');
-      const toggle = card.querySelector('.link-article-toggle');
-      const expanded = expandedArticles.has(thread.id);
-      if (toggle) { toggle.textContent = expanded ? 'Hide article' : 'Expand article'; toggle.setAttribute('aria-expanded', String(expanded)); }
-      if (region && !inlineExpanded.has(thread.id)) {
-        region.replaceChildren();
-        region.hidden = !expanded;
-        if (expanded) region.append(renderLinkArticle(thread));
-      }
-    }
     if (activeId === thread.id) {
       const slot = ui.view.querySelector('.reader-article-slot');
       if (slot) slot.replaceChildren(renderLinkArticle(thread));
@@ -1775,8 +1777,15 @@
     releaseMediaWatchesWithin(ui.view);
     ui.view.replaceChildren();
     const topline = element('div', 'thread-topline');
-    topline.append(element('span', 'subreddit', `r/${thread.subreddit}`));
+    topline.append(subredditLink(thread.subreddit));
     if (thread.flair) topline.append(flairButton(thread.flair));
+    const copy = element('button', 'link-button copy-thread-link', 'Copy thread link');
+    copy.type = 'button';
+    copy.addEventListener('click', () => void copyThreadLink(thread));
+    const original = element('a', 'original-thread-link', 'Open on Reddit');
+    original.href = threadPermalink(thread);
+    original.addEventListener('click', (event) => { event.preventDefault(); void openWebLink(original.href); });
+    topline.append(copy, original);
     ui.view.append(topline, element('h1', '', thread.title));
     ui.view.append(renderReaderLibraryActions(thread));
     const body = element('p', 'thread-body');

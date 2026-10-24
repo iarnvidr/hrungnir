@@ -11,16 +11,9 @@ async (page) => {
   await page.locator('#flair-filter').selectOption('');
   assert(await page.locator('.thread-item').count() === 28, 'flair filter did not reset');
 
-  const expand = row('t3_fixture12').locator('.link-article-toggle');
-  await expand.click();
-  await page.waitForFunction(() => window.__ux.articles.has('t3_fixture12'));
-  const originalButton = await expand.elementHandle();
-  const before = await page.evaluate(() => window.scrollY);
-  await page.evaluate(() => window.__ux.releaseArticle('t3_fixture12'));
-  await page.waitForFunction(() => document.querySelector('[data-thread-id="t3_fixture12"] .link-article-body'));
-  assert(Math.abs(await page.evaluate(() => window.scrollY) - before) <= 2, 'async article expansion moved the viewport');
-  assert(await originalButton.evaluate(node => node.isConnected), 'article expansion rebuilt the listing');
-  await expand.click();
+  assert(await page.locator('.link-article-toggle').count() === 0, 'articles still expand inline');
+  assert(await row('t3_video').locator('.inline-media-toggle').count() === 1, 'media expansion missing');
+  assert(!await page.evaluate(() => window.__ux.calls.some(call => call.command === 'fetch_thread')), 'thumbnails triggered a full post/media download');
 
   await row('t3_video').locator('.thread-open').click({modifiers: ['Control']});
   assert(await page.locator('#reader-panel').isHidden(), 'Ctrl-click stole foreground focus');
@@ -30,6 +23,9 @@ async (page) => {
   await row('t3_article').locator('.thread-open').click();
   assert(await page.locator('#reader-panel').isVisible(), 'post did not open while comments were pending');
   assert((await page.locator('#thread-view h1').innerText()).includes('readable article'), 'post heading unavailable before fetch completion');
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.getByRole('button', {name: 'Copy thread link', exact: true}).click();
+  assert((await page.evaluate(() => navigator.clipboard.readText())).includes('/comments/article/'), 'copied link is not the Reddit thread');
   await page.waitForFunction(() => window.__ux.articles.has('t3_article'));
   await page.evaluate(() => window.__ux.releaseArticle('t3_article'));
   await page.waitForFunction(() => document.querySelector('.reader-article-slot .link-article-body'));
@@ -52,13 +48,19 @@ async (page) => {
   await page.getByRole('tab', {name: 'Subreddits & posts', exact: true}).click();
   await row('t3_discussion').locator('.thread-open').click();
   assert((await page.locator('.thread-body').innerText()).includes('Episode one'), 'self-post content missing');
+  assert((await page.locator('.thread-body a').first().getAttribute('href')).includes('/comments/'), 'episode destination was lost');
+  const subreddit = page.locator('#thread-view .thread-topline .thread-subreddit');
+  assert((await subreddit.getAttribute('href')).includes('/r/space/'), 'reader subreddit has no link');
+  await subreddit.click();
+  await page.waitForFunction(() => window.__ux.calls.some(call => call.command === 'fetch_subreddit' && call.args.subreddit === 'space'));
+  assert(await page.locator('#reader-panel').isHidden(), 'subreddit link did not navigate to listing');
   await page.getByRole('tab', {name: 'Subreddits & posts', exact: true}).click();
   await page.evaluate(() => window.__ux.releasePost('t3_discussion'));
-  await page.waitForFunction(() => !window.__ux.posts.has('irrelevant') && window.__ux.calls.some(c => c.command === 'save_position' && c.args.id === 't3_discussion'));
+  await page.waitForFunction(() => window.__ux.completed.includes('t3_discussion'));
   assert(await page.locator('#reader-panel').isHidden(), 'late post response stole focus from browsing');
   await page.setViewportSize({width: 1000, height: 800});
   await page.screenshot({path: '/tmp/hrungnir-reader-listing.png', fullPage: false});
   await page.setViewportSize({width: 500, height: 800});
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'narrow layout overflows horizontally');
-  return {passed: ['no fetch timestamps', 'real thumbnails', 'flair filtering', 'stable inline expansion', 'background tabs', 'immediate post opening', 'article in reader', 'one-click save', 'comments during stalled media', 'self-post body', 'no late focus steal', 'narrow layout'], screenshots: ['/tmp/hrungnir-reader-article.png', '/tmp/hrungnir-reader-listing.png']};
+  return {passed: ['no fetch timestamps', 'thumbnails without full downloads', 'flair filtering', 'only media expands inline', 'background tabs', 'immediate post opening', 'article in reader', 'one-click save', 'comments during stalled media', 'self-post body', 'no late focus steal', 'narrow layout'], screenshots: ['/tmp/hrungnir-reader-article.png', '/tmp/hrungnir-reader-listing.png']};
 }

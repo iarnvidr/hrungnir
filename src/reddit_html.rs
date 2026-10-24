@@ -246,6 +246,13 @@ pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<Page
             title: title_text,
             body: node.select(&selector(".usertext-body .md, .search-result-body")).next()
                 .map(|body| body_text(body, &base, if post_id.is_some() { 16000 } else { 2000 }))
+                .filter(|body| !body.is_empty())
+                .or_else(|| node.select(&selector("[data-cachedhtml], [data-cached-html]")).find_map(|expando| {
+                    let markup = expando.value().attr("data-cachedhtml").or_else(|| expando.value().attr("data-cached-html"))?;
+                    let fragment = Html::parse_fragment(markup);
+                    fragment.select(&selector(".md")).next()
+                        .map(|body| body_text(body, &base, 16000)).filter(|body| !body.is_empty())
+                }))
                 .unwrap_or_default(),
             captured_at: 0,
             comments: Vec::new(),
@@ -257,7 +264,7 @@ pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<Page
                 .map(|flair| text(flair, 120)).filter(|flair| !flair.is_empty()),
             source: Some("proxy".into()),
             comments_status: Some(
-                if empty {
+                if empty && post_id.is_some() {
                     "empty_confirmed"
                 } else {
                     "not_loaded"

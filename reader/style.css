@@ -407,14 +407,25 @@ button:disabled { opacity: .55; cursor: wait; }
 .reader-save-fields label:not(.checkbox-label) { display: grid; gap: 3px; color: var(--muted); font-size: calc(10px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); }
 .reader-save-fields .checkbox-label { display: flex; align-items: center; gap: 7px; font-size: calc(11px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); }
 .reader-save-fields .save-link-status { margin: 0; }
-.thread-list { overflow-anchor: none; }
+.thread-list { display: flex; flex-direction: column; overflow-anchor: none; }
 .thread-item { border-radius: 6px; }
 .thread-open { min-height: 72px; padding: 8px; }
 .thread-thumb { width: 72px; height: 54px; flex-basis: 72px; border-radius: 4px; }
 .thread-title { font-size: calc(14px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); line-height: 1.4; }
 .thread-meta .thread-subreddit, .thread-domain { font-size: calc(11px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); }
 .thread-domain { color: var(--muted); }
-.thread-card-actions { flex-wrap: wrap; max-width: 340px; gap: 8px; }
+.thread-card-actions { display: grid; grid-template-columns: 36px 132px 80px; align-items: center; justify-content: end; max-width: none; gap: 8px; }
+.thread-card-actions .background-tab-open { grid-column: 1; }
+.thread-card-actions .link-article-toggle, .thread-card-actions .inline-media-toggle { grid-column: 2; grid-row: 1; }
+.thread-card-actions .open-web-link { grid-column: 3; grid-row: 1; }
+.thread-card-actions .background-tab-open { grid-row: 1; }
+.thread-card-actions .media-kind-cue { grid-column: 3; grid-row: 1; justify-self: start; }
+.thread-main { min-width: 0; }
+.thread-main .thread-open { width: 100%; min-height: 48px; padding-bottom: 0; }
+.thread-main .thread-meta { margin: 0 8px 8px 88px; }
+.thread-topline { flex-wrap: wrap; }
+.thread-topline .copy-thread-link { margin-left: auto; }
+.thread-subreddit { cursor: pointer; }
 .post-flair { border: 1px solid var(--line2); border-radius: 5px; background: var(--panel); color: var(--text); padding: 5px 8px; font: inherit; font-size: .85em; max-width: 200px; overflow-wrap: anywhere; }
 .post-flair[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
 .flair-filter { display: flex; align-items: center; gap: 8px; margin: 8px 0 12px; color: var(--muted); }

@@ -78,6 +78,18 @@ fn comment_authors_and_club_flair_belong_to_their_own_comment() {
 }
 
 #[test]
+fn zero_comment_listing_is_not_a_downloaded_post_and_expando_keeps_episode_links() {
+    let html = r#"<div class="thing link" data-fullname="t3_post"><a class="title" href="/r/television/comments/post/discussion/">Episode discussions</a><a class="comments empty" href="/r/television/comments/post/discussion/">0 comments</a><div class="expando" data-cachedhtml="&lt;div class=&quot;md&quot;&gt;&lt;p&gt;Season 5, Episode 1: &lt;a href=&quot;/r/television/comments/first/light/&quot;&gt;First Light&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Season 5, Episode 2: &lt;a href=&quot;/r/television/comments/second/ice/&quot;&gt;The Hard Six&lt;/a&gt;&lt;/p&gt;&lt;/div&gt;"></div></div>"#;
+    let listing = reddit_html::parse(response("/r/television/", html)).unwrap();
+    assert!(!reddit_offline::browsing::comments_ready(&listing.threads[0]));
+    let post = reddit_html::parse(response("/r/television/comments/post/discussion/", html)).unwrap();
+    assert_eq!(post.threads[0].comments_status.as_deref(), Some("empty_confirmed"));
+    assert!(post.threads[0].body.contains("First Light"));
+    assert!(post.threads[0].body.contains("https://www.reddit.com/r/television/comments/second/ice/"));
+    assert!(post.threads[0].body.contains("\n\n"));
+}
+
+#[test]
 fn ca_is_private_reused_and_cannot_issue_unrelated_hosts() {
     let directory = std::env::temp_dir().join(format!("reader-ca-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
