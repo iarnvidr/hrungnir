@@ -407,7 +407,7 @@ button:disabled { opacity: .55; cursor: wait; }
 .reader-save-fields label:not(.checkbox-label) { display: grid; gap: 3px; color: var(--muted); font-size: calc(10px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); }
 .reader-save-fields .checkbox-label { display: flex; align-items: center; gap: 7px; font-size: calc(11px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); }
 .reader-save-fields .save-link-status { margin: 0; }
-.thread-list { overflow-anchor: none; }
+.thread-list { display: flex; flex-direction: column; overflow-anchor: none; }
 .thread-item { border-radius: 6px; }
 .thread-open { min-height: 72px; padding: 8px; }
 .thread-thumb { width: 72px; height: 54px; flex-basis: 72px; border-radius: 4px; }

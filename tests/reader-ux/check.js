@@ -63,7 +63,7 @@ async (page) => {
   assert(await page.locator('#reader-panel').isHidden(), 'subreddit link did not navigate to listing');
   await page.getByRole('tab', {name: 'Subreddits & posts', exact: true}).click();
   await page.evaluate(() => window.__ux.releasePost('t3_discussion'));
-  await page.waitForFunction(() => !window.__ux.posts.has('irrelevant') && window.__ux.calls.some(c => c.command === 'save_position' && c.args.id === 't3_discussion'));
+  await page.waitForFunction(() => window.__ux.completed.includes('t3_discussion'));
   assert(await page.locator('#reader-panel').isHidden(), 'late post response stole focus from browsing');
   await page.setViewportSize({width: 1000, height: 800});
   await page.screenshot({path: '/tmp/hrungnir-reader-listing.png', fullPage: false});
