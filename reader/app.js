@@ -100,7 +100,6 @@
   let playbackEventWindowStarted = 0;
   let playbackEventWindowCount = 0;
   const inlineExpanded = new Set();
-  const expandedArticles = new Set();
   const linkArticleStates = new Map();
   const linkPreviewRequests = new Set();
   const linkPreviewCompleted = new Set();
@@ -1265,13 +1264,6 @@
       const cue = cachedLabel || hintCue;
       const articleLink = isExternalWebLink(thread.link_url) && !['video', 'image', 'audio'].includes((hint && hint.kind) || '') && !cachedKinds.some((kind) => ['video', 'image', 'audio'].includes(kind));
       if (articleLink) {
-        const expanded = expandedArticles.has(thread.id);
-        const expand = element('button', 'button secondary link-article-toggle', expanded ? 'Hide article' : 'Expand article');
-        expand.type = 'button';
-        expand.setAttribute('aria-expanded', String(expanded));
-        expand.setAttribute('aria-label', `${expanded ? 'Hide' : 'Expand'} linked article for ${thread.title}`);
-        expand.addEventListener('click', (event) => { event.stopPropagation(); void toggleLinkArticle(thread); });
-        actions.append(expand);
         const external = element('button', 'link-button open-web-link', 'Open link');
         external.type = 'button';
         external.setAttribute('aria-label', `Open external link for ${thread.title}`);
@@ -1291,10 +1283,9 @@
         actions.append(mediaButton);
       }
       const inline = element('div', 'inline-media');
-      inline.hidden = !inlineExpanded.has(thread.id) && !expandedArticles.has(thread.id);
+      inline.hidden = !inlineExpanded.has(thread.id);
       inline.dataset.inlineMediaFor = thread.id;
       if (inlineExpanded.has(thread.id) && mediaByThread.has(thread.id)) inline.append(renderMedia(thread.id, { collapsible: false, inline: true }));
-      if (expandedArticles.has(thread.id)) inline.append(renderLinkArticle(thread));
       card.append(main, actions, inline);
       ui.list.append(card);
     });
@@ -1489,32 +1480,7 @@
     } catch (_) { return false; }
   }
 
-  async function toggleLinkArticle(thread) {
-    if (expandedArticles.has(thread.id)) {
-      expandedArticles.delete(thread.id);
-      refreshArticlePanels(thread);
-      return;
-    }
-    expandedArticles.add(thread.id);
-    refreshArticlePanels(thread);
-    const cached = linkArticleStates.get(thread.id);
-    if (cached && cached.status === 'loaded') return;
-    await loadArticle(thread);
-  }
-
   function refreshArticlePanels(thread) {
-    const card = ui.list.querySelector(`[data-thread-id="${CSS.escape(thread.id)}"]`);
-    if (card) {
-      const region = card.querySelector('.inline-media');
-      const toggle = card.querySelector('.link-article-toggle');
-      const expanded = expandedArticles.has(thread.id);
-      if (toggle) { toggle.textContent = expanded ? 'Hide article' : 'Expand article'; toggle.setAttribute('aria-expanded', String(expanded)); }
-      if (region && !inlineExpanded.has(thread.id)) {
-        region.replaceChildren();
-        region.hidden = !expanded;
-        if (expanded) region.append(renderLinkArticle(thread));
-      }
-    }
     if (activeId === thread.id) {
       const slot = ui.view.querySelector('.reader-article-slot');
       if (slot) slot.replaceChildren(renderLinkArticle(thread));

@@ -11,16 +11,9 @@ async (page) => {
   await page.locator('#flair-filter').selectOption('');
   assert(await page.locator('.thread-item').count() === 28, 'flair filter did not reset');
 
-  const expand = row('t3_fixture12').locator('.link-article-toggle');
-  await expand.click();
-  await page.waitForFunction(() => window.__ux.articles.has('t3_fixture12'));
-  const originalButton = await expand.elementHandle();
-  const before = await page.evaluate(() => window.scrollY);
-  await page.evaluate(() => window.__ux.releaseArticle('t3_fixture12'));
-  await page.waitForFunction(() => document.querySelector('[data-thread-id="t3_fixture12"] .link-article-body'));
-  assert(Math.abs(await page.evaluate(() => window.scrollY) - before) <= 2, 'async article expansion moved the viewport');
-  assert(await originalButton.evaluate(node => node.isConnected), 'article expansion rebuilt the listing');
-  await expand.click();
+  assert(await page.locator('.link-article-toggle').count() === 0, 'articles still expand inline');
+  assert(await row('t3_video').locator('.inline-media-toggle').count() === 1, 'media expansion missing');
+  assert(!await page.evaluate(() => window.__ux.calls.some(call => call.command === 'fetch_thread')), 'thumbnails triggered a full post/media download');
 
   await row('t3_video').locator('.thread-open').click({modifiers: ['Control']});
   assert(await page.locator('#reader-panel').isHidden(), 'Ctrl-click stole foreground focus');
@@ -69,5 +62,5 @@ async (page) => {
   await page.screenshot({path: '/tmp/hrungnir-reader-listing.png', fullPage: false});
   await page.setViewportSize({width: 500, height: 800});
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'narrow layout overflows horizontally');
-  return {passed: ['no fetch timestamps', 'real thumbnails', 'flair filtering', 'stable inline expansion', 'background tabs', 'immediate post opening', 'article in reader', 'one-click save', 'comments during stalled media', 'self-post body', 'no late focus steal', 'narrow layout'], screenshots: ['/tmp/hrungnir-reader-article.png', '/tmp/hrungnir-reader-listing.png']};
+  return {passed: ['no fetch timestamps', 'thumbnails without full downloads', 'flair filtering', 'only media expands inline', 'background tabs', 'immediate post opening', 'article in reader', 'one-click save', 'comments during stalled media', 'self-post body', 'no late focus steal', 'narrow layout'], screenshots: ['/tmp/hrungnir-reader-article.png', '/tmp/hrungnir-reader-listing.png']};
 }

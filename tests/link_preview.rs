@@ -14,11 +14,11 @@ fn thumbnail_hosts_reject_external_private_credentials_and_lookalikes() {
         "https://a.thumbs.redditmedia.com/image.jpg",
         "https://preview.redd.it/image.png?width=140",
         "https://external-preview.redd.it/image.jpg",
-        "https://i.redd.it/image.jpg",
     ] {
         assert!(link_preview::thumbnail_url(url).is_some(), "{url}");
     }
     for url in [
+        "https://i.redd.it/image.jpg",
         "https://example.org/image.jpg",
         "https://127.0.0.1/image.jpg",
         "https://preview.redd.it.evil.example/image.jpg",
