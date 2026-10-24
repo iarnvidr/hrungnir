@@ -1231,6 +1231,7 @@
         thumb.append(image);
       }
       const meta = element('span', 'thread-meta');
+      if (thread.flair) meta.append(flairButton(thread.flair));
       meta.append(sub);
       if (isExternalWebLink(thread.link_url)) meta.append(element('span', 'thread-domain', safeDomain(thread.link_url)));
       open.append(thumb, element('span', 'thread-open-copy'));
@@ -1245,7 +1246,6 @@
         if (event.button === 1) { event.preventDefault(); openPostInBackground(thread); }
       });
       const actions = element('div', 'thread-card-actions');
-      if (thread.flair) actions.append(flairButton(thread.flair));
       const background = element('button', 'link-button background-tab-open', 'Open in background');
       background.type = 'button';
       background.textContent = '';

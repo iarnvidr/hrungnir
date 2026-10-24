@@ -416,11 +416,10 @@ button:disabled { opacity: .55; cursor: wait; }
 .thread-domain { color: var(--muted); }
 .thread-card-actions { display: grid; grid-template-columns: 36px 132px 80px; align-items: center; justify-content: end; max-width: none; gap: 8px; }
 .thread-card-actions .background-tab-open { grid-column: 1; }
-.thread-card-actions .link-article-toggle, .thread-card-actions .inline-media-toggle { grid-column: 2; grid-row: 2; }
-.thread-card-actions .open-web-link { grid-column: 3; grid-row: 2; }
-.thread-card-actions .background-tab-open { grid-row: 2; }
-.thread-card-actions .post-flair { grid-column: 2 / 4; grid-row: 1; justify-self: start; }
-.thread-card-actions .media-kind-cue { grid-column: 3; grid-row: 2; justify-self: start; }
+.thread-card-actions .link-article-toggle, .thread-card-actions .inline-media-toggle { grid-column: 2; grid-row: 1; }
+.thread-card-actions .open-web-link { grid-column: 3; grid-row: 1; }
+.thread-card-actions .background-tab-open { grid-row: 1; }
+.thread-card-actions .media-kind-cue { grid-column: 3; grid-row: 1; justify-self: start; }
 .thread-main { min-width: 0; }
 .thread-main .thread-open { width: 100%; min-height: 48px; padding-bottom: 0; }
 .thread-main .thread-meta { margin: 0 8px 8px 88px; }
