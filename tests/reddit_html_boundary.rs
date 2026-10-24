@@ -68,7 +68,8 @@ fn explicit_empty_discussion_is_distinct_from_unloaded_listing_comments() {
         .iter()
         .find(|thread| thread.id == "t3_unloaded")
         .unwrap();
-    assert_eq!(empty.comments_status.as_deref(), Some("empty_confirmed"));
+    // A listing's reply count does not establish that its post body was captured.
+    assert_eq!(empty.comments_status.as_deref(), Some("not_loaded"));
     assert_eq!(unloaded.comments_status.as_deref(), Some("not_loaded"));
     assert_eq!(empty.source.as_deref(), Some("proxy"));
     assert_eq!(unloaded.source.as_deref(), Some("proxy"));
