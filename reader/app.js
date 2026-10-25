@@ -87,7 +87,8 @@
   const threadDownloadsInFlight = new Map();
   const postLoadsInFlight = new Map();
   const readerMediaStates = new Map();
-  const postScrollPositions = new Map();
+  const viewScrollPositions = new Map();
+  let scrollView = null;
   const articleRequests = new Map();
   let selectedFlair = '';
   let flairSource = '';
@@ -715,6 +716,9 @@
 
   function setTab(tab, persist = true) {
     const active = ['browse', 'reader', 'library'].includes(tab) ? tab : 'browse';
+    const nextView = active === 'browse' ? `browse:${redditSearch ? 'search' : activeSubreddit}` : active === 'reader' ? `reader:${activeId}` : active;
+    const changed = scrollView !== nextView;
+    if (changed && scrollView) viewScrollPositions.set(scrollView, window.scrollY);
     ui.browsePanel.hidden = active !== 'browse';
     ui.readerPanel.hidden = active !== 'reader';
     ui.libraryPanel.hidden = active !== 'library';
@@ -724,6 +728,9 @@
       button.tabIndex = selected ? 0 : -1;
     }
     if (persist) { preferences.tab = active; savePreferences(); }
+    scrollView = nextView;
+    renderPostTabs();
+    if (changed) window.scrollTo(0, viewScrollPositions.get(nextView) || 0);
     if (active === 'library' && invoke && !libraryLoaded) void loadLibraryState();
   }
 
@@ -1914,25 +1921,28 @@
   }
 
   function renderPostTabs() {
+    const focusedLabel = ui.postTabs.contains(document.activeElement) ? document.activeElement.getAttribute('aria-label') : null;
     ui.postTabs.replaceChildren();
+    $('#tab-reader').hidden = preferences.postTabs.length > 0;
     ui.postTabs.hidden = !browseDraftOpen && preferences.postTabs.length === 0;
     for (const tab of preferences.postTabs) {
       const thread = threadCache.get(tab.id);
       const title = thread ? thread.title : tab.id;
       const unavailable = unavailableThreadIds.has(tab.id);
       const item = element('div', 'post-tab');
-      const selected = !browseDraftOpen && tab.id === activeId;
+      const selected = !ui.readerPanel.hidden && !browseDraftOpen && tab.id === activeId;
       item.classList.toggle('active', selected);
       item.setAttribute('role', 'presentation');
       const open = element('button', `post-tab-open${unavailable ? ' unavailable' : ''}`, unavailable ? `${title} · not cached` : title);
       open.type = 'button';
       open.setAttribute('role', 'tab');
+      open.setAttribute('aria-controls', 'reader-panel');
       open.setAttribute('aria-selected', String(selected));
       open.tabIndex = selected ? 0 : -1;
       open.setAttribute('aria-label', `Open ${title}${thread ? ` from r/${thread.subreddit}` : ''}`);
       open.addEventListener('click', () => void selectThread(tab.id, tab.anchor || tab.id, true, 'restore'));
       open.addEventListener('keydown', (event) => {
-        const tabs = [...ui.postTabs.querySelectorAll('[role="tab"]')];
+        const tabs = [...document.querySelectorAll('.reader-tabs [role="tab"]')].filter((tab) => !tab.hidden);
         const index = tabs.indexOf(open);
         const next = event.key === 'ArrowRight' ? Math.min(tabs.length - 1, index + 1)
           : event.key === 'ArrowLeft' ? Math.max(0, index - 1)
@@ -1956,12 +1966,13 @@
       const open = element('button', 'post-tab-open', 'New subreddit search');
       open.type = 'button';
       open.setAttribute('role', 'tab');
+      open.setAttribute('aria-controls', 'browse-panel');
       open.setAttribute('aria-selected', 'true');
       open.setAttribute('aria-label', 'Open new subreddit search tab');
       open.tabIndex = 0;
       open.addEventListener('click', openBrowseDraftTab);
       open.addEventListener('keydown', (event) => {
-        const tabs = [...ui.postTabs.querySelectorAll('[role="tab"]')];
+        const tabs = [...document.querySelectorAll('.reader-tabs [role="tab"]')].filter((tab) => !tab.hidden);
         const index = tabs.indexOf(open);
         const next = event.key === 'ArrowRight' ? Math.min(tabs.length - 1, index + 1)
           : event.key === 'ArrowLeft' ? Math.max(0, index - 1)
@@ -1978,6 +1989,9 @@
       close.addEventListener('click', closeBrowseDraftTab);
       item.append(open, close);
       ui.postTabs.append(item);
+    }
+    if (focusedLabel) {
+      [...ui.postTabs.querySelectorAll('button')].find((button) => button.getAttribute('aria-label') === focusedLabel)?.focus({ preventScroll: true });
     }
   }
 
@@ -2397,6 +2411,7 @@
     let subreddit;
     try { subreddit = normalizeSubreddit(rawValue); }
     catch (error) { setFeedback(explainError(error), true); ui.input.focus(); return; }
+    const listingScroll = scrollView === `browse:${subreddit}` ? window.scrollY : (viewScrollPositions.get(`browse:${subreddit}`) || 0);
     ui.input.value = `/r/${subreddit}`;
     redditSearch = null;
     cancelRedditSearch();
@@ -2415,6 +2430,8 @@
     preferences.lastSubreddit = subreddit;
     setTab('browse');
     renderList();
+    window.scrollTo(0, listingScroll);
+    const initialListingScroll = window.scrollY;
     ui.list.setAttribute('aria-busy', 'true');
     if (bulkMediaRun) bulkMediaRun.cancelled = true;
     updateFetchAllMediaControl();
@@ -2438,7 +2455,10 @@
       recordRecent(subreddit);
       if (transition === operationSequence) setTab('browse');
       refreshDiagnostics(snapshot);
+      const restoreListing = scrollView === `browse:${subreddit}`;
+      const savedScroll = window.scrollY === initialListingScroll ? listingScroll : window.scrollY;
       renderList();
+      if (restoreListing) window.scrollTo(0, savedScroll);
       renderPostTabs();
       requestLinkPreviews(result.threads);
       const elapsed = performance.now() - startedAt;
@@ -2737,7 +2757,7 @@
     }
     const selected = threadCache.get(id) || [...listingBySubreddit.values()].flat().find((thread) => thread.id === id) || (preferences.postTabs.some((tab) => tab.id === id) ? { id, title: id } : null);
     if (!selected) return;
-    if (activeId && !ui.readerPanel.hidden) postScrollPositions.set(activeId, window.scrollY);
+    if (scrollView) viewScrollPositions.set(scrollView, window.scrollY);
     const transition = ++operationSequence;
     const startedAt = performance.now();
     pendingId = id;
@@ -2750,9 +2770,9 @@
     loadedThreadIds.add(id);
     ensurePostTab(selected, anchor, { cachedOnly });
     pendingAnchor = anchor !== id ? anchor : null;
-    draw();
     if (switchToReader) setTab('reader');
-    if (!ui.readerPanel.hidden) window.scrollTo(0, postScrollPositions.get(id) || 0);
+    draw();
+    if (!ui.readerPanel.hidden) window.scrollTo(0, viewScrollPositions.get(`reader:${id}`) || 0);
     setFeedback('');
     setStatus('Opening post…');
     try {
@@ -2767,7 +2787,7 @@
       const renderStartedAt = performance.now();
       const readerScroll = window.scrollY;
       draw();
-      requestAnimationFrame(() => { if (activeId === id) window.scrollTo(0, readerScroll); });
+      if (!ui.readerPanel.hidden) window.scrollTo(0, readerScroll);
       recordClientEvent('reader_render', performance.now() - renderStartedAt, downloadedThread.comments.length + download.media.length);
       await focusAnchor(id, anchor, null);
       setFeedback('');
@@ -3116,14 +3136,17 @@
       savePreferences();
     });
     ui.tabs.forEach((button) => button.addEventListener('click', () => setTab(button.dataset.tab)));
-    ui.tabs.forEach((button, index) => button.addEventListener('keydown', (event) => {
-      const next = event.key === 'ArrowRight' ? (index + 1) % ui.tabs.length
-        : event.key === 'ArrowLeft' ? (index + ui.tabs.length - 1) % ui.tabs.length
-          : event.key === 'Home' ? 0 : event.key === 'End' ? ui.tabs.length - 1 : -1;
+    ui.tabs.forEach((button) => button.addEventListener('keydown', (event) => {
+      const tabs = [...document.querySelectorAll('.reader-tabs [role="tab"]')].filter((tab) => !tab.hidden);
+      const index = tabs.indexOf(button);
+      const next = event.key === 'ArrowRight' ? (index + 1) % tabs.length
+        : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length
+          : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : -1;
       if (next < 0) return;
       event.preventDefault();
-      ui.tabs[next].focus();
-      setTab(ui.tabs[next].dataset.tab);
+      tabs[next].focus();
+      tabs[next].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      tabs[next].click();
     }));
     ui.settingsOpen.addEventListener('click', () => {
       if (typeof ui.settingsDialog.showModal === 'function') ui.settingsDialog.showModal();
@@ -3294,6 +3317,10 @@
     ui.diagnosticsExport.addEventListener('click', exportDiagnostics);
     ui.supportExport.addEventListener('click', () => void exportSupportBundle());
     ui.trustRecoveryButton.addEventListener('click', () => void allowProxyCertificate());
+    const workspaceTabs = document.querySelector('.workspace-tabs');
+    new ResizeObserver(() => {
+      document.documentElement.style.setProperty('--workspace-tabs-height', `${workspaceTabs.offsetHeight}px`);
+    }).observe(workspaceTabs);
     setTab(preferences.tab, false);
     updateSortNotice();
     renderSubreddits();

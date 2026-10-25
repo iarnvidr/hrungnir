@@ -494,3 +494,31 @@ button:disabled { opacity: .55; cursor: wait; }
 .range-setting output { min-width: 3.5em; color: var(--muted); text-align: end; font-variant-numeric: tabular-nums; }
 .keep-video-button { margin-top: 7px; }
 .keep-video-status { margin: 4px 0 0; overflow-wrap: anywhere; }
+
+/* Keep navigation available without covering the content beneath it. */
+.workspace-tabs {
+  position: sticky; top: 0; z-index: 4;
+  display: flex; align-items: stretch; gap: 8px;
+  min-height: 38px; padding-inline: 10px;
+  background: var(--rail); border-bottom: 1px solid var(--line);
+}
+.workspace-tabs .reader-tabs {
+  flex: 1; min-width: 0; max-width: none; height: auto;
+  overflow-x: auto; margin: 0; padding: 2px 0 0; border: 0;
+  scrollbar-width: thin;
+}
+.workspace-tabs .reader-tabs > button { flex: none; white-space: nowrap; }
+.workspace-tabs #tab-browse { position: sticky; left: 0; z-index: 1; background: var(--rail); }
+.workspace-tabs #tab-browse[aria-selected="true"] { background: var(--bg); }
+.workspace-tabs .post-tabs { display: contents; }
+.workspace-tabs .new-browse-tab { align-self: center; margin: 0; }
+.browse-layout .rail {
+  position: sticky; top: var(--workspace-tabs-height, 38px); align-self: start;
+  max-height: calc(100dvh / var(--reader-ui-scale, 1) - var(--workspace-tabs-height, 38px));
+  overflow-y: auto; overscroll-behavior: contain;
+}
+@media (max-width: 700px) {
+  .browse-layout .rail { max-height: calc(40dvh / var(--reader-ui-scale, 1)); z-index: 2; }
+  .workspace-tabs { gap: 4px; padding-inline: 6px; }
+  .workspace-tabs .new-browse-tab { font-size: 10px; padding-inline: 5px; }
+}

@@ -11,6 +11,15 @@
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to reader content</a>
+  <div class="workspace-tabs">
+    <nav class="reader-tabs" role="tablist" aria-label="Reader sections">
+      <button id="tab-browse" role="tab" aria-selected="true" aria-controls="browse-panel" data-tab="browse">Subreddits &amp; posts</button>
+      <div id="post-tabs" class="post-tabs" role="presentation"></div>
+      <button id="tab-reader" role="tab" aria-selected="false" aria-controls="reader-panel" data-tab="reader">Post reader</button>
+      <button id="tab-library" role="tab" aria-selected="false" aria-controls="library-panel" data-tab="library">Library</button>
+    </nav>
+    <button id="new-browse-tab" class="button secondary new-browse-tab" type="button" title="Start a new subreddit search (⌘T / Ctrl+T)">＋ New tab</button>
+  </div>
   <header class="masthead">
     <a class="wordmark" href="#browse-panel" aria-label="Hrungnir home"><img src="hrungnir.png" alt=""><span><b>Hrungnir</b><small>OFFLINE READER</small></span></a>
     <form id="header-search-form" class="header-search" role="search" autocomplete="off">
@@ -25,15 +34,6 @@
     <div class="masthead-status"><span class="status-dot" aria-hidden="true"></span><span id="connection-status">Checking native cache…</span></div>
   </header>
 
-  <div class="section-tabs-row">
-    <nav class="reader-tabs" role="tablist" aria-label="Reader sections">
-      <button id="tab-browse" role="tab" aria-selected="true" aria-controls="browse-panel" data-tab="browse">Subreddits &amp; posts</button>
-      <button id="tab-reader" role="tab" aria-selected="false" aria-controls="reader-panel" data-tab="reader">Post reader</button>
-      <button id="tab-library" role="tab" aria-selected="false" aria-controls="library-panel" data-tab="library">Library</button>
-    </nav>
-    <button id="new-browse-tab" class="button secondary new-browse-tab" type="button" title="Start a new subreddit search (⌘T / Ctrl+T)">＋ New tab</button>
-  </div>
-  <nav id="post-tabs" class="post-tabs" role="tablist" aria-label="Open posts" hidden></nav>
   <div id="reader-feedback" class="browse-feedback" role="status" aria-live="polite" hidden></div>
 
   <main id="main-content" tabindex="-1">
