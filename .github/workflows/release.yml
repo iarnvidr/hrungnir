@@ -55,10 +55,13 @@ jobs:
           key: media-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch-media-tools.py', 'scripts/ffmpeg_lgpl.py') }}
 
       - name: Install helper build tools
-        run: brew install meson ninja pkgconf
+        run: brew install meson ninja pkgconf minisign
 
       - name: Fetch media helpers (builds LGPL-only FFmpeg and dav1d from source)
         run: python3 scripts/fetch-media-tools.py
+
+      - name: Test updater signing and tamper rejection
+        run: python3 scripts/test-updater-package.py
 
       - name: Exercise media encode, merge and poster generation
         run: python3 scripts/test-media-tools.py
@@ -97,12 +100,27 @@ jobs:
           python3 scripts/ffmpeg_lgpl.py verify "$app/Contents/Resources/bin/ffmpeg"
           "$app/Contents/MacOS/offline-reader-desktop" --cli --data-dir "$verification_dir/cache" doctor
 
+      - name: Create and verify signed updater archive
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          test -n "$TAURI_SIGNING_PRIVATE_KEY" || { echo "Missing updater signing key" >&2; exit 1; }
+          python3 scripts/package-updater.py
+          verification_dir="$(mktemp -d "$RUNNER_TEMP/hrungnir-updater.XXXXXX")"
+          tar -xzf artifacts/*.app.tar.gz -C "$verification_dir"
+          codesign --verify --deep --strict --verbose=2 "$verification_dir/Hrungnir.app"
+          "$verification_dir/Hrungnir.app/Contents/MacOS/offline-reader-desktop" --cli --data-dir "$verification_dir/cache" doctor
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hrungnir-macos-arm64
           path: |
             artifacts/*.zip
             artifacts/*.zip.sha256
+            artifacts/*.app.tar.gz
+            artifacts/*.app.tar.gz.sig
+            artifacts/latest.json
           if-no-files-found: error
 
   release:
@@ -130,7 +148,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           notes="source/docs/RELEASE-${TAG#v}.md"
-          gh release create "$TAG" dist/*.zip dist/*.zip.sha256 \
+          gh release create "$TAG" dist/*.zip dist/*.zip.sha256 dist/*.app.tar.gz dist/*.app.tar.gz.sig dist/latest.json \
             --verify-tag \
             --title "Hrungnir ${TAG#v}" \
             --notes-file "$notes"

@@ -48,10 +48,13 @@ jobs:
           key: media-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch-media-tools.py', 'scripts/ffmpeg_lgpl.py') }}
 
       - name: Install helper build tools
-        run: brew install meson ninja pkgconf
+        run: brew install meson ninja pkgconf minisign
 
       - name: Fetch media helpers (builds LGPL-only FFmpeg and dav1d from source)
         run: python3 scripts/fetch-media-tools.py
+
+      - name: Test updater signing and tamper rejection
+        run: python3 scripts/test-updater-package.py
 
       - name: Exercise media encode, merge and poster generation
         run: python3 scripts/test-media-tools.py

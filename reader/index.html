@@ -160,6 +160,17 @@
   </dialog>
   <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
     <div class="dialog-heading"><h2 id="settings-title">Settings</h2><button id="settings-close" class="button secondary" type="button">Close</button></div>
+    <fieldset class="settings-group update-settings">
+      <legend>App updates</legend>
+      <p id="app-version" class="small muted">Hrungnir</p>
+      <p id="update-status" class="small muted" role="status" aria-live="polite">Updates are checked when the app starts. Installation is always your choice.</p>
+      <p id="update-notes" class="small" hidden></p>
+      <div class="settings-actions">
+        <button id="check-updates" class="button" type="button">Check for updates</button>
+        <button id="install-update" class="button primary" type="button" hidden>Install update</button>
+        <button id="restart-update" class="button primary" type="button" hidden>Restart to finish update</button>
+      </div>
+    </fieldset>
     <fieldset class="settings-group">
       <legend>Appearance</legend>
       <label for="theme-select">Theme</label>

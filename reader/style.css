@@ -494,6 +494,8 @@ button:disabled { opacity: .55; cursor: wait; }
 .range-setting output { min-width: 3.5em; color: var(--muted); text-align: end; font-variant-numeric: tabular-nums; }
 .keep-video-button { margin-top: 7px; }
 .keep-video-status { margin: 4px 0 0; overflow-wrap: anywhere; }
+.update-settings > p, .update-settings .settings-actions { grid-column: 1 / -1; margin-block: 2px; }
+#update-notes { white-space: pre-wrap; max-height: 140px; overflow-y: auto; }
 
 /* Keep navigation available without covering the content beneath it. */
 .workspace-tabs {
