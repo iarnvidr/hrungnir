@@ -1,0 +1,62 @@
+async (page) => {
+  const assert = (value, message) => { if (!value) throw new Error(message); };
+  await page.evaluate(() => localStorage.clear());
+  await page.setViewportSize({ width: 1100, height: 600 });
+  await page.reload();
+  await page.waitForFunction(() => document.querySelectorAll('.thread-item').length === 28);
+  const browse = page.locator('#tab-browse');
+  const fetch = async (name) => {
+    await page.locator('#subreddit-input').fill(name);
+    await page.locator('#browse-submit').click();
+    await page.waitForFunction(name => document.querySelector('#current-subreddit').textContent.includes(name) && !document.querySelector('#browse-submit').disabled, name);
+  };
+  await fetch('soccer');
+  await page.evaluate(() => window.scrollTo(0, 650));
+  const soccerScroll = await page.evaluate(() => window.scrollY);
+  assert(soccerScroll > 500, 'fixture must scroll enough to exercise navigation');
+  await page.locator('#browse-refresh').click();
+  await page.waitForFunction(() => !document.querySelector('#browse-submit').disabled);
+  assert(Math.abs(await page.evaluate(() => window.scrollY) - soccerScroll) < 2, 'refresh lost the current listing position');
+  const tabs = await page.locator('.workspace-tabs').boundingBox();
+  const rail = await page.locator('.rail').boundingBox();
+  assert(Math.abs(tabs.y) < 1 && rail.y >= tabs.height - 1 && rail.y < tabs.height + 2, 'tabs and navigator must stay visible while scrolling');
+  assert(await page.evaluate(() => document.querySelector('.reader-tabs [role="tab"]').id === 'tab-browse'), 'navigator is not the first tab');
+  await fetch('space');
+  assert(await page.evaluate(() => window.scrollY) === 0, 'new subreddit inherited previous scroll');
+  await page.evaluate(() => window.scrollTo(0, 300));
+  await page.getByRole('button', {name: 'r/soccer', exact: true}).click();
+  await page.waitForFunction(() => !document.querySelector('#browse-submit').disabled);
+  assert(Math.abs(await page.evaluate(() => window.scrollY) - soccerScroll) < 2, 'subreddit scroll was not restored');
+  await page.getByRole('button', {name: 'r/space', exact: true}).click();
+  await page.waitForFunction(() => !document.querySelector('#browse-submit').disabled);
+  assert(Math.abs(await page.evaluate(() => window.scrollY) - 300) < 2, 'second subreddit lost its own position');
+  await page.locator('#tab-library').click();
+  await browse.click();
+  assert(Math.abs(await page.evaluate(() => window.scrollY) - 300) < 2, 'library round trip lost listing position');
+  // Open a visible post without scrolling the listing back to its first row.
+  await page.evaluate(() => document.querySelector('[data-thread-id="t3_discussion"] .thread-open').click());
+  await page.waitForFunction(() => !document.querySelector('#reader-panel').hidden);
+  await page.evaluate(() => {
+    window.__ux.threads.find(thread => thread.id === 't3_discussion').body = Array.from({length: 100}, (_, index) => `Discussion paragraph ${index}.`).join('\n\n');
+    window.__ux.releasePost('t3_discussion');
+  });
+  await page.waitForFunction(() => document.querySelector('.thread-body')?.textContent.includes('Discussion paragraph 99'));
+  await page.evaluate(() => window.scrollTo(0, 450));
+  await browse.click();
+  assert(Math.abs(await page.evaluate(() => window.scrollY) - 300) < 2, 'post round trip lost listing position');
+  await browse.focus();
+  await page.keyboard.press('ArrowRight');
+  assert(await page.locator('#reader-panel').isVisible(), 'keyboard navigation skipped the open post');
+  assert(Math.abs(await page.evaluate(() => window.scrollY) - 450) < 2, 'post lost its own reading position');
+  await page.keyboard.press('Home');
+  assert(await page.locator('#browse-panel').isVisible(), 'Home did not return to navigator');
+  await page.setViewportSize({width: 500, height: 800});
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'narrow layout overflows');
+  await page.evaluate(() => window.scrollTo(0, 700));
+  const narrowRail = await page.locator('.rail').boundingBox();
+  assert(narrowRail.y >= 0 && narrowRail.height <= 320, 'narrow navigator covers the listing');
+  await page.screenshot({path: '/tmp/hrungnir-navigation-narrow.png'});
+  await page.setViewportSize({width: 1100, height: 700});
+  await page.screenshot({path: '/tmp/hrungnir-navigation-desktop.png'});
+  return {passed: ['sticky navigator', 'tabs above header', 'navigator first', 'independent subreddit positions', 'post and library round trips', 'keyboard tab navigation', 'narrow layout']};
+}
