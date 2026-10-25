@@ -1,6 +1,10 @@
 fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
+            "app_update_version",
+            "check_for_updates",
+            "install_update",
+            "restart_updated_app",
             "snapshot",
             "import_fixture",
             "import_json",

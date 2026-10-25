@@ -1,0 +1,46 @@
+async (page) => {
+  const assert = (value, message) => { if (!value) throw new Error(message); };
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('#update-status').textContent.includes('up to date'));
+  assert(await page.evaluate(() => window.__ux.calls.filter(call => call.command === 'check_for_updates').length === 1), 'startup did not check exactly once');
+  await page.keyboard.press('Meta+,');
+  assert(await page.locator('#settings-dialog').isVisible(), 'Cmd+, did not open Settings');
+  assert((await page.locator('#app-version').innerText()).includes('0.6.9'), 'current version missing');
+  await page.keyboard.press('Escape');
+  await page.locator('#subreddit-input').focus();
+  await page.keyboard.press('Control+,');
+  assert(await page.locator('#settings-dialog').isVisible(), 'shortcut failed while editing');
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => window.__ux.emit('tab-shortcut', 'settings'));
+  assert(await page.locator('#settings-dialog').isVisible(), 'native Settings menu did not open Settings');
+  await page.evaluate(() => { window.__ux.updates.failCheck = true; });
+  await page.locator('#check-updates').click();
+  await page.waitForFunction(() => document.querySelector('#update-status').textContent.includes('Network unavailable'));
+  assert(await page.locator('#install-update').isHidden(), 'failed check offered installation');
+  await page.evaluate(() => {
+    Object.assign(window.__ux.updates, {failCheck: false, holdCheck: true, available: {version: '0.6.10', notes: 'A release worth installing.'}});
+    window.__ux.emit('tab-shortcut', 'check-updates');
+  });
+  assert(await page.locator('#check-updates').isDisabled(), 'check did not show pending state');
+  await page.evaluate(() => window.__ux.updates.releaseCheck());
+  await page.waitForFunction(() => !document.querySelector('#install-update').hidden);
+  assert((await page.locator('#update-notes').innerText()).includes('A release worth installing'), 'release notes missing');
+  assert(!await page.evaluate(() => window.__ux.calls.some(call => call.command === 'install_update')), 'update installed without consent');
+  await page.evaluate(() => { Object.assign(window.__ux.updates, {failInstall: true}); });
+  await page.locator('#install-update').click();
+  await page.waitForFunction(() => document.querySelector('#update-status').textContent.includes('Signature verification failed'));
+  assert(await page.locator('#restart-update').isHidden(), 'failed signature offered a restart');
+  assert(await page.locator('#install-update').isEnabled(), 'installation cannot be retried');
+  await page.evaluate(() => { Object.assign(window.__ux.updates, {failInstall: false, holdInstall: true}); });
+  await page.locator('#install-update').click();
+  await page.evaluate(() => window.__ux.emit('update-progress', {downloaded: 50, total: 100}));
+  assert((await page.locator('#update-status').innerText()).includes('50%'), 'download progress missing');
+  await page.evaluate(() => window.__ux.updates.releaseInstall());
+  await page.waitForFunction(() => !document.querySelector('#restart-update').hidden);
+  assert(!await page.evaluate(() => window.__ux.calls.some(call => call.command === 'restart_updated_app')), 'installation restarted without consent');
+  await page.locator('#restart-update').click();
+  assert(await page.evaluate(() => window.__ux.calls.some(call => call.command === 'restart_updated_app')), 'restart button did not invoke native restart');
+  await page.screenshot({path: '/tmp/hrungnir-settings-update.png'});
+  return {passed: ['Cmd+,', 'Ctrl+, in text field', 'native menu events', 'startup check', 'offline failure and retry', 'release notes', 'download progress', 'signature failure', 'explicit installation and restart']};
+}

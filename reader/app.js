@@ -3106,10 +3106,72 @@
     if (!eventApi || typeof eventApi.listen !== 'function') return;
     Promise.resolve(eventApi.listen('tab-shortcut', (event) => {
       const action = event && event.payload;
+      if (action === 'settings') openSettings();
+      if (action === 'check-updates') { openSettings(); void checkForUpdates(); }
       if (action === 'new' || action === 'close') dispatchTabShortcut(action, 'native');
     })).catch((error) => {
       console.warn('Could not listen for native tab shortcuts.', error);
     });
+  }
+
+  let updateBusy = false;
+  let updateInstalled = false;
+
+  function openSettings() {
+    if (ui.diagnosticsDialog.open) ui.diagnosticsDialog.close();
+    if (!ui.settingsDialog.open) {
+      if (typeof ui.settingsDialog.showModal === 'function') ui.settingsDialog.showModal();
+      else ui.settingsDialog.setAttribute('open', '');
+    }
+    void loadPostCacheSettings();
+    void loadLibraryState({ quiet: true });
+  }
+
+  async function checkForUpdates(quiet = false) {
+    if (updateBusy || updateInstalled || !invoke) return;
+    updateBusy = true;
+    $('#check-updates').disabled = true;
+    $('#install-update').hidden = true;
+    $('#update-notes').hidden = true;
+    $('#update-status').textContent = 'Checking for updates…';
+    try {
+      const result = await invoke('check_for_updates');
+      if (!result || typeof result.current_version !== 'string') throw new Error('Invalid update response.');
+      $('#app-version').textContent = `Hrungnir ${result.current_version}`;
+      if (result.available) {
+        $('#update-status').textContent = `Hrungnir ${result.available.version} is available. Install it, then restart when you are ready.`;
+        $('#update-notes').textContent = result.available.notes || '';
+        $('#update-notes').hidden = !result.available.notes;
+        $('#install-update').hidden = false;
+        if (quiet) toast(`Hrungnir ${result.available.version} is available. Open Settings to update.`);
+      } else $('#update-status').textContent = 'You’re up to date.';
+    } catch (error) {
+      $('#update-status').textContent = `Could not check for updates. ${explainError(error)} Try again when you are connected.`;
+    } finally {
+      updateBusy = false;
+      $('#check-updates').disabled = false;
+    }
+  }
+
+  async function installAppUpdate() {
+    if (updateBusy || updateInstalled || !invoke) return;
+    updateBusy = true;
+    $('#check-updates').disabled = true;
+    $('#install-update').disabled = true;
+    $('#update-status').textContent = 'Downloading and verifying update…';
+    try {
+      await invoke('install_update');
+      updateInstalled = true;
+      $('#install-update').hidden = true;
+      $('#restart-update').hidden = false;
+      $('#update-status').textContent = 'Update installed. Restart when you are ready to finish.';
+    } catch (error) {
+      $('#update-status').textContent = `Could not install the update. ${explainError(error)} Your current app is still running; you can retry.`;
+    } finally {
+      updateBusy = false;
+      $('#check-updates').disabled = updateInstalled;
+      $('#install-update').disabled = false;
+    }
   }
 
   function configure() {
@@ -3117,6 +3179,12 @@
     window.addEventListener('keydown', (event) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
       const key = event.key.toLowerCase();
+      if (key === ',') {
+        event.preventDefault();
+        event.stopPropagation();
+        openSettings();
+        return;
+      }
       if (key !== 't' && key !== 'w') return;
       event.preventDefault();
       event.stopPropagation();
@@ -3148,12 +3216,26 @@
       tabs[next].scrollIntoView({ block: 'nearest', inline: 'nearest' });
       tabs[next].click();
     }));
-    ui.settingsOpen.addEventListener('click', () => {
-      if (typeof ui.settingsDialog.showModal === 'function') ui.settingsDialog.showModal();
-      else ui.settingsDialog.setAttribute('open', '');
-      void loadPostCacheSettings();
-      void loadLibraryState({ quiet: true });
+    ui.settingsOpen.addEventListener('click', openSettings);
+    $('#check-updates').addEventListener('click', () => void checkForUpdates());
+    $('#install-update').addEventListener('click', () => void installAppUpdate());
+    $('#restart-update').addEventListener('click', async () => {
+      try { await invoke('restart_updated_app'); }
+      catch (error) { $('#update-status').textContent = `Could not restart. ${explainError(error)} Quit and reopen Hrungnir to finish.`; }
     });
+    if (tauri?.event?.listen) {
+      void Promise.resolve(tauri.event.listen('update-progress', (event) => {
+        if (!updateBusy || $('#install-update').hidden) return;
+        const { downloaded, total } = event.payload || {};
+        $('#update-status').textContent = total > 0
+          ? `Downloading update… ${Math.min(100, Math.round(downloaded * 100 / total))}%`
+          : 'Downloading update…';
+      })).catch(() => {});
+    }
+    if (invoke) {
+      void invoke('app_update_version').then((version) => { if (version) $('#app-version').textContent = `Hrungnir ${version}`; }).catch(() => {});
+      void checkForUpdates(true);
+    } else $('#check-updates').disabled = true;
     ui.settingsClose.addEventListener('click', () => {
       if (typeof ui.settingsDialog.close === 'function') ui.settingsDialog.close();
       else ui.settingsDialog.removeAttribute('open');

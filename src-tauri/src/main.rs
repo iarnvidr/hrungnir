@@ -8,6 +8,7 @@ use tauri_plugin_dialog::DialogExt;
 mod browser;
 mod web_links;
 mod connection_test;
+mod updates;
 #[cfg(target_os = "macos")]
 mod trust_mac;
 mod trust_recovery;
@@ -22,9 +23,14 @@ struct PendingAppLinks(
 fn install_tab_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem, Submenu};
     let menu = Menu::new(app)?;
+    let settings = MenuItemBuilder::with_id("settings", "Settings…")
+        .accelerator("CmdOrCtrl+,").build(app)?;
+    let updates = MenuItemBuilder::with_id("check-updates", "Check for Updates…").build(app)?;
     #[cfg(target_os = "macos")]
     menu.append(&Submenu::with_items(app, "Hrungnir", true, &[
         &PredefinedMenuItem::about(app, None, None)?,
+        &settings,
+        &updates,
         &PredefinedMenuItem::separator(app)?,
         &PredefinedMenuItem::services(app, None)?,
         &PredefinedMenuItem::hide(app, None)?,
@@ -36,7 +42,10 @@ fn install_tab_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         .accelerator("CmdOrCtrl+T").build(app)?;
     let close_tab = MenuItemBuilder::with_id("close-tab", "Close Tab")
         .accelerator("CmdOrCtrl+W").build(app)?;
+    #[cfg(target_os = "macos")]
     menu.append(&Submenu::with_items(app, "File", true, &[&new_tab, &close_tab])?)?;
+    #[cfg(not(target_os = "macos"))]
+    menu.append(&Submenu::with_items(app, "File", true, &[&new_tab, &close_tab, &settings, &updates])?)?;
     let back = MenuItemBuilder::with_id("web-back", "Back").accelerator("Alt+Left").build(app)?;
     let forward = MenuItemBuilder::with_id("web-forward", "Forward").accelerator("Alt+Right").build(app)?;
     let reload = MenuItemBuilder::with_id("web-reload", "Reload Web Page").accelerator("CmdOrCtrl+R").build(app)?;
@@ -56,6 +65,11 @@ fn install_tab_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     ])?)?;
     app.set_menu(menu)?;
     app.on_menu_event(|app, event| {
+        if matches!(event.id().as_ref(), "settings" | "check-updates") {
+            show_main(app);
+            let _ = app.emit_to("main", "tab-shortcut", event.id().as_ref());
+            return;
+        }
         let focused = app.webview_windows().into_values().find(|window| window.label().starts_with("web-link-") && window.is_focused().unwrap_or(false));
         if let Some(window) = focused {
             let script = match event.id().as_ref() {
@@ -1063,6 +1077,8 @@ fn main() {
     }
     let app = builder
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updates::UpdateState::default())
         .setup(|app| {
             let directory = app.path().app_data_dir()?;
             std::fs::create_dir_all(&directory)?;
@@ -1167,6 +1183,10 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            updates::app_update_version,
+            updates::check_for_updates,
+            updates::install_update,
+            updates::restart_updated_app,
             snapshot,
             import_fixture,
             import_json,

@@ -17,11 +17,27 @@
   const hints = { t3_video: { kind: 'video', count: 1 } };
   const snap = (rows = threads) => ({ threads: structuredClone(rows), diagnostics: {}, position: null, media_hints: hints, link_previews: {} });
   const wait = (map, id) => new Promise(resolve => map.set(id, resolve));
-  window.__ux = { calls, completed, posts, articles, threads, releasePost: id => posts.get(id)?.(), releaseArticle: id => articles.get(id)?.() };
+  const listeners = new Map();
+  const updates = { available: null, failCheck: false, failInstall: false };
+  window.__ux = { calls, completed, posts, articles, threads, updates,
+    emit: (name, payload) => listeners.get(name)?.({payload}),
+    releasePost: id => posts.get(id)?.(), releaseArticle: id => articles.get(id)?.() };
   window.__TAURI__ = {
-    event: { listen: async () => () => {} },
+    event: { listen: async (name, callback) => { listeners.set(name, callback); return () => listeners.delete(name); } },
     core: { invoke: async (command, args = {}) => {
       calls.push({ command, args });
+      if (command === 'app_update_version') return '0.6.9';
+      if (command === 'check_for_updates') {
+        if (updates.holdCheck) await new Promise(resolve => { updates.releaseCheck = resolve; });
+        if (updates.failCheck) throw new Error('Network unavailable');
+        return { current_version: '0.6.9', available: updates.available };
+      }
+      if (command === 'install_update') {
+        if (updates.holdInstall) await new Promise(resolve => { updates.releaseInstall = resolve; });
+        if (updates.failInstall) throw new Error('Signature verification failed');
+        return null;
+      }
+      if (command === 'restart_updated_app') return null;
       if (command === 'snapshot') return snap();
       if (command === 'library_state') return library;
       if (command === 'get_cache_settings') return { post_cache_hours: 48 };
