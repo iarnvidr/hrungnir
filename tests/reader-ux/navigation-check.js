@@ -54,7 +54,8 @@ async (page) => {
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'narrow layout overflows');
   await page.evaluate(() => window.scrollTo(0, 700));
   const narrowRail = await page.locator('.rail').boundingBox();
-  assert(narrowRail.y >= 0 && narrowRail.height <= 320, 'narrow navigator covers the listing');
+  const narrowList = await page.locator('.post-browser').boundingBox();
+  assert(narrowRail.y >= 0 && narrowRail.x + narrowRail.width <= narrowList.x + 1, 'narrow navigator covers the listing');
   await page.screenshot({path: '/tmp/hrungnir-navigation-narrow.png'});
   await page.setViewportSize({width: 1100, height: 700});
   await page.screenshot({path: '/tmp/hrungnir-navigation-desktop.png'});

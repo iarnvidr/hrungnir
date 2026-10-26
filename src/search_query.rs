@@ -51,13 +51,33 @@ fn parts(query: &str) -> Option<(Vec<String>, Vec<String>)> {
     None
 }
 
-pub fn reddit_query(query: &str) -> String {
-    let Some((base, variants)) = parts(query) else { return query.to_string(); };
-    let variants = variants.iter().map(|word| format!("\"{word}\"")).collect::<Vec<_>>().join(" OR ");
-    let mut terms = base.iter().map(|word| format!("\"{word}\"")).collect::<Vec<_>>();
-    terms.push(format!("({variants})"));
-    let expanded = terms.join(" AND ");
-    if expanded.chars().count() <= 256 { expanded } else { query.to_string() }
+/// Supplement Reddit's normal partial matching with a series-name search.
+pub fn discovery_query(query: &str) -> Option<String> {
+    let (base, _) = parts(query)?;
+    let title = base.join(" ");
+    if title.is_empty() { None } else { Some(format!("\"{title}\"")) }
+}
+
+/// Stable relevance boost for combined series/episode results.
+pub fn discovery_score(query: &str, title: &str) -> u32 {
+    let Some((base, variants)) = parts(query) else { return 0; };
+    let title = title.to_lowercase();
+    let all_words = base.iter().flat_map(|phrase| phrase.split_whitespace())
+        .all(|word| title.contains(&word.to_lowercase()));
+    if !all_words { return 0; }
+    let (season, number) = episode(&variants[0]).unwrap();
+    let words = title.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).collect::<Vec<_>>();
+    let season_match = words.windows(2).any(|pair| pair[0] == "season" && pair[1].parse::<u32>() == Ok(season));
+    // Include titles like "Episode 7-8 discussion", without interpreting an
+    // unrelated season number or a score elsewhere in the title as an episode.
+    let episode_match = words.iter().enumerate().any(|(index, word)| {
+        matches!(*word, "episode" | "episodes") && words.iter().skip(index + 1).take(3)
+            .take_while(|word| word.bytes().all(|byte| byte.is_ascii_digit()))
+            .any(|word| word.parse::<u32>() == Ok(number))
+    });
+    10 + u32::from(variants.iter().any(|variant| title.contains(variant))) * 10
+        + u32::from(title.contains("discussion")) * 15
+        + u32::from(season_match) * 10 + u32::from(episode_match) * 10
 }
 
 pub fn fts_expression(query: &str, words: &[&str]) -> String {

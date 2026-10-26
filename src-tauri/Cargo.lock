@@ -2653,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "offline-reader-desktop"
-version = "0.6.11"
+version = "0.6.12"
 dependencies = [
  "block2",
  "core-foundation 0.10.1",
@@ -3207,7 +3207,7 @@ dependencies = [
 
 [[package]]
 name = "reddit-offline"
-version = "0.6.11"
+version = "0.6.12"
 dependencies = [
  "bytes",
  "flate2",

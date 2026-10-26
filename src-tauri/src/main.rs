@@ -49,7 +49,8 @@ fn install_tab_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     let back = MenuItemBuilder::with_id("web-back", "Back").accelerator("Alt+Left").build(app)?;
     let forward = MenuItemBuilder::with_id("web-forward", "Forward").accelerator("Alt+Right").build(app)?;
     let reload = MenuItemBuilder::with_id("web-reload", "Reload Web Page").accelerator("CmdOrCtrl+R").build(app)?;
-    menu.append(&Submenu::with_items(app, "Navigate", true, &[&back, &forward, &reload])?)?;
+    let search = MenuItemBuilder::with_id("focus-search", "Search Reddit…").accelerator("CmdOrCtrl+L").build(app)?;
+    menu.append(&Submenu::with_items(app, "Navigate", true, &[&search, &back, &forward, &reload])?)?;
     menu.append(&Submenu::with_items(app, "Edit", true, &[
         &PredefinedMenuItem::undo(app, None)?,
         &PredefinedMenuItem::redo(app, None)?,
@@ -65,7 +66,7 @@ fn install_tab_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     ])?)?;
     app.set_menu(menu)?;
     app.on_menu_event(|app, event| {
-        if matches!(event.id().as_ref(), "settings" | "check-updates") {
+        if matches!(event.id().as_ref(), "settings" | "check-updates" | "focus-search") {
             show_main(app);
             let _ = app.emit_to("main", "tab-shortcut", event.id().as_ref());
             return;
@@ -239,17 +240,29 @@ async fn search_reddit(
     period: Option<String>,
     smart: Option<bool>,
 ) -> Result<Snapshot, String> {
-    let query = if smart.unwrap_or(true) { reddit_offline::search_query::reddit_query(&query) } else { query };
     let url = reddit_offline::browsing::search_url(&query, subreddit.as_deref(), sort.as_deref().unwrap_or("relevance"), period.as_deref().unwrap_or("all")).map_err(|e|e.to_string())?;
+    let discovery = if smart.unwrap_or(true) && sort.as_deref().unwrap_or("relevance") == "relevance" {
+        reddit_offline::search_query::discovery_query(&query)
+    } else { None };
     let started = std::time::Instant::now();
     browser.record("search_queue", "running", 0, None);
     let _guard = browser.gate.lock().await;
     browser.record("search_queue", "complete", started.elapsed().as_millis() as u64, None);
     browser.record("search", "running", 0, None);
     let result = async {
-        let ids = browser.search(url).await?;
+        let mut ids = browser.search(url).await?;
+        if let Some(discovery) = discovery.as_ref() {
+            let url = reddit_offline::browsing::search_url(discovery, subreddit.as_deref(), "relevance", period.as_deref().unwrap_or("all")).map_err(|e|e.to_string())?;
+            match browser.search(url).await {
+                Ok(extra) => for id in extra { if !ids.contains(&id) { ids.push(id); } },
+                Err(error) => browser.record("search_discovery", "failed", 0, Some(error)),
+            }
+        }
         let mut snapshot = browser.store.snapshot_for_ids(Some(&ids)).map_err(|e|e.to_string())?;
         snapshot.threads.sort_by_key(|thread|ids.iter().position(|id|id==&thread.id));
+        if discovery.is_some() {
+            snapshot.threads.sort_by_key(|thread| std::cmp::Reverse(reddit_offline::search_query::discovery_score(&query, &thread.title)));
+        }
         links.enrich(&mut snapshot);
         Ok(snapshot)
     }.await;
