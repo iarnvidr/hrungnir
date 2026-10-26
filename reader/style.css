@@ -533,6 +533,8 @@ body {
   overflow-y: auto; overscroll-behavior: contain; box-sizing: border-box;
 }
 .subreddit-tools > summary { cursor: pointer; padding: 6px 0 12px; color: var(--muted); }
+:root[data-subreddit-tabs="vertical"] .rail { height: calc(100dvh / var(--reader-ui-scale, 1) - var(--workspace-tabs-height, 38px)); }
+:root[data-subreddit-tabs="horizontal"] .subreddit-tools { order: -1; }
 .rail .section-heading { flex-wrap: wrap; }
 .subreddit-tools > .rail-section > .select-control { width: 100%; margin-block: 4px 8px; }
 .subreddit-visit[aria-current="page"] { color: var(--text); background: var(--hover); font-weight: 650; }
