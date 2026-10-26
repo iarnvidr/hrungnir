@@ -9,6 +9,7 @@ use std::{
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 pub mod app_links;
 pub mod browsing;
+pub mod search_query;
 pub mod ca;
 pub mod cli;
 pub mod desktop;
@@ -259,12 +260,7 @@ impl Cache {
         if words.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let expression = words
-            .iter()
-            .enumerate()
-            .map(|(i, word)| format!("\"{word}\"{}", if i + 1 == words.len() { "*" } else { "" }))
-            .collect::<Vec<_>>()
-            .join(" AND ");
+        let expression = search_query::fts_expression(query, &words);
         let mut statement = self.0.prepare(
             "WITH matches AS MATERIALIZED (
             SELECT thread_id,comment_id,snippet(cached_search,-1,'','',' … ',24) AS excerpt,

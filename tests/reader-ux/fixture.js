@@ -19,7 +19,8 @@
   const wait = (map, id) => new Promise(resolve => map.set(id, resolve));
   const listeners = new Map();
   const updates = { available: null, failCheck: false, failInstall: false };
-  window.__ux = { calls, completed, posts, articles, threads, updates,
+  const search = { rows: threads, hits: [], error: false, comments: null };
+  window.__ux = { calls, completed, posts, articles, threads, updates, search,
     emit: (name, payload) => listeners.get(name)?.({payload}),
     releasePost: id => posts.get(id)?.(), releaseArticle: id => articles.get(id)?.() };
   window.__TAURI__ = {
@@ -39,17 +40,30 @@
       }
       if (command === 'restart_updated_app') return null;
       if (command === 'snapshot') return snap();
+      if (command === 'search_reddit') {
+        if (search.hold) await new Promise(resolve => { search.release = resolve; });
+        if (search.error) throw new Error('Search source unavailable');
+        return snap(args.subreddit ? search.rows.filter(thread => thread.subreddit === args.subreddit) : search.rows);
+      }
+      if (command === 'search_cache') return structuredClone(search.hits);
+      if (command === 'open_cached_thread') {
+        const thread = { ...threads.find(thread => thread.id === args.id), comments_status: 'partial_proxy', comments: [{id: 't1_parent', parent_id: args.id, body: 'A cached comment match.'}] };
+        return {snapshot: snap([thread]), media: [], cache: {comments_hit: true, media_hit: true}};
+      }
       if (command === 'library_state') return library;
       if (command === 'get_cache_settings') return { post_cache_hours: 48 };
       if (command === 'take_app_links') return [];
       if (command === 'app_diagnostics') return { report: {} };
       if (command === 'fetch_link_previews') return Object.fromEntries(args.ids.map(id => [id, { kind: id === 't3_video' ? 'video' : 'article', domain: 'example.org', thumbnail: `${location.origin}/${'a'.repeat(64)}/${id}/thumb.png` }]));
-      if (command === 'fetch_subreddit') return snap();
+      if (command === 'fetch_subreddit') {
+        if (search.holdCommunity) await new Promise(resolve => { search.releaseCommunity = resolve; });
+        return snap();
+      }
       if (command === 'fetch_thread') {
         if (args.include_media !== false) return new Promise(() => {}); // Simulate a stalled media download.
         await wait(posts, args.id);
         completed.push(args.id);
-        const thread = { ...threads.find(t => t.id === args.id), comments_status: 'partial_proxy', comments: [{ id: 't1_parent', parent_id: args.id, body: 'A useful discussion, available before the video finishes.' }] };
+        const thread = { ...threads.find(t => t.id === args.id), comments_status: 'partial_proxy', comments: search.comments || [{ id: 't1_parent', parent_id: args.id, body: 'A useful discussion, available before the video finishes.' }] };
         return { snapshot: snap([thread]), media: [], cache: { comments_hit: false, media_hit: false } };
       }
       if (command === 'fetch_link_article') {

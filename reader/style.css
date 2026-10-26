@@ -494,6 +494,20 @@ button:disabled { opacity: .55; cursor: wait; }
 .range-setting output { min-width: 3.5em; color: var(--muted); text-align: end; font-variant-numeric: tabular-nums; }
 .keep-video-button { margin-top: 7px; }
 .keep-video-status { margin: 4px 0 0; overflow-wrap: anywhere; }
+.keyboard-hint { max-width: var(--width); margin: 0 auto; padding: 4px 12px; }
+.keyboard-shortcuts dd { margin: 4px 0 16px; }
+.keyboard-shortcuts dt { font-weight: 650; }
+.thread-item:focus-within, .comment:focus-visible > .comment-card { outline: 2px solid var(--focus); outline-offset: 1px; }
+.comment:focus-visible { outline: 0; }
+.comment-card { scroll-margin-block: 65px; }
+.thread-item, .subreddit-visit, .cache-search-hit { scroll-margin-block: 65px; }
+.header-search { flex-wrap: wrap; max-width: none; }
+.header-search > input { flex: 1 1 180px; width: auto; }
+#search-scope { flex: 0 1 135px; max-width: 150px; }
+.search-options { font-size: 11px; }
+.search-options summary { cursor: pointer; padding: 5px; }
+.search-options > div { position: absolute; left: 0; top: 100%; z-index: 5; width: min(360px, 100%); padding: 12px; border: 1px solid var(--line2); background: var(--panel); box-shadow: 0 4px 16px var(--shadow); }
+.thread-list > .cache-search-hit { border: 1px solid var(--line); margin-block: 3px; padding: 12px; }
 .update-settings > p, .update-settings .settings-actions { grid-column: 1 / -1; margin-block: 2px; }
 #update-notes { white-space: pre-wrap; max-height: 140px; overflow-y: auto; }
 

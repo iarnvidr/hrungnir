@@ -1,6 +1,26 @@
 use reddit_offline::{desktop::DesktopStore, Cache, Comment, Thread};
 
 #[test]
+fn episode_search_matches_equivalent_downloaded_titles_and_keeps_other_terms() {
+    let store = Store::new();
+    let mut cache = store.cache();
+    for (id, title) in [
+        ("t3_episodea", "Gangs of London S02E08 discussion"),
+        ("t3_episodeb", "Gangs of London 2x08 discussion"),
+        ("t3_episodec", "Gangs of London Season 2 Episode 8 discussion"),
+        ("t3_otherepisode", "Gangs of London S02E09 discussion"),
+        ("t3_othershow", "Another show S02E08 discussion"),
+    ] {
+        cache.import(&thread(id, title, ""), 1_000_000).unwrap();
+    }
+    for query in ["gangs of london s02e08", "gangs of london 2x08", "gangs of london season 2 episode 8"] {
+        let hits = cache.search(query, None, 50).unwrap();
+        assert_eq!(hits.len(), 3, "{query}");
+        assert!(hits.iter().all(|hit| hit.id.starts_with("t3_episode")));
+    }
+}
+
+#[test]
 fn library_search_matches_full_body_and_comments_beyond_summary_limits() {
     let s = Store::new();
     let mut cache = s.cache();

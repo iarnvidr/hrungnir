@@ -40,7 +40,10 @@ the downloadable app. Linux is used for development and testing.
 - Read subreddit listings and threaded comments, with collapsed replies,
   parent previews and saved reading position.
 - Download images and supported videos, including audio, for local playback.
-- Search cached content immediately, or press Enter to search Reddit.
+- Search all Reddit, the current community, or downloaded posts and comments;
+  episode searches match common alternative numbering formats.
+- Navigate posts, subreddits and comment trees with hjkl; use `/` to search and
+  `?` for shortcuts. See [Search and keyboard navigation](docs/KEYBOARD-SEARCH.md).
 - Save posts and linked articles, images or videos into library collections;
   import bookmarks and export or restore your library.
 - Choose light or dark themes, manage cache retention, and export diagnostics.

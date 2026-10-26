@@ -237,7 +237,9 @@ async fn search_reddit(
     subreddit: Option<String>,
     sort: Option<String>,
     period: Option<String>,
+    smart: Option<bool>,
 ) -> Result<Snapshot, String> {
+    let query = if smart.unwrap_or(true) { reddit_offline::search_query::reddit_query(&query) } else { query };
     let url = reddit_offline::browsing::search_url(&query, subreddit.as_deref(), sort.as_deref().unwrap_or("relevance"), period.as_deref().unwrap_or("all")).map_err(|e|e.to_string())?;
     let started = std::time::Instant::now();
     browser.record("search_queue", "running", 0, None);
