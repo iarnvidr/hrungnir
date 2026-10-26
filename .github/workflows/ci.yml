@@ -16,6 +16,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  reader-ux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Use HTTPS Ubuntu package mirrors
+        run: |
+          for apt_source in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources /etc/apt/apt-mirrors*.txt; do
+            if [ -f "$apt_source" ]; then
+              sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$apt_source"
+            fi
+          done
+      - name: Install pinned browser test runtime
+        run: |
+          npm ci --ignore-scripts
+          npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1
+          npx playwright install --with-deps chromium
+      - name: Reader interaction regressions
+        run: node tests/reader-ux/run.cjs
+
   build-lint-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 45

@@ -117,6 +117,8 @@
       return {
         ...defaults,
         ...saved,
+        postTabsLayout: saved.postTabsLayout === 'vertical' ? 'vertical' : 'horizontal',
+        subredditTabsLayout: saved.subredditTabsLayout === 'horizontal' ? 'horizontal' : 'vertical',
         tab: ['browse', 'reader', 'library'].includes(saved.tab) ? saved.tab : 'browse',
         subredditOrder: ['recent', 'favorites', 'alphabetical'].includes(saved.subredditOrder) ? saved.subredditOrder : defaults.subredditOrder,
         postSort: ['hot', 'new', 'top', 'rising'].includes(saved.postSort) ? saved.postSort : defaults.postSort,
@@ -150,6 +152,14 @@
   ui.accent.value = preferences.accent;
 
   function applyAppearance() {
+    const postLayout = preferences.postTabsLayout || 'horizontal';
+    const communityLayout = preferences.subredditTabsLayout || 'vertical';
+    document.documentElement.dataset.postTabs = postLayout;
+    document.documentElement.dataset.subredditTabs = communityLayout;
+    $('#post-tabs-layout').value = postLayout;
+    $('#subreddit-tabs-layout').value = communityLayout;
+    $('.reader-tabs').setAttribute('aria-orientation', postLayout);
+    $('.subreddit-tools').open = communityLayout === 'vertical';
     document.documentElement.dataset.theme = preferences.theme;
     document.documentElement.dataset.accent = preferences.accent;
     document.documentElement.style.colorScheme = preferences.theme === 'system' ? 'light dark' : (preferences.theme === 'classified' ? 'dark' : 'light');
@@ -725,8 +735,11 @@
     ui.libraryPanel.hidden = active !== 'library';
     for (const button of ui.tabs) {
       const selected = button.dataset.tab === active;
-      button.setAttribute('aria-selected', String(selected));
-      button.tabIndex = selected ? 0 : -1;
+      if (button.id === 'tab-library') button.setAttribute('aria-pressed', String(selected));
+      else {
+        button.setAttribute('aria-selected', String(selected));
+        button.tabIndex = selected ? 0 : -1;
+      }
     }
     if (persist) { preferences.tab = active; savePreferences(); }
     scrollView = nextView;
@@ -755,6 +768,7 @@
       const visit = element('button', 'subreddit-visit', `r/${name}`);
       visit.dataset.subreddit = name;
       visit.type = 'button';
+      if (name === activeSubreddit) visit.setAttribute('aria-current', 'page');
       visit.addEventListener('click', () => void browseSubreddit(`/r/${name}`));
       const favorite = element('button', 'subreddit-star', favorites.has(name) ? '★' : '☆');
       favorite.type = 'button';
@@ -1173,7 +1187,8 @@
   }
 
   function recordRecent(name) {
-    preferences.recent = [name, ...preferences.recent.filter((item) => item !== name)].slice(0, 30);
+    // Existing community tabs keep their positions while switching between them.
+    if (!preferences.recent.includes(name)) preferences.recent = [name, ...preferences.recent].slice(0, 30);
     savePreferences();
     renderSubreddits();
   }
@@ -1194,6 +1209,7 @@
   }
 
   function renderList() {
+    renderSearchCommunities();
     document.querySelector('.listing-controls').hidden = Boolean(redditSearch?.cached);
     const focusedId = ui.list.contains(document.activeElement) ? document.activeElement.closest('[data-thread-id]')?.dataset.threadId : null;
     $('#search-scope option[value="subreddit"]').textContent = `r/${activeSubreddit}`;
@@ -3227,12 +3243,66 @@
     }
   }
 
+  function focusSearch() {
+    for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
+    ui.cacheSearch.focus();
+    ui.cacheSearch.select();
+    ui.cacheSearch.scrollIntoView({ block: 'nearest' });
+  }
+
+  function switchNavigationTab(target, direction) {
+    if (target?.closest('#subreddit-list')) {
+      const tabs = [...ui.subreddits.querySelectorAll('.subreddit-visit')];
+      const index = tabs.indexOf(target.closest('.subreddit-visit'));
+      const next = tabs[(Math.max(0, index) + direction + tabs.length) % tabs.length];
+      if (!next) return;
+      const name = next.dataset.subreddit;
+      const navigation = keyboardNavigationSequence;
+      void browseSubreddit(`/r/${name}`).then(() => {
+        if (navigation === keyboardNavigationSequence) focusKeyboardItem([...ui.subreddits.querySelectorAll('.subreddit-visit')].find((item) => item.dataset.subreddit === name));
+      });
+      return;
+    }
+    const tabs = [...document.querySelectorAll('.reader-tabs [role="tab"]')].filter((tab) => !tab.hidden);
+    let index = tabs.indexOf(target?.closest('[role="tab"]'));
+    if (index < 0) index = tabs.findIndex((tab) => tab.getAttribute('aria-selected') === 'true');
+    const next = tabs[(Math.max(0, index) + direction + tabs.length) % tabs.length];
+    next?.click();
+    // Rendering recreates post-tab buttons; focus the replacement.
+    focusKeyboardItem([...document.querySelectorAll('.reader-tabs [role="tab"]')].find((tab) => tab.getAttribute('aria-label') === next?.getAttribute('aria-label') && tab.id === next?.id));
+  }
+
+  function renderSearchCommunities() {
+    const container = $('#search-communities');
+    container.replaceChildren();
+    const names = [...new Set((redditSearch?.threads || []).map((thread) => thread.subreddit))];
+    container.hidden = !names.length;
+    if (!names.length) return;
+    container.append(element('span', 'small muted', 'Search within:'));
+    for (const name of names.slice(0, 12)) {
+      const button = element('button', 'button secondary', `r/${name}`);
+      button.type = 'button';
+      button.addEventListener('click', () => {
+        activeSubreddit = name;
+        ui.input.value = `/r/${name}`;
+        $('#search-scope').value = 'subreddit';
+        void submitHeaderSearch();
+      });
+      container.append(button);
+    }
+  }
+
   function handleNavigationKeyboard(event) {
     if (event.defaultPrevented || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || document.querySelector('dialog[open]')) return;
     const target = event.target instanceof Element ? event.target : null;
     if (target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), video, audio')) return;
-    const key = event.key;
-    if (key === '/') { event.preventDefault(); ui.cacheSearch.focus(); ui.cacheSearch.select(); return; }
+    const key = ({ ArrowLeft: 'h', ArrowDown: 'j', ArrowUp: 'k', ArrowRight: 'l' })[event.key] || (event.key.length === 1 ? event.key.toLowerCase() : event.key);
+    if (event.shiftKey && ['h', 'j', 'k', 'l'].includes(key)) {
+      event.preventDefault();
+      switchNavigationTab(target, key === 'h' || key === 'k' ? -1 : 1);
+      return;
+    }
+    if (key === '/') { event.preventDefault(); focusSearch(); return; }
     if (key === '?') { event.preventDefault(); $('#keyboard-help-dialog').showModal(); return; }
     if (!['h', 'j', 'k', 'l', 'Escape', 'Enter'].includes(key)) return;
     if (event.repeat && (key === 'l' || key === 'Enter')) { event.preventDefault(); return; }
@@ -3249,6 +3319,12 @@
       else if (key === 'l' || key === 'Enter') void openKeyboardPost(listingItem);
       return;
     }
+    if (community) {
+      event.preventDefault();
+      if (key === 'j' || key === 'k') moveKeyboardFocus([...ui.subreddits.querySelectorAll('.subreddit-visit')], community, key === 'j' ? 1 : -1);
+      else if (key === 'l' || key === 'Enter') void openKeyboardCommunity(community);
+      return;
+    }
     if (!ui.readerPanel.hidden) {
       if (key === 'Enter') return;
       event.preventDefault();
@@ -3257,11 +3333,6 @@
     }
     if (ui.browsePanel.hidden) return;
     event.preventDefault();
-    if (community) {
-      if (key === 'j' || key === 'k') moveKeyboardFocus([...ui.subreddits.querySelectorAll('.subreddit-visit')], community, key === 'j' ? 1 : -1);
-      else if (key === 'l' || key === 'Enter') void openKeyboardCommunity(community);
-      return;
-    }
     if (key === 'h') {
       const communities = [...ui.subreddits.querySelectorAll('.subreddit-visit')];
       focusKeyboardItem(communities.find((item) => item.dataset.subreddit === activeSubreddit) || communities[0]);
@@ -3271,9 +3342,10 @@
 
   async function submitHeaderSearch() {
     const query = ui.cacheSearch.value.trim();
+    const navigation = keyboardNavigationSequence;
     cancelCacheSearch({ hide: true });
     await searchReddit(query, 'relevance', 'all');
-    if (!ui.browsePanel.hidden && redditSearch?.query === query && ui.cacheSearchForm.contains(document.activeElement)) {
+    if (!ui.browsePanel.hidden && redditSearch?.query === query && navigation === keyboardNavigationSequence) {
       document.querySelector('.search-options').open = false;
       focusFirstListing();
     }
@@ -3284,6 +3356,7 @@
     if (!eventApi || typeof eventApi.listen !== 'function') return;
     Promise.resolve(eventApi.listen('tab-shortcut', (event) => {
       const action = event && event.payload;
+      if (action === 'focus-search') focusSearch();
       if (action === 'settings') openSettings();
       if (action === 'check-updates') { openSettings(); void checkForUpdates(); }
       if (action === 'new' || action === 'close') dispatchTabShortcut(action, 'native');
@@ -3361,6 +3434,12 @@
     window.addEventListener('keydown', (event) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
       const key = event.key.toLowerCase();
+      if (key === 'l') {
+        event.preventDefault();
+        event.stopPropagation();
+        focusSearch();
+        return;
+      }
       if (key === ',') {
         event.preventDefault();
         event.stopPropagation();
@@ -3375,6 +3454,21 @@
     });
     ui.fetchAllMedia.addEventListener('click', () => void fetchAllListedMedia());
     ui.newBrowseTab.addEventListener('click', openBrowseDraftTab);
+    $('.reader-tabs').addEventListener('keydown', (event) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const key = event.key.toLowerCase();
+      if (!['h', 'j', 'k', 'l', 'arrowleft', 'arrowright', 'arrowup', 'arrowdown'].includes(key)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      switchNavigationTab(event.target, ['h', 'k', 'arrowleft', 'arrowup'].includes(key) ? -1 : 1);
+    }, true);
+    for (const [id, preference] of [['post-tabs-layout', 'postTabsLayout'], ['subreddit-tabs-layout', 'subredditTabsLayout']]) {
+      $(`#${id}`).addEventListener('change', (event) => {
+        preferences[preference] = event.target.value;
+        savePreferences();
+        applyAppearance();
+      });
+    }
     ui.theme.addEventListener('change', () => {
       preferences.theme = ['system', 'classified', 'classified_light'].includes(ui.theme.value) ? ui.theme.value : 'system';
       applyAppearance();
@@ -3386,7 +3480,7 @@
       savePreferences();
     });
     ui.tabs.forEach((button) => button.addEventListener('click', () => setTab(button.dataset.tab)));
-    ui.tabs.forEach((button) => button.addEventListener('keydown', (event) => {
+    ui.tabs.filter((button) => button.getAttribute('role') === 'tab').forEach((button) => button.addEventListener('keydown', (event) => {
       const tabs = [...document.querySelectorAll('.reader-tabs [role="tab"]')].filter((tab) => !tab.hidden);
       const index = tabs.indexOf(button);
       const next = event.key === 'ArrowRight' ? (index + 1) % tabs.length
@@ -3591,8 +3685,14 @@
     ui.trustRecoveryButton.addEventListener('click', () => void allowProxyCertificate());
     const workspaceTabs = document.querySelector('.workspace-tabs');
     new ResizeObserver(() => {
-      document.documentElement.style.setProperty('--workspace-tabs-height', `${workspaceTabs.offsetHeight}px`);
+      document.documentElement.style.setProperty('--workspace-tabs-height', `${preferences.postTabsLayout === 'vertical' ? 0 : workspaceTabs.offsetHeight}px`);
     }).observe(workspaceTabs);
+    new ResizeObserver(() => {
+      document.documentElement.style.setProperty('--community-tabs-height', `${$('.rail').offsetHeight}px`);
+    }).observe($('.rail'));
+    new ResizeObserver(() => {
+      document.documentElement.style.setProperty('--masthead-height', `${$('.masthead').offsetHeight}px`);
+    }).observe($('.masthead'));
     setTab(preferences.tab, false);
     updateSortNotice();
     renderSubreddits();

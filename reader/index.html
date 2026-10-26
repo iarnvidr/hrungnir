@@ -16,7 +16,6 @@
       <button id="tab-browse" role="tab" aria-selected="true" aria-controls="browse-panel" data-tab="browse">Subreddits &amp; posts</button>
       <div id="post-tabs" class="post-tabs" role="presentation"></div>
       <button id="tab-reader" role="tab" aria-selected="false" aria-controls="reader-panel" data-tab="reader">Post reader</button>
-      <button id="tab-library" role="tab" aria-selected="false" aria-controls="library-panel" data-tab="library">Library</button>
     </nav>
     <button id="new-browse-tab" class="button secondary new-browse-tab" type="button" title="Start a new subreddit search (⌘T / Ctrl+T)">＋ New tab</button>
   </div>
@@ -29,9 +28,10 @@
       <select id="search-scope" class="select-control" aria-label="Search in"><option value="all">All Reddit</option><option value="subreddit">This subreddit</option><option value="cache">Downloaded posts</option></select>
       <button id="header-search-submit" class="button" type="submit">Search</button>
       <button id="cache-search-clear" class="button secondary" type="button" aria-label="Clear search" title="Clear search">Clear</button>
-      <details class="search-options"><summary>Options</summary><div><label><input id="search-smart" type="checkbox" checked> Match alternative episode formats</label><p class="small muted">S02E08, 2x08, and Season 2 Episode 8. Quoted phrases and Reddit operators such as title: and subreddit: are kept as typed. Downloaded posts match episode formats automatically.</p></div></details>
+      <details class="search-options"><summary>Options</summary><div><label><input id="search-smart" type="checkbox" checked> Discover episode discussions</label><p class="small muted">Relevance search combines your original query with a series-name search, including discussions without an exact episode code. Quoted phrases and Reddit operators stay as typed. Downloaded posts match alternative episode spellings.</p></div></details>
       <div id="cache-search-results" class="cache-search-results" role="listbox" aria-label="Cached matches" hidden></div>
     </form>
+    <button id="tab-library" class="button secondary" type="button" aria-pressed="false" aria-controls="library-panel" data-tab="library">Library</button>
     <button id="settings-open" class="button settings-open" type="button" aria-haspopup="dialog" aria-controls="settings-dialog">Settings</button>
     <button id="keyboard-help-open" class="button secondary" type="button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button>
     <button id="diagnostics-open" class="button diagnostics-open" type="button">Diagnostics</button>
@@ -40,10 +40,10 @@
 
   <div id="reader-feedback" class="browse-feedback" role="status" aria-live="polite" hidden></div>
 
-  <main id="main-content" tabindex="-1">
-    <p class="keyboard-hint small muted"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>l</kbd> open / expand · <kbd>h</kbd> back / parent · <kbd>/</kbd> search · <kbd>?</kbd> shortcuts</p>
-    <section id="browse-panel" class="browse-layout" role="tabpanel" aria-labelledby="tab-browse">
       <aside class="rail" aria-label="Subreddit lists and cache actions">
+        <nav id="subreddit-list" class="subreddit-list" aria-label="Favorite and recent subreddits"></nav>
+        <p id="subreddit-empty" class="muted empty">Fetched subreddits will appear here.</p>
+        <details class="subreddit-tools"><summary>Subreddit options</summary>
         <section class="rail-section subreddit-fetch-section">
           <h1>Fetch subreddit</h1>
           <form id="browse-form" class="browse-form" autocomplete="off">
@@ -61,8 +61,6 @@
           <select id="subreddit-group-filter" class="select-control"><option value="">All subreddits</option></select>
           <label class="small muted" for="subreddit-order">Order</label>
           <select id="subreddit-order" class="select-control"><option value="recent">Recent</option><option value="favorites">Favorites</option><option value="alphabetical">A–Z</option></select>
-          <nav id="subreddit-list" class="subreddit-list" aria-label="Favorite and recent subreddits"></nav>
-          <p id="subreddit-empty" class="muted empty">Fetched subreddits will appear here.</p>
         </section>
 
         <details class="advanced rail-section">
@@ -75,8 +73,12 @@
             <p class="small muted">JSON import limit: 4 MiB. Synthetic example import uses a fixed 10 MiB cache budget.</p>
           </div>
         </details>
+        </details>
       </aside>
 
+  <main id="main-content" tabindex="-1">
+    <p class="keyboard-hint small muted"><kbd>hjkl</kbd> / arrows navigate · Shift + <kbd>hjkl</kbd> / arrows switch tabs · ⌘L / <kbd>/</kbd> search · <kbd>?</kbd> help</p>
+    <section id="browse-panel" class="browse-layout" role="tabpanel" aria-labelledby="tab-browse">
       <section class="post-browser" aria-label="Subreddit posts">
         <div class="browser-heading">
           <div><h1 id="current-subreddit">Choose a subreddit</h1><p id="thread-count" class="muted">0 posts</p></div>
@@ -93,6 +95,7 @@
         </div>
         <p id="sort-contract-note" class="small muted" hidden>Top period applies only when Posts is set to Top.</p>
         <label id="flair-filter-wrap" class="flair-filter" hidden>Post flair <select id="flair-filter" class="select-control"><option value="">All flairs</option></select></label>
+        <nav id="search-communities" class="search-communities" aria-label="Communities in search results" hidden></nav>
         <div id="thread-list" class="thread-list" aria-label="Fetched post list"></div>
         <p id="empty-state" class="muted empty">Fetch a subreddit above. Previously fetched posts remain available here.</p>
       </section>
@@ -141,7 +144,8 @@
   <dialog id="keyboard-help-dialog" class="settings-dialog" aria-labelledby="keyboard-help-title">
     <div class="dialog-heading"><h2 id="keyboard-help-title">Keyboard shortcuts</h2><button id="keyboard-help-close" class="button" type="button">Close</button></div>
     <dl class="keyboard-shortcuts">
-      <dt>Subreddits and post lists</dt><dd><kbd>j</kbd>/<kbd>k</kbd> move down/up without opening. <kbd>l</kbd> or Enter opens the focused item. <kbd>h</kbd> moves from posts to the subreddit navigator; <kbd>l</kbd> enters that community’s posts.</dd>
+      <dt>Subreddits, search results and post lists</dt><dd><kbd>j</kbd>/<kbd>k</kbd> or Down/Up move without opening. <kbd>l</kbd>/Right or Enter opens the focused item. <kbd>h</kbd>/Left moves from posts to the subreddit navigator; <kbd>l</kbd>/Right enters that community’s posts.</dd>
+      <dt>Tabs and search</dt><dd>Shift + <kbd>H</kbd>/<kbd>K</kbd> or Shift + Left/Up switches to the previous tab; Shift + <kbd>J</kbd>/<kbd>L</kbd> or Shift + Down/Right switches to the next. On a subreddit tab these switch communities. <kbd>⌘L</kbd> / Ctrl+L and <kbd>/</kbd> focus search. Set post and subreddit tab orientations independently in Settings. Library is in the toolbar.</dd>
       <dt>Inside a post</dt><dd><kbd>j</kbd>/<kbd>k</kbd> move between visible comments. <kbd>l</kbd> expands replies or enters a child. <kbd>h</kbd> collapses replies, moves to the parent, then returns to the post list. From the post heading, <kbd>h</kbd> returns immediately. Enter follows focused links.</dd>
       <dt>Search</dt><dd><kbd>/</kbd> focuses search. Enter runs it; use <kbd>j</kbd>/<kbd>k</kbd> and <kbd>l</kbd> to explore results. Escape leaves the search field without discarding results. Use Clear to reset the search.</dd>
     </dl>
@@ -184,6 +188,14 @@
         <button id="install-update" class="button primary" type="button" hidden>Install update</button>
         <button id="restart-update" class="button primary" type="button" hidden>Restart to finish update</button>
       </div>
+    </fieldset>
+    <fieldset class="settings-group">
+      <legend>Tabs</legend>
+      <label for="post-tabs-layout">Post tabs</label>
+      <select id="post-tabs-layout" class="select-control"><option value="horizontal">Horizontal</option><option value="vertical">Vertical</option></select>
+      <label for="subreddit-tabs-layout">Subreddit tabs</label>
+      <select id="subreddit-tabs-layout" class="select-control"><option value="vertical">Vertical</option><option value="horizontal">Horizontal</option></select>
+      <p class="small muted">Both navigators stay visible while reading. Shift + H/K goes to the previous tab; Shift + J/L goes to the next. When a subreddit tab has focus, these keys switch communities.</p>
     </fieldset>
     <fieldset class="settings-group">
       <legend>Appearance</legend>

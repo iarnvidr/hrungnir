@@ -512,6 +512,78 @@ button:disabled { opacity: .55; cursor: wait; }
 #update-notes { white-space: pre-wrap; max-height: 140px; overflow-y: auto; }
 
 /* Keep navigation available without covering the content beneath it. */
+body {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-areas: "posts posts" "communities header" "communities feedback" "communities main";
+  grid-template-rows: auto auto auto 1fr;
+  align-items: start;
+}
+.skip-link { position: fixed; }
+.workspace-tabs { grid-area: posts; }
+.masthead { grid-area: header; min-width: 0; width: 100%; box-sizing: border-box; flex-wrap: wrap; padding-inline: 12px;
+  position: sticky; top: calc(var(--workspace-tabs-height, 38px) + var(--community-sticky-height, 0px)); z-index: 2;
+}
+#reader-feedback { grid-area: feedback; min-width: 0; }
+#main-content { grid-area: main; min-width: 0; }
+.browse-layout { display: block; min-width: 0; border: 0; }
+.rail {
+  grid-area: communities; position: sticky; top: var(--workspace-tabs-height, 38px);
+  max-height: calc(100dvh / var(--reader-ui-scale, 1) - var(--workspace-tabs-height, 38px));
+  overflow-y: auto; overscroll-behavior: contain; box-sizing: border-box;
+}
+.subreddit-tools > summary { cursor: pointer; padding: 6px 0 12px; color: var(--muted); }
+:root[data-subreddit-tabs="vertical"] .rail { height: calc(100dvh / var(--reader-ui-scale, 1) - var(--workspace-tabs-height, 38px)); }
+:root[data-subreddit-tabs="horizontal"] .subreddit-tools { order: -1; }
+.rail .section-heading { flex-wrap: wrap; }
+.subreddit-tools > .rail-section > .select-control { width: 100%; margin-block: 4px 8px; }
+.subreddit-visit[aria-current="page"] { color: var(--text); background: var(--hover); font-weight: 650; }
+.search-communities { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding-block: 8px; }
+.thread-item:focus-within .thread-open:focus-visible { outline: none; }
+:root[data-post-tabs="vertical"] body {
+  grid-template-columns: 200px 220px minmax(0, 1fr);
+  grid-template-areas: "communities posts header" "communities posts feedback" "communities posts main";
+  grid-template-rows: auto auto 1fr;
+}
+:root[data-post-tabs="vertical"] .workspace-tabs {
+  flex-direction: column; top: 0; height: calc(100dvh / var(--reader-ui-scale, 1));
+  max-height: calc(100dvh / var(--reader-ui-scale, 1)); overflow-y: auto;
+  padding: 6px; border-right: 1px solid var(--line); box-sizing: border-box;
+}
+:root[data-post-tabs="vertical"] .workspace-tabs .reader-tabs { flex-direction: column; flex: 0 0 auto; overflow: visible; }
+:root[data-post-tabs="vertical"] .workspace-tabs #tab-browse { position: static; }
+:root[data-post-tabs="vertical"] .post-tab { width: 100%; min-width: 0; max-width: none; }
+:root[data-post-tabs="vertical"] .workspace-tabs .reader-tabs > button { white-space: normal; }
+:root[data-post-tabs="vertical"] .rail { top: 0; max-height: calc(100dvh / var(--reader-ui-scale, 1)); }
+:root[data-subreddit-tabs="horizontal"] body {
+  --community-sticky-height: var(--community-tabs-height, 42px);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "posts" "communities" "header" "feedback" "main";
+  grid-template-rows: auto auto auto auto 1fr;
+}
+:root[data-subreddit-tabs="horizontal"] .rail {
+  display: flex; align-items: center; gap: 10px; padding: 4px 10px;
+  z-index: 3; overflow: visible; max-height: none; border-bottom: 1px solid var(--line);
+}
+:root[data-subreddit-tabs="horizontal"] .subreddit-tools { flex: none; }
+:root[data-subreddit-tabs="horizontal"] .subreddit-tools > summary { padding: 6px; }
+:root[data-subreddit-tabs="horizontal"] .subreddit-tools[open] {
+  position: absolute; top: 0; left: 0; z-index: 5; padding: 8px 12px;
+  width: 250px; max-height: 70dvh; overflow-y: auto; background: var(--rail); border: 1px solid var(--line);
+}
+:root[data-subreddit-tabs="horizontal"] .subreddit-list { display: flex; min-width: 0; gap: 6px; overflow-x: auto; }
+:root[data-subreddit-tabs="horizontal"] .subreddit-row { flex: none; }
+:root[data-subreddit-tabs="horizontal"] .subreddit-visit { white-space: nowrap; }
+:root[data-post-tabs="vertical"][data-subreddit-tabs="horizontal"] body {
+  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-areas: "communities communities" "posts header" "posts feedback" "posts main";
+  grid-template-rows: auto auto auto 1fr;
+}
+:root[data-post-tabs="vertical"][data-subreddit-tabs="horizontal"] .rail { top: 0; }
+:root[data-post-tabs="vertical"][data-subreddit-tabs="horizontal"] .workspace-tabs { top: var(--community-tabs-height, 42px); height: calc(100dvh / var(--reader-ui-scale, 1) - var(--community-tabs-height, 42px)); }
+:root[data-post-tabs="vertical"] .workspace-tabs .reader-tabs { width: 100%; }
+.rail .subreddit-list { margin-top: 0; }
+.thread-item, .comment-card, .cache-search-hit { scroll-margin-top: calc(var(--workspace-tabs-height, 38px) + var(--community-sticky-height, 0px) + var(--masthead-height, 90px) + 8px); }
 .workspace-tabs {
   position: sticky; top: 0; z-index: 4;
   display: flex; align-items: stretch; gap: 8px;
@@ -537,4 +609,20 @@ button:disabled { opacity: .55; cursor: wait; }
   .browse-layout .rail { max-height: calc(40dvh / var(--reader-ui-scale, 1)); z-index: 2; }
   .workspace-tabs { gap: 4px; padding-inline: 6px; }
   .workspace-tabs .new-browse-tab { font-size: 10px; padding-inline: 5px; }
+}
+
+@media (max-width: 900px) {
+  body { grid-template-columns: 175px minmax(0, 1fr); }
+  :root[data-post-tabs="vertical"] body { grid-template-columns: 145px 150px minmax(0, 1fr); }
+  :root[data-post-tabs="vertical"][data-subreddit-tabs="horizontal"] body { grid-template-columns: 155px minmax(0, 1fr); }
+}
+@media (max-width: 600px) {
+  body { grid-template-columns: 115px minmax(0, 1fr); }
+  :root[data-post-tabs="vertical"] body { grid-template-columns: 85px 100px minmax(0, 1fr); }
+  :root[data-post-tabs="vertical"][data-subreddit-tabs="horizontal"] body { grid-template-columns: 110px minmax(0, 1fr); }
+  .rail { padding-inline: 5px; }
+  .subreddit-row { min-width: 0; }
+  .subreddit-visit { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  :root[data-post-tabs="vertical"] .workspace-tabs { padding-inline: 3px; }
+  :root[data-post-tabs="vertical"] .workspace-tabs .new-browse-tab { white-space: normal; }
 }
