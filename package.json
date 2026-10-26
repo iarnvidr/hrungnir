@@ -2,7 +2,7 @@
   "name": "hrungnir",
   "private": true,
   "license": "Apache-2.0",
-  "version": "0.6.10",
+  "version": "0.6.11",
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",

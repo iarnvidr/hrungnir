@@ -74,7 +74,7 @@
   let appLinkDrainBusy = false;
   let appLinkDrainRequested = false;
   let toastTimer = 0;
-  let keyboardThread = 0;
+  let keyboardNavigationSequence = 0;
   let lastSavedPosition = null;
   let diagnosticData = null;
   let trustCommandInFlight = false;
@@ -88,6 +88,7 @@
   const postLoadsInFlight = new Map();
   const readerMediaStates = new Map();
   const viewScrollPositions = new Map();
+  const collapsedCommentIds = new Set();
   let scrollView = null;
   const articleRequests = new Map();
   let selectedFlair = '';
@@ -716,7 +717,7 @@
 
   function setTab(tab, persist = true) {
     const active = ['browse', 'reader', 'library'].includes(tab) ? tab : 'browse';
-    const nextView = active === 'browse' ? `browse:${redditSearch ? 'search' : activeSubreddit}` : active === 'reader' ? `reader:${activeId}` : active;
+    const nextView = active === 'browse' ? `browse:${redditSearch ? `search:${redditSearch.cached ? 'cache' : redditSearch.subreddit || 'all'}:${redditSearch.query}` : activeSubreddit}` : active === 'reader' ? `reader:${activeId}` : active;
     const changed = scrollView !== nextView;
     if (changed && scrollView) viewScrollPositions.set(scrollView, window.scrollY);
     ui.browsePanel.hidden = active !== 'browse';
@@ -752,6 +753,7 @@
     for (const name of ordered) {
       const row = element('div', 'subreddit-row');
       const visit = element('button', 'subreddit-visit', `r/${name}`);
+      visit.dataset.subreddit = name;
       visit.type = 'button';
       visit.addEventListener('click', () => void browseSubreddit(`/r/${name}`));
       const favorite = element('button', 'subreddit-star', favorites.has(name) ? '★' : '☆');
@@ -1192,6 +1194,24 @@
   }
 
   function renderList() {
+    document.querySelector('.listing-controls').hidden = Boolean(redditSearch?.cached);
+    const focusedId = ui.list.contains(document.activeElement) ? document.activeElement.closest('[data-thread-id]')?.dataset.threadId : null;
+    $('#search-scope option[value="subreddit"]').textContent = `r/${activeSubreddit}`;
+    if (redditSearch?.cached) {
+      ui.currentSubreddit.textContent = `Downloaded results for “${redditSearch.query}”`;
+      ui.count.textContent = `${redditSearch.hits.length} ${redditSearch.hits.length === 1 ? 'post' : 'posts'}`;
+      $('#flair-filter-wrap').hidden = true;
+      ui.postSort.disabled = true;
+      ui.topPeriod.disabled = true;
+      ui.empty.hidden = true;
+      releaseMediaWatchesWithin(ui.list);
+      renderCacheSearchResults(redditSearch.hits, redditSearch.query, ui.list);
+      updateFetchAllMediaControl();
+      restoreListingFocus(focusedId);
+      return;
+    }
+    ui.postSort.disabled = !invoke || ui.list.inert;
+    ui.topPeriod.disabled = !invoke || ui.list.inert;
     const sourceThreads = redditSearch ? redditSearch.threads : (listingBySubreddit.get(activeSubreddit) || []);
     const sourceKey = redditSearch ? `search:${redditSearch.query}` : activeSubreddit;
     if (flairSource !== sourceKey) { selectedFlair = ''; flairSource = sourceKey; }
@@ -1207,7 +1227,7 @@
     ui.postSort.value = redditSearch ? redditSearch.sort : preferences.postSort;
     ui.topPeriod.value = redditSearch ? redditSearch.period : preferences.topPeriod;
     const current = activeSubreddit || (threads.length ? threads[0].subreddit : '');
-    ui.currentSubreddit.textContent = redditSearch ? `Reddit results for “${redditSearch.query}”` : (current ? `Posts in r/${current}` : 'Choose a subreddit');
+    ui.currentSubreddit.textContent = redditSearch ? `${redditSearch.subreddit ? `r/${redditSearch.subreddit}` : 'Reddit'} results for “${redditSearch.query}”` : (current ? `Posts in r/${current}` : 'Choose a subreddit');
     ui.count.textContent = `${threads.length} ${threads.length === 1 ? 'post' : 'posts'}`;
     updateFetchAllMediaControl();
     releaseMediaWatchesWithin(ui.list);
@@ -1296,8 +1316,7 @@
       card.append(main, actions, inline);
       ui.list.append(card);
     });
-    const index = threads.findIndex((thread) => thread.id === activeId);
-    keyboardThread = index < 0 ? 0 : index;
+    restoreListingFocus(focusedId);
   }
 
   function subredditLink(name) {
@@ -1598,10 +1617,15 @@
     collapse.dataset.testid = `collapse-${comment.id}`;
     collapse.disabled = children.length === 0;
     if (children.length) {
-      collapse.setAttribute('aria-expanded', 'true');
+      const key = `${thread.id}:${comment.id}`;
+      const expanded = !collapsedCommentIds.has(key);
+      collapse.setAttribute('aria-expanded', String(expanded));
+      if (!expanded) collapse.textContent = `+ show ${children.length} ${children.length === 1 ? 'reply' : 'replies'}`;
       collapse.addEventListener('click', (event) => {
         event.stopPropagation();
         const isExpanded = collapse.getAttribute('aria-expanded') === 'true';
+        if (isExpanded) collapsedCommentIds.add(key);
+        else collapsedCommentIds.delete(key);
         collapse.setAttribute('aria-expanded', String(!isExpanded));
         childList.hidden = isExpanded;
         collapse.textContent = isExpanded ? `+ show ${children.length} ${children.length === 1 ? 'reply' : 'replies'}` : `− hide ${children.length} ${children.length === 1 ? 'reply' : 'replies'}`;
@@ -1627,6 +1651,7 @@
     }
     content.append(actions);
     const childList = element('div', 'children');
+    childList.hidden = collapsedCommentIds.has(`${thread.id}:${comment.id}`);
     if (!flat && !ancestors.has(comment.id)) {
       const nextAncestors = new Set(ancestors);
       nextAncestors.add(comment.id);
@@ -1779,6 +1804,7 @@
   }
 
   function openThread(thread, anchor = null) {
+    const focusedComment = ui.view.contains(document.activeElement) ? document.activeElement.closest('.comment')?.dataset.commentId : null;
     ui.state.hidden = true;
     ui.view.hidden = false;
     releaseMediaWatchesWithin(ui.view);
@@ -1826,7 +1852,12 @@
     } else {
       ui.view.append(element('p', 'muted comment-note', 'No comments yet.'));
     }
+    if (focusedComment && !ui.readerPanel.hidden) {
+      const target = [...ui.view.querySelectorAll('.comment')].find((item) => item.dataset.commentId === focusedComment);
+      (target?.getClientRects().length ? target : ui.view).focus({ preventScroll: true });
+    }
     if (anchor && anchor !== thread.id) requestAnimationFrame(() => {
+      if (ui.readerPanel.hidden || activeId !== thread.id) return;
       const target = ui.view.querySelector(`[data-comment-id="${CSS.escape(anchor)}"]`);
       if (target) {
         target.classList.add('anchor-target');
@@ -2336,10 +2367,12 @@
     }
     const candidates = listedMediaCandidates();
     if (!candidates.length) return;
-    const run = { cancelled: false, completed: 0, failed: 0, total: candidates.length, subreddit: activeSubreddit };
+    const run = { cancelled: false, completed: 0, failed: 0, total: candidates.length, subreddit: activeSubreddit, search: redditSearch };
+    const ownsListing = () => run.subreddit === activeSubreddit && run.search === redditSearch;
     bulkMediaRun = run;
     let active = 0;
     const announce = () => {
+      if (!ownsListing()) return;
       const phase = run.cancelled ? 'Cancelling' : 'Fetching';
       ui.fetchAllMediaStatus.textContent = `${phase} ${run.completed} of ${run.total} · ${active} active${run.failed ? ` · ${run.failed} failed` : ''}`;
     };
@@ -2371,7 +2404,7 @@
     };
     try {
       await Promise.all([worker(), worker()]);
-      ui.fetchAllMediaStatus.textContent = run.cancelled
+      if (ownsListing()) ui.fetchAllMediaStatus.textContent = run.cancelled
         ? `Cancelled · ${run.completed} of ${run.total} processed${run.failed ? ` · ${run.failed} failed` : ''}`
         : `Finished · ${run.completed} posts${run.failed ? ` · ${run.failed} failed` : ''}`;
     } finally {
@@ -2497,6 +2530,9 @@
     }
     const validSort = ['relevance', 'new', 'top', 'comments'].includes(sort) ? sort : 'relevance';
     const validPeriod = ['hour', 'day', 'week', 'month', 'year', 'all'].includes(period) ? period : 'all';
+    const subreddit = $('#search-scope').value === 'subreddit' ? activeSubreddit : null;
+    const cached = $('#search-scope').value === 'cache';
+    const sourceLabel = cached ? 'downloaded posts' : 'Reddit';
     cancelCacheSearch({ hide: true });
     const transition = ++operationSequence;
     const request = ++redditSearchSequence;
@@ -2514,37 +2550,45 @@
     ui.list.inert = true;
     ui.list.setAttribute('aria-busy', 'true');
     updateFetchAllMediaControl();
-    setFeedback(`Searching Reddit for “${normalizedQuery}”…`);
-    setStatus(`Searching Reddit · ${normalizedQuery}`);
+    setFeedback(`Searching ${sourceLabel} for “${normalizedQuery}”…`);
+    setStatus(`Searching ${sourceLabel} · ${normalizedQuery}`);
     startOperationProgress('Searching Reddit', transition);
     try {
-      const result = await invoke('search_reddit', {
+      const result = cached ? await invoke('search_cache', { query: normalizedQuery, subreddit: null, limit: 100 }) : await invoke('search_reddit', {
         query: normalizedQuery,
-        subreddit: null,
+        subreddit,
         sort: validSort,
         period: validPeriod,
+        smart: $('#search-smart').checked,
       });
       if (request !== redditSearchSequence || transition !== operationSequence) return;
-      if (!result || !Array.isArray(result.threads) || !result.diagnostics) throw new Error('Native Reddit search returned an invalid Snapshot.');
-      snapshot = mergeSnapshot(result);
-      for (const thread of result.threads) unavailableThreadIds.delete(thread.id);
-      rememberSnapshotThreads(result);
-      redditSearch = { query: normalizedQuery, sort: validSort, period: validPeriod, threads: result.threads.slice() };
+      if (cached) {
+        if (!Array.isArray(result)) throw new Error('Native downloaded search returned an invalid result.');
+        redditSearch = { query: normalizedQuery, cached: true, hits: result, threads: [], sort: 'relevance', period: 'all' };
+      } else {
+        if (!result || !Array.isArray(result.threads) || !result.diagnostics) throw new Error('Native Reddit search returned an invalid Snapshot.');
+        snapshot = mergeSnapshot(result);
+        for (const thread of result.threads) unavailableThreadIds.delete(thread.id);
+        rememberSnapshotThreads(result);
+        redditSearch = { query: normalizedQuery, subreddit, sort: validSort, period: validPeriod, threads: result.threads.slice() };
+      }
       pendingId = null;
       setTab('browse');
       updateSortNotice();
       refreshDiagnostics(snapshot);
       renderList();
       renderPostTabs();
-      requestLinkPreviews(result.threads);
+      if (!cached) requestLinkPreviews(result.threads);
       const elapsed = performance.now() - startedAt;
-      recordClientEvent('source_fetch', elapsed, result.threads.length);
+      const count = cached ? result.length : result.threads.length;
+      recordClientEvent(cached ? 'cache_search' : 'source_fetch', elapsed, count);
       setFeedback('');
-      setStatus(`Reddit results · ${result.threads.length} posts · ${formatElapsed(elapsed)}`, 'ready');
+      if (!bulkMediaRun || bulkMediaRun.cancelled) ui.fetchAllMediaStatus.textContent = '';
+      setStatus(`${sourceLabel} · ${count} posts · ${formatElapsed(elapsed)}`, 'ready');
     } catch (error) {
       if (request === redditSearchSequence && transition === operationSequence) {
         recordClientEvent('source_fetch', performance.now() - startedAt, 0);
-        setFeedback(`Could not search Reddit for “${normalizedQuery}”. ${explainError(error)}${sourceTrustFailureHint()}`, true, () => void searchReddit(normalizedQuery, validSort, validPeriod));
+        setFeedback(`Could not search ${sourceLabel} for “${normalizedQuery}”. ${explainError(error)}${cached ? '' : sourceTrustFailureHint()}`, true, () => void searchReddit(normalizedQuery, validSort, validPeriod));
         setStatus('Reddit search failed', 'error');
       }
     } finally {
@@ -2553,8 +2597,8 @@
         activeRedditSearchOperation = null;
         if (request === redditSearchSequence) {
           ui.cacheSearchSubmit.disabled = false;
-          ui.postSort.disabled = false;
-          ui.topPeriod.disabled = false;
+          ui.postSort.disabled = Boolean(redditSearch?.cached);
+          ui.topPeriod.disabled = Boolean(redditSearch?.cached);
           ui.list.inert = false;
           ui.list.removeAttribute('aria-busy');
           updateFetchAllMediaControl();
@@ -2583,24 +2627,24 @@
     }
   }
 
-  function renderCacheSearchResults(rows, query) {
-    ui.cacheSearchResults.replaceChildren();
+  function renderCacheSearchResults(rows, query, results = ui.cacheSearchResults) {
+    results.replaceChildren();
     if (!query) {
-      ui.cacheSearchResults.hidden = true;
+      results.hidden = true;
       return;
     }
     if (!rows.length) {
-      ui.cacheSearchResults.append(element('p', 'cache-search-empty muted', `No cached matches for “${query}”. Try fewer words or a subreddit name.`));
-      ui.cacheSearchResults.hidden = false;
+      results.append(element('p', 'cache-search-empty muted', `No downloaded matches for “${query}”. Try fewer words or search All Reddit.`));
+      results.hidden = false;
       return;
     }
-    for (const row of rows.slice(0, 50)) {
+    for (const row of rows.slice(0, results === ui.cacheSearchResults ? 50 : 100)) {
       if (!row || typeof row.id !== 'string' || !/^t3_[A-Za-z0-9_]+$/.test(row.id)) continue;
       const hit = element('button', 'cache-search-hit');
       hit.type = 'button';
       hit.dataset.threadId = row.id;
       if (typeof row.comment_id === 'string' && /^t1_[A-Za-z0-9_]+$/.test(row.comment_id)) hit.dataset.commentId = row.comment_id;
-      hit.setAttribute('role', 'option');
+      if (results === ui.cacheSearchResults) hit.setAttribute('role', 'option');
       const title = element('span', 'cache-search-title', typeof row.title === 'string' ? row.title : row.id);
       const metadata = element('span', 'cache-search-meta');
       metadata.append(element('span', 'cache-search-subreddit', `r/${typeof row.subreddit === 'string' ? row.subreddit : 'unknown'}`));
@@ -2615,12 +2659,14 @@
         if (event.key !== 'Enter') return;
         event.preventDefault();
         event.stopPropagation();
-        hit.click();
+        if (event.repeat) return;
+        keyboardNavigationSequence++;
+        void openKeyboardPost(hit);
       });
-      ui.cacheSearchResults.append(hit);
+      results.append(hit);
     }
-    if (!ui.cacheSearchResults.childElementCount) ui.cacheSearchResults.append(element('p', 'cache-search-empty muted', 'No cached matches.'));
-    ui.cacheSearchResults.hidden = false;
+    if (!results.childElementCount) results.append(element('p', 'cache-search-empty muted', 'No downloaded matches.'));
+    results.hidden = false;
   }
 
   function cancelCacheSearch({ hide = false } = {}) {
@@ -2644,7 +2690,7 @@
     if (focus) ui.cacheSearch.focus();
   }
 
-  function scheduleCacheSearch(delay = 0) {
+  function scheduleCacheSearch(delay = 150) {
     const query = ui.cacheSearch.value.trim();
     const request = ++cacheSearchSequence;
     window.clearTimeout(cacheSearchTimer);
@@ -2658,7 +2704,7 @@
       ui.cacheSearchResults.replaceChildren(element('p', 'cache-search-empty muted', 'Searching this device’s cache…'));
       ui.cacheSearchResults.hidden = false;
       try {
-        const rows = await invoke('search_cache', { query, subreddit: null, limit: 50 });
+        const rows = await invoke('search_cache', { query, subreddit: $('#search-scope').value === 'subreddit' ? activeSubreddit : null, limit: 50 });
         if (request !== cacheSearchSequence || query !== ui.cacheSearch.value.trim()) return;
         if (!Array.isArray(rows)) throw new Error('Native cache search returned an invalid result.');
         renderCacheSearchResults(rows.slice(0, 50), query);
@@ -2806,8 +2852,6 @@
     } finally {
       stopOperationProgress(transition);
     }
-    const item = [...ui.list.querySelectorAll('.thread-item')].find((card) => card.getAttribute('aria-current') === 'true');
-    if (item) keyboardThread = Number(item.dataset.threadIndex);
     const thread = currentThread();
   }
 
@@ -2851,7 +2895,8 @@
     const transition = ++operationSequence;
     const startedAt = performance.now();
     ui.cacheSearchResults.hidden = true;
-    if (!currentThread()) setReaderMessage('Opening cached post…');
+    setTab('reader');
+    setReaderMessage('Opening cached post…');
     setFeedback('Opening the cached copy…');
     setStatus('Opening cached post…');
     startOperationProgress('Opening cached post', transition);
@@ -2865,12 +2910,12 @@
       ensurePostTab(thread, anchor, { cachedOnly: true });
       draw();
       await focusAnchor(id, anchor, null);
-      setTab('reader');
       setFeedback('');
       recordClientEvent('cache_search_open', performance.now() - startedAt, media.length);
       setStatus('Opened cached post · no source fetch', 'ready');
     } catch (error) {
       if (transition !== operationSequence) return;
+      setReaderMessage(`Could not open this downloaded post. ${explainError(error)}`, true);
       setFeedback(`Could not open this cached result. No source fetch was attempted. ${explainError(error)}`, true, () => void openCachedSearchHit(hit));
       setStatus('Cached post unavailable', 'error');
     } finally {
@@ -3101,6 +3146,139 @@
     else if (activeId) closePostTab(activeId);
   }
 
+  function listingKeyboardItems() {
+    return [...ui.list.querySelectorAll('.thread-open, .cache-search-hit')].filter((item) => item.getClientRects().length);
+  }
+
+  function focusKeyboardItem(item) {
+    if (!item || !item.getClientRects().length) return;
+    item.focus({ preventScroll: true });
+    const visible = item.matches('.comment') ? item.querySelector(':scope > .comment-card') : item;
+    (visible || item).scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  function restoreListingFocus(id) {
+    if (!id || ui.browsePanel.hidden) return;
+    const item = listingKeyboardItems().find((item) => item.closest('[data-thread-id]')?.dataset.threadId === id);
+    item?.focus({ preventScroll: true });
+  }
+
+  function focusFirstListing() {
+    const item = listingKeyboardItems()[0];
+    if (item) focusKeyboardItem(item);
+    else { ui.currentSubreddit.tabIndex = -1; focusKeyboardItem(ui.currentSubreddit); }
+  }
+
+  function returnToPostList() {
+    cancelRedditSearch({ clearFeedback: true });
+    stopOperationProgress(operationSequence);
+    operationSequence++;
+    pendingId = null;
+    setTab('browse');
+    renderList();
+    setFeedback('');
+    const item = listingKeyboardItems().find((item) => item.closest('[data-thread-id]')?.dataset.threadId === activeId);
+    focusKeyboardItem(item || listingKeyboardItems()[0]);
+  }
+
+  function moveKeyboardFocus(items, current, direction) {
+    if (!items.length) return;
+    const index = items.indexOf(current);
+    focusKeyboardItem(items[index < 0 ? 0 : Math.max(0, Math.min(items.length - 1, index + direction))]);
+  }
+
+  async function openKeyboardCommunity(button) {
+    const sequence = keyboardNavigationSequence;
+    const name = button.dataset.subreddit;
+    await browseSubreddit(`/r/${name}`);
+    if (sequence === keyboardNavigationSequence && !ui.browsePanel.hidden && activeSubreddit === name) focusFirstListing();
+  }
+
+  async function openKeyboardPost(button) {
+    const sequence = keyboardNavigationSequence;
+    if (button.matches('.cache-search-hit')) {
+      await openCachedSearchHit({ id: button.dataset.threadId, comment_id: button.dataset.commentId || null });
+    } else button.click();
+    if (sequence === keyboardNavigationSequence && !ui.readerPanel.hidden) {
+      const anchor = button.dataset.commentId;
+      const comment = anchor ? [...ui.view.querySelectorAll('.comment')].find((item) => item.dataset.commentId === anchor) : null;
+      focusKeyboardItem(comment || ui.view);
+    }
+  }
+
+  function handleReaderKeyboard(event, key, target) {
+    const comments = [...ui.view.querySelectorAll('.comment')].filter((item) => item.getClientRects().length);
+    const comment = target?.closest('.comment');
+    if (key === 'j' || key === 'k') {
+      moveKeyboardFocus(comments, comment, key === 'j' ? 1 : -1);
+      if (!comments.length) window.scrollBy(0, key === 'j' ? 80 : -80);
+    } else if (key === 'h' || key === 'Escape') {
+      if (key === 'Escape' || !comment) { returnToPostList(); return; }
+      const collapse = comment.querySelector(':scope > .comment-card .comment-actions button[aria-expanded]');
+      if (collapse?.getAttribute('aria-expanded') === 'true') { collapse.click(); focusKeyboardItem(comment); }
+      else focusKeyboardItem(comment.parentElement.closest('.comment') || ui.view);
+    } else if (key === 'l') {
+      const link = target?.closest('a');
+      if (link) { link.click(); return; }
+      if (!comment) { focusKeyboardItem(comments[0]); return; }
+      const collapse = comment.querySelector(':scope > .comment-card .comment-actions button[aria-expanded]');
+      if (collapse?.getAttribute('aria-expanded') === 'false') collapse.click();
+      else focusKeyboardItem(comment.querySelector(':scope > .children > .comment'));
+    }
+  }
+
+  function handleNavigationKeyboard(event) {
+    if (event.defaultPrevented || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || document.querySelector('dialog[open]')) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), video, audio')) return;
+    const key = event.key;
+    if (key === '/') { event.preventDefault(); ui.cacheSearch.focus(); ui.cacheSearch.select(); return; }
+    if (key === '?') { event.preventDefault(); $('#keyboard-help-dialog').showModal(); return; }
+    if (!['h', 'j', 'k', 'l', 'Escape', 'Enter'].includes(key)) return;
+    if (event.repeat && (key === 'l' || key === 'Enter')) { event.preventDefault(); return; }
+    const community = target?.closest('.subreddit-visit');
+    const listingItem = target?.closest('.thread-open, .cache-search-hit');
+    const dropdown = listingItem && ui.cacheSearchResults.contains(listingItem);
+    if (key === 'Enter' && !community && !listingItem) return;
+    if (ui.list.inert && !dropdown && !ui.browsePanel.hidden) return;
+    keyboardNavigationSequence++;
+    if (dropdown) {
+      event.preventDefault();
+      if (key === 'j' || key === 'k') moveKeyboardFocus([...ui.cacheSearchResults.querySelectorAll('.cache-search-hit')], listingItem, key === 'j' ? 1 : -1);
+      else if (key === 'h' || key === 'Escape') { cancelCacheSearch({ hide: true }); ui.cacheSearch.focus(); }
+      else if (key === 'l' || key === 'Enter') void openKeyboardPost(listingItem);
+      return;
+    }
+    if (!ui.readerPanel.hidden) {
+      if (key === 'Enter') return;
+      event.preventDefault();
+      handleReaderKeyboard(event, key, target);
+      return;
+    }
+    if (ui.browsePanel.hidden) return;
+    event.preventDefault();
+    if (community) {
+      if (key === 'j' || key === 'k') moveKeyboardFocus([...ui.subreddits.querySelectorAll('.subreddit-visit')], community, key === 'j' ? 1 : -1);
+      else if (key === 'l' || key === 'Enter') void openKeyboardCommunity(community);
+      return;
+    }
+    if (key === 'h') {
+      const communities = [...ui.subreddits.querySelectorAll('.subreddit-visit')];
+      focusKeyboardItem(communities.find((item) => item.dataset.subreddit === activeSubreddit) || communities[0]);
+    } else if (key === 'j' || key === 'k') moveKeyboardFocus(listingKeyboardItems(), listingItem, key === 'j' ? 1 : -1);
+    else if ((key === 'l' || key === 'Enter') && listingItem) void openKeyboardPost(listingItem);
+  }
+
+  async function submitHeaderSearch() {
+    const query = ui.cacheSearch.value.trim();
+    cancelCacheSearch({ hide: true });
+    await searchReddit(query, 'relevance', 'all');
+    if (!ui.browsePanel.hidden && redditSearch?.query === query && ui.cacheSearchForm.contains(document.activeElement)) {
+      document.querySelector('.search-options').open = false;
+      focusFirstListing();
+    }
+  }
+
   function listenForTabShortcuts() {
     const eventApi = tauri && tauri.event;
     if (!eventApi || typeof eventApi.listen !== 'function') return;
@@ -3118,6 +3296,7 @@
   let updateInstalled = false;
 
   function openSettings() {
+    if ($('#keyboard-help-dialog').open) $('#keyboard-help-dialog').close();
     if (ui.diagnosticsDialog.open) ui.diagnosticsDialog.close();
     if (!ui.settingsDialog.open) {
       if (typeof ui.settingsDialog.showModal === 'function') ui.settingsDialog.showModal();
@@ -3175,6 +3354,9 @@
   }
 
   function configure() {
+    document.addEventListener('keydown', (event) => {
+      if (!(event.repeat && (event.key === 'l' || event.key === 'Enter'))) keyboardNavigationSequence++;
+    }, { capture: true });
     window.addEventListener('pagehide', releaseAllMediaWatches);
     window.addEventListener('keydown', (event) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
@@ -3263,10 +3445,16 @@
     ui.cacheSearchClear.disabled = !ui.cacheSearch.value;
     ui.cacheSearchForm.addEventListener('submit', (event) => {
       event.preventDefault();
-      cancelCacheSearch({ hide: true });
-      void searchReddit(ui.cacheSearch.value.trim(), 'relevance', 'all');
+      void submitHeaderSearch();
     });
+    ['#search-scope', '#search-smart'].forEach((selector) => $(selector).addEventListener('change', () => {
+      $('#search-smart').disabled = $('#search-scope').value === 'cache';
+      cancelRedditSearch({ clearFeedback: true });
+      cancelCacheSearch({ hide: true });
+      if (redditSearch && ui.cacheSearch.value.trim()) void submitHeaderSearch();
+    }));
     ui.cacheSearch.addEventListener('input', () => {
+      document.querySelector('.search-options').open = false;
       ui.cacheSearchClear.disabled = !ui.cacheSearch.value;
       cancelRedditSearch({ clearFeedback: true });
       scheduleCacheSearch();
@@ -3274,11 +3462,12 @@
     ui.cacheSearchClear.addEventListener('click', () => clearSearch({ focus: true }));
     ui.cacheSearch.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
-        if (!ui.cacheSearchResults.hidden || ui.cacheSearch.value || redditSearch || activeRedditSearchOperation) {
-          event.preventDefault();
-          event.stopPropagation();
-          clearSearch({ focus: true });
-        }
+        event.preventDefault();
+        event.stopPropagation();
+        cancelCacheSearch({ hide: true });
+        cancelRedditSearch({ clearFeedback: true });
+        if (!ui.browsePanel.hidden) focusFirstListing();
+        else ui.cacheSearch.blur();
       } else if (event.key === 'ArrowDown' && !ui.cacheSearchResults.hidden) {
         const first = ui.cacheSearchResults.querySelector('.cache-search-hit');
         if (first) { event.preventDefault(); first.focus(); }
@@ -3291,6 +3480,7 @@
       }
     });
     document.addEventListener('pointerdown', (event) => {
+      keyboardNavigationSequence++;
       if (!(event.target instanceof Element) || !event.target.closest('.header-search')) {
         cancelCacheSearch({ hide: true });
       }
@@ -3408,25 +3598,9 @@
     renderSubreddits();
     renderLibrary();
 
-    document.addEventListener('keydown', (event) => {
-      if (ui.settingsDialog.open || ui.diagnosticsDialog.open) return;
-      const target = event.target instanceof Element ? event.target : null;
-      const threadItem = target && target.closest('.thread-item');
-      if (event.altKey || event.ctrlKey || event.metaKey || (target && target.closest('input,textarea,select,button') && !threadItem)) return;
-      if (ui.list.inert) return;
-      const threads = listingBySubreddit.get(activeSubreddit) || [];
-      if (!threads.length) return;
-      if (event.key.toLowerCase() === 'j' || event.key.toLowerCase() === 'k') {
-        event.preventDefault();
-        const delta = event.key.toLowerCase() === 'j' ? 1 : -1;
-        keyboardThread = (keyboardThread + delta + threads.length) % threads.length;
-        selectThread(threads[keyboardThread].id, threads[keyboardThread].id);
-      } else if (event.key === 'Escape') {
-        const focusedComment = document.activeElement.closest && document.activeElement.closest('.comment');
-        if (focusedComment) document.activeElement.blur();
-        else ui.list.querySelector('.thread-item[aria-current="true"] .thread-open')?.focus();
-      }
-    });
+    document.addEventListener('keydown', handleNavigationKeyboard);
+    $('#keyboard-help-open').addEventListener('click', () => $('#keyboard-help-dialog').showModal());
+    $('#keyboard-help-close').addEventListener('click', () => $('#keyboard-help-dialog').close());
 
     void (async () => {
       try {
