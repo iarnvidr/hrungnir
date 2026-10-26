@@ -3170,6 +3170,7 @@
   }
 
   function returnToPostList() {
+    cancelRedditSearch({ clearFeedback: true });
     stopOperationProgress(operationSequence);
     operationSequence++;
     pendingId = null;
@@ -3239,7 +3240,7 @@
     const listingItem = target?.closest('.thread-open, .cache-search-hit');
     const dropdown = listingItem && ui.cacheSearchResults.contains(listingItem);
     if (key === 'Enter' && !community && !listingItem) return;
-    if (ui.list.inert && !dropdown) return;
+    if (ui.list.inert && !dropdown && !ui.browsePanel.hidden) return;
     keyboardNavigationSequence++;
     if (dropdown) {
       event.preventDefault();

@@ -54,7 +54,18 @@ async (page) => {
   await page.waitForFunction(() => !document.querySelector('[data-thread-id="t3_fixture3"]')?.getAttribute('aria-busy') || document.querySelector('[data-thread-id="t3_fixture3"]').getAttribute('aria-busy') === 'false');
   assert(await activeComment() === 't1_root', 'a late redraw lost comment focus');
   assert(await page.locator('[data-comment-id="t1_child"]').isHidden(), 'redraw forgot collapsed replies');
+  await page.evaluate(() => { window.__ux.search.hold = true; });
+  await page.keyboard.press('/');
+  await search.fill('pending search');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => typeof window.__ux.search.release === 'function');
+  await page.locator('#thread-view').focus();
+  await page.keyboard.press('j');
+  assert(await activeComment() === 't1_root', 'pending search blocked reader navigation');
   await page.keyboard.press('Escape');
+  assert(await page.locator('#header-search-submit').isEnabled(), 'returning to the list left search stuck');
+  await page.evaluate(() => { window.__ux.search.hold = false; window.__ux.search.release(); });
+  assert(!(await page.locator('#current-subreddit').innerText()).includes('pending search'), 'late cancelled search replaced the listing');
   await page.locator('#flair-filter').selectOption('');
   const fetch = async name => {
     await page.locator('#subreddit-input').fill(name);
