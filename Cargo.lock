@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "reddit-offline"
-version = "0.6.12"
+version = "0.6.13"
 dependencies = [
  "bytes",
  "flate2",
