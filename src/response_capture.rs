@@ -187,7 +187,8 @@ impl CaptureForwarder {
         // An acquisition worker has no reason to sign in, post, or fetch private
         // endpoints. A request's inner authority cannot change its CONNECT host.
         if !matches!(parts.method, Method::GET | Method::HEAD)
-            || !crate::browsing::public_content_path(path)
+            || !(crate::browsing::public_content_path(path)
+                || crate::browsing::listing_partial_path(path, parts.uri.query()))
             || parts
                 .uri
                 .authority()
@@ -264,7 +265,11 @@ impl CaptureForwarder {
             .headers
             .get(hyper::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.to_ascii_lowercase().contains("text/html"));
+            .is_some_and(|v| {
+                let v = v.to_ascii_lowercase();
+                // The listing continuation is served as an HTML fragment.
+                v.contains("text/html") || v.contains("text/vnd.reddit.partial+html")
+            });
         let encoding = parts
             .headers
             .get(hyper::header::CONTENT_ENCODING)

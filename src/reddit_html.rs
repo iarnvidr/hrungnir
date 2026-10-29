@@ -1,4 +1,5 @@
-//! Classic Reddit response parser. No JavaScript execution or browser IPC.
+//! Reddit response parser for classic markup and, since Old Reddit stopped
+//! being served, the current layout. No JavaScript execution or browser IPC.
 use crate::{
     browsing::{classic_url, PageCapture},
     Comment, Result, Thread,
@@ -7,10 +8,10 @@ use scraper::{ElementRef, Html, Selector};
 use std::io::Read;
 use url::Url;
 
-fn selector(value: &str) -> Selector {
+pub(crate) fn selector(value: &str) -> Selector {
     Selector::parse(value).expect("static selector")
 }
-fn text(node: ElementRef<'_>, limit: usize) -> String {
+pub(crate) fn text(node: ElementRef<'_>, limit: usize) -> String {
     node.text()
         .collect::<Vec<_>>()
         .join(" ")
@@ -21,7 +22,7 @@ fn text(node: ElementRef<'_>, limit: usize) -> String {
         .take(limit)
         .collect()
 }
-fn resolve(base: &Url, input: &str) -> Option<String> {
+pub(crate) fn resolve(base: &Url, input: &str) -> Option<String> {
     let mut url = base.join(input).ok()?;
     if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
         return None;
@@ -32,7 +33,7 @@ fn resolve(base: &Url, input: &str) -> Option<String> {
 
 // Keep paragraph boundaries and link destinations when converting Reddit's
 // self-post HTML to inert text. The reader never executes source markup.
-fn body_text(node: ElementRef<'_>, base: &Url, limit: usize) -> String {
+pub(crate) fn body_text(node: ElementRef<'_>, base: &Url, limit: usize) -> String {
     fn walk(node: ElementRef<'_>, base: &Url, out: &mut String, depth: usize) {
         if depth > 40 || out.len() > 64_000 {
             return;
@@ -69,6 +70,59 @@ fn body_text(node: ElementRef<'_>, base: &Url, limit: usize) -> String {
         .chars().take(limit).collect()
 }
 
+/// Responses that carry no content yet but are a normal step towards it: the
+/// browser solves Reddit's verification page, or its script moves a post opened
+/// without its title slug to the canonical address. Callers wait instead of
+/// failing the acquisition.
+pub const INTERIM: &str = "Waiting for Reddit to continue: ";
+
+pub fn is_interim(error: &str) -> bool {
+    error.starts_with(INTERIM)
+}
+
+fn decode(response: &crate::response_capture::CapturedResponse) -> Result<String> {
+    let mut decoded = Vec::new();
+    match response.encoding.as_str() {
+        "" | "identity" => decoded = response.bytes.clone(),
+        "gzip" => {
+            flate2::read::GzDecoder::new(response.bytes.as_slice())
+                .take(8 * 1024 * 1024 + 1)
+                .read_to_end(&mut decoded)?;
+        }
+        _ => return Err("Unsupported source content encoding".into()),
+    }
+    if decoded.len() > 8 * 1024 * 1024 {
+        return Err("Decompressed source exceeds 8 MiB".into());
+    }
+    Ok(String::from_utf8(decoded).map_err(|error| error.utf8_error())?)
+}
+
+fn interim_page(document: &Html, post: bool) -> Option<&'static str> {
+    if document
+        .select(&selector("form input[name=\"js_challenge\"]"))
+        .next()
+        .is_some()
+    {
+        return Some("verification page");
+    }
+    (post
+        && document.select(&selector("shreddit-post")).next().is_none()
+        && document.select(&selector("#canonical-url-updater")).next().is_some())
+    .then_some("post address redirect")
+}
+
+/// Posts from the follow-up fragment a modern listing requests for itself.
+pub fn parse_listing_partial(
+    response: crate::response_capture::CapturedResponse,
+    listing_url: &str,
+    limit: usize,
+) -> Result<PageCapture> {
+    let mut listing = Url::parse(&classic_url(listing_url)?)?;
+    listing.set_query(None);
+    let html = decode(&response)?;
+    crate::reddit_modern::parse_partial(&Html::parse_document(&html), &listing, limit)
+}
+
 pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<PageCapture> {
     let mut base = Url::parse(&classic_url(&response.url)?)?;
     if !crate::browsing::public_content_path(base.path()) {
@@ -88,27 +142,26 @@ pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<Page
         .contains("/comments/")
         .then(|| base.path().split('/').nth(4).map(|id| format!("t3_{id}")))
         .flatten();
-    let mut decoded = Vec::new();
-    match response.encoding.as_str() {
-        "" | "identity" => decoded = response.bytes,
-        "gzip" => {
-            flate2::read::GzDecoder::new(response.bytes.as_slice())
-                .take(8 * 1024 * 1024 + 1)
-                .read_to_end(&mut decoded)?;
+    let html = decode(&response)?;
+    let document = Html::parse_document(&html);
+    if let Some(waiting) = interim_page(&document, post_id.is_some()) {
+        return Err(format!("{INTERIM}{waiting}").into());
+    }
+    if crate::reddit_modern::is_modern(&document) {
+        let mut page =
+            crate::reddit_modern::parse(&document, &base, searching, post_id.as_deref())?;
+        if !searching && post_id.is_none() {
+            page.more_url = crate::reddit_modern::more_posts_url(&document);
         }
-        _ => return Err("Unsupported source content encoding".into()),
+        return Ok(page);
     }
-    if decoded.len() > 8 * 1024 * 1024 {
-        return Err("Decompressed source exceeds 8 MiB".into());
-    }
-    let html = std::str::from_utf8(&decoded)?;
-    let document = Html::parse_document(html);
     let mut page = PageCapture {
         url: base.to_string(),
         scroll_y: 0.0,
         threads: Vec::new(),
         layout: Some("classic".into()),
         layout_preference: None,
+        more_url: None,
     };
     for node in document
         .select(&selector(".thing.link[data-fullname], .search-result-link"))
