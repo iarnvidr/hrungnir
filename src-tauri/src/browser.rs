@@ -19,6 +19,9 @@ struct Progress {
     ids: Vec<String>,
     layout: Option<String>,
     preference_present: bool,
+    /// A listing's remaining posts arrive in a follow-up response; until this
+    /// instant the acquisition keeps waiting for it.
+    more_until: Option<Instant>,
 }
 pub struct Browser {
     app: AppHandle,
@@ -51,6 +54,7 @@ impl Browser {
                 ids: Vec::new(),
                 layout: None,
                 preference_present: false,
+                more_until: None,
             }),
             gate: tokio::sync::Mutex::new(()),
             trust_gate: tokio::sync::Mutex::new(()),
@@ -97,7 +101,17 @@ impl Browser {
                             "proxy capture: generation={generation}, compressed_bytes={}",
                             response.bytes.len()
                         );
-                        let result = reddit_offline::reddit_html::parse(response)
+                        let partial = reddit_offline::browsing::is_listing_partial_url(&response.url);
+                        let parsed = if partial {
+                            let (listing, taken) = {
+                                let progress = browser.progress.lock().unwrap_or_else(|e| e.into_inner());
+                                (progress.url.clone(), progress.ids.len())
+                            };
+                            reddit_offline::reddit_html::parse_listing_partial(response, &listing, 25usize.saturating_sub(taken))
+                        } else {
+                            reddit_offline::reddit_html::parse(response)
+                        };
+                        let result = parsed
                             .map_err(|error| error.to_string())
                             .and_then(|page| {
                                 let actual = page
@@ -106,11 +120,22 @@ impl Browser {
                                     .map_err(|error| error.to_string())?;
                                 let json = serde_json::to_string(&page)
                                     .map_err(|error| error.to_string())?;
-                                browser.capture_page(&json, actual, generation)
+                                let more = page.more_url.clone();
+                                let count = browser.capture_page(&json, actual, generation, partial, more.is_some())?;
+                                if let Some(more) = more {
+                                    browser.request_more(generation, &more);
+                                }
+                                Ok(count)
                             });
                         if let Err(error) = result {
                             eprintln!("proxy capture rejected: {error}");
-                            if error != "Expired acquisition request" {
+                            if partial {
+                                // The listing itself is already stored: a missing
+                                // continuation only means fewer posts.
+                                browser.stop_waiting_for_more(generation);
+                            } else if error != "Expired acquisition request"
+                                && !reddit_offline::reddit_html::is_interim(&error)
+                            {
                                 browser.fail_generation(generation,&error);
                             }
                             browser.record_detail("parse", "failed", started.elapsed().as_millis() as u64, Some(error),serde_json::json!({"generation":generation}));
@@ -131,6 +156,8 @@ impl Browser {
         json: &str,
         mut actual: tauri::Url,
         generation: u64,
+        partial: bool,
+        more_expected: bool,
     ) -> Result<usize, String> {
         if json.len() > 512 * 1024 {
             return Err("Capture exceeds 512 KiB".into());
@@ -154,12 +181,17 @@ impl Browser {
             page.threads.len(),
             progress.preference_present
         );
-        if page.layout.as_deref() == Some("modern") {
-            progress.error = Some(
-                "Reddit did not honor the classic layout preference; cached content is preserved"
-                    .into(),
-            );
+        if partial {
+            for thread in &page.threads {
+                if !progress.ids.contains(&thread.id) {
+                    progress.ids.push(thread.id.clone());
+                }
+            }
+            progress.more_until = None;
+            self.ready.notify_one();
+            return Ok(count);
         }
+        progress.more_until = more_expected.then(|| Instant::now() + Duration::from_secs(6));
         progress.ids = page
             .threads
             .iter()
@@ -221,6 +253,7 @@ impl Browser {
             ids: Vec::new(),
             layout: None,
             preference_present: false,
+            more_until: None,
         };
         let navigation = self.clone();
         let builder = WebviewWindowBuilder::new(
@@ -270,7 +303,15 @@ impl Browser {
             }
             if allowed {
                 let mut actual = url.clone();
-                if !reddit_offline::browsing::search_path(actual.path()) { actual.set_query(None); }
+                if !reddit_offline::browsing::search_path(actual.path()) {
+                    actual.set_query(None);
+                } else if let Ok(clean) =
+                    reddit_offline::browsing::without_challenge_params(actual.as_str())
+                        .parse::<tauri::Url>()
+                {
+                    // Reddit's verification step resubmits the search with extra fields.
+                    actual = clean;
+                }
                 actual.set_fragment(None);
                 progress.url = actual.to_string();
             }
@@ -441,6 +482,46 @@ impl Browser {
         }
     }
 
+    /// The page's own script requests a listing's remaining posts when it
+    /// scrolls into view, which a hidden window may never do. Ask for them
+    /// from inside the page so the request, cookies and capture are the same.
+    fn request_more(&self, generation: u64, path_and_query: &str) {
+        if !reddit_offline::browsing::listing_partial_path(
+            path_and_query.split('?').next().unwrap_or_default(),
+            path_and_query.split_once('?').map(|(_, query)| query),
+        ) {
+            return;
+        }
+        {
+            let progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+            if progress.generation != generation || progress.url.is_empty() {
+                return;
+            }
+        }
+        let Ok(target) = serde_json::to_string(path_and_query) else {
+            return;
+        };
+        if let Some(view) = self.app.get_webview_window(WORKER) {
+            let script = format!(
+                "fetch({target},{{credentials:'include'}}).then(r=>r.text()).catch(()=>{{}});"
+            );
+            if let Err(error) = view.eval(script.as_str()) {
+                eprintln!("listing continuation request failed: {error}");
+            }
+        }
+    }
+
+    fn stop_waiting_for_more(&self, generation: u64) {
+        let mut progress = self
+            .progress
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if progress.generation == generation {
+            progress.more_until = None;
+            self.ready.notify_one();
+        }
+    }
+
     fn preference_ready(&self, generation: u64) -> bool {
         let mut progress = self
             .progress
@@ -463,8 +544,8 @@ impl Browser {
         {
             return Err("Only public Reddit listing, post or search content can be acquired".into());
         }
-        // Match the user's Old Reddit Redirect 3 setup: a layout preference on
-        // www, rather than probing the login-gated old hostname first.
+        // The layout preference cookie is still set on www, but Reddit now
+        // serves its current layout there and old.reddit.com redirects away.
         let classic = classic_url(&url).map_err(|e| e.to_string())?;
         let browser = self.clone();
         let started = Instant::now();
@@ -489,6 +570,7 @@ impl Browser {
             None,
         );
         let result = loop {
+            let mut deadline = started + Duration::from_secs(25);
             {
                 let progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(error) = &progress.error {
@@ -497,18 +579,26 @@ impl Browser {
                 // A response is published only after a complete body and atomic
                 // parse/commit. There is no DOM settling interval to wait for.
                 if progress.captured {
-                    break Ok(());
+                    // The posts are stored; only a pending listing continuation
+                    // is worth a short extra wait.
+                    match progress.more_until {
+                        Some(until) if Instant::now() < until => deadline = deadline.min(until),
+                        _ => break Ok(()),
+                    }
                 }
             }
             if tokio::time::timeout_at(
-                tokio::time::Instant::from_std(started + Duration::from_secs(25)),
+                tokio::time::Instant::from_std(deadline),
                 self.ready.notified(),
             )
             .await
             .is_err()
             {
+                if self.progress.lock().unwrap_or_else(|e| e.into_inner()).captured {
+                    continue;
+                }
                 break Err(
-                    "Classic Reddit acquisition timed out; cached content is preserved".into(),
+                    "Reddit acquisition timed out; cached content is preserved".into(),
                 );
             }
         };
@@ -660,6 +750,6 @@ impl Browser {
         let progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
         let now = reddit_offline::diagnostics::now_ms();
         let active:Vec<_>=self.active.lock().unwrap_or_else(|e|e.into_inner()).iter().map(|(stage,(started,count))|serde_json::json!({"stage":stage,"started_at_ms":started,"elapsed_ms":now.saturating_sub(*started),"count":count})).collect();
-        serde_json::json!({"source":{"host":"www.reddit.com","transport":"HTTPS response tee","parser":"classic HTML in Rust","trust":"app-scoped, exact www.reddit.com host","layout":"classic","last_observed_layout":progress.layout,"preference_configured":progress.preference_present,"last_capture_posts":progress.ids.len(),"acquisition_busy":self.gate.try_lock().is_err(),"remote_ui":false,"comments":"downloaded HTML subset, maximum 300"},"proxy":self.proxy.status(),"operations":self.operations.lock().unwrap_or_else(|e| e.into_inner()).clone(),"active_operations":active,"logging":reddit_offline::diagnostics::health()})
+        serde_json::json!({"source":{"host":"www.reddit.com","transport":"HTTPS response tee","parser":"Reddit HTML in Rust","trust":"app-scoped, exact www.reddit.com host","layout":"current","last_observed_layout":progress.layout,"preference_configured":progress.preference_present,"last_capture_posts":progress.ids.len(),"acquisition_busy":self.gate.try_lock().is_err(),"remote_ui":false,"comments":"downloaded HTML subset, maximum 300"},"proxy":self.proxy.status(),"operations":self.operations.lock().unwrap_or_else(|e| e.into_inner()).clone(),"active_operations":active,"logging":reddit_offline::diagnostics::health()})
     }
 }

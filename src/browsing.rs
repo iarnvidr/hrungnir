@@ -128,6 +128,60 @@ pub fn public_content_path(path: &str) -> bool {
     }
 }
 
+/// Reddit answers a first request with a small proof-of-work page whose script
+/// resubmits the same URL with these fields. They never identify content.
+const CHALLENGE_PARAMS: [&str; 4] = ["solution", "js_challenge", "jsc_token", "jsc_orig_r"];
+
+pub fn strip_challenge_params(url: &mut Url) {
+    let total = url.query_pairs().count();
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| !CHALLENGE_PARAMS.contains(&key.as_ref()))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    if kept.len() == total {
+        return;
+    }
+    if kept.is_empty() {
+        url.set_query(None);
+    } else {
+        url.query_pairs_mut().clear().extend_pairs(kept);
+    }
+}
+
+/// String form for callers that do not share this crate's `Url` type.
+pub fn without_challenge_params(input: &str) -> String {
+    match Url::parse(input) {
+        Ok(mut url) => {
+            strip_challenge_params(&mut url);
+            url.to_string()
+        }
+        Err(_) => input.to_owned(),
+    }
+}
+
+/// The classic-less listing is server-rendered with only a few posts; the
+/// page's own script requests the rest from this read-only fragment endpoint.
+pub fn listing_partial_path(path: &str, query: Option<&str>) -> bool {
+    let parts: Vec<_> = path.trim_matches('/').split('/').collect();
+    parts.len() == 4
+        && parts[..3] == ["svc", "shreddit", "community-more-posts"]
+        && matches!(parts[3], "hot" | "best" | "new" | "top" | "rising")
+        && query
+            .and_then(|query| {
+                url::form_urlencoded::parse(query.as_bytes())
+                    .find(|(key, _)| key == "name")
+                    .map(|(_, name)| subreddit_url(&name).is_ok())
+            })
+            .unwrap_or(false)
+}
+
+pub fn is_listing_partial_url(input: &str) -> bool {
+    Url::parse(input).is_ok_and(|url| {
+        reddit_url(url.as_str()) && listing_partial_path(url.path(), url.query())
+    })
+}
+
 pub fn reddit_url(input: &str) -> bool {
     Url::parse(input).is_ok_and(|url| {
         url.scheme() == "https"
@@ -143,13 +197,14 @@ pub fn reddit_url(input: &str) -> bool {
     })
 }
 
-/// Classic is served on www with the redesign preference disabled. The old
-/// hostname can require login even when the same public page is readable here.
+/// Every public page is acquired from www.reddit.com: the old hostname now
+/// redirects away, and verification fields added by Reddit are not content.
 pub fn classic_url(input: &str) -> Result<String> {
     if !reddit_url(input) {
         return Err("Only public Reddit URLs can be acquired".into());
     }
     let mut url = Url::parse(input)?;
+    strip_challenge_params(&mut url);
     if !public_content_path(url.path()) {
         return Err("Only public Reddit community, post and search URLs can be acquired".into());
     }
@@ -171,6 +226,11 @@ pub struct PageCapture {
     pub layout: Option<String>,
     #[serde(default)]
     pub layout_preference: Option<bool>,
+    /// Set by the parser for a listing that continues in a follow-up response:
+    /// the path and query of that read-only request. Never part of the stored
+    /// or exchanged capture.
+    #[serde(skip)]
+    pub more_url: Option<String>,
 }
 
 impl PageCapture {

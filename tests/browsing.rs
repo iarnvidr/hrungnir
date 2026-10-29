@@ -1,5 +1,8 @@
 use reddit_offline::{
-    browsing::{classic_url, listing_url, reddit_url, subreddit_url},
+    browsing::{
+        classic_url, is_listing_partial_url, listing_partial_path, listing_url, public_content_path,
+        reddit_url, subreddit_url, without_challenge_params,
+    },
     desktop::DesktopStore,
     proxy::allowed_host,
 };
@@ -127,4 +130,50 @@ async fn a_rapid_offline_online_transition_cancels_existing_connections() {
         result.is_ok_and(|result| result.is_err()),
         "A connection from the old acquisition must close even when the offline interval is brief"
     );
+}
+
+#[test]
+fn verification_fields_never_become_part_of_a_content_address() {
+    assert_eq!(
+        classic_url("https://www.reddit.com/r/soccer/?solution=abab&js_challenge=1&jsc_token=t&jsc_orig_r=").unwrap(),
+        "https://www.reddit.com/r/soccer/"
+    );
+    assert_eq!(
+        classic_url("https://www.reddit.com/search/?solution=a&js_challenge=1&jsc_token=t&jsc_orig_r=&q=a+b&sort=new&t=week").unwrap(),
+        "https://www.reddit.com/search/?q=a+b&sort=new&t=week"
+    );
+    // Untouched addresses keep their exact spelling.
+    assert_eq!(
+        without_challenge_params("https://www.reddit.com/search/?q=a%20b&sort=new"),
+        "https://www.reddit.com/search/?q=a%20b&sort=new"
+    );
+    assert_eq!(without_challenge_params("not a url"), "not a url");
+}
+
+#[test]
+fn only_the_listing_continuation_is_allowed_beyond_public_pages() {
+    let ok = "/svc/shreddit/community-more-posts/best/";
+    assert!(listing_partial_path(ok, Some("after=x&t=DAY&name=soccer")));
+    assert!(listing_partial_path("/svc/shreddit/community-more-posts/top/", Some("name=soccer")));
+    for (path, query) in [
+        (ok, None),
+        (ok, Some("after=x")),
+        (ok, Some("name=a")),
+        (ok, Some("name=../login")),
+        ("/svc/shreddit/community-more-posts/best/extra", Some("name=soccer")),
+        ("/svc/shreddit/community-more-posts/controversial/", Some("name=soccer")),
+        ("/svc/shreddit/graphql", Some("name=soccer")),
+        ("/svc/shreddit/events", None),
+        ("/svc/shreddit/more-comments/soccer/t3_a", Some("name=soccer")),
+        ("/user/someone/", None),
+    ] {
+        assert!(!listing_partial_path(path, query), "{path}?{query:?}");
+    }
+    assert!(!public_content_path(ok));
+    assert!(is_listing_partial_url(
+        "https://www.reddit.com/svc/shreddit/community-more-posts/hot/?name=soccer"
+    ));
+    assert!(!is_listing_partial_url(
+        "https://example.com/svc/shreddit/community-more-posts/hot/?name=soccer"
+    ));
 }

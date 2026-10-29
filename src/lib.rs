@@ -24,6 +24,7 @@ pub mod media_watch;
 pub mod organization;
 pub mod proxy;
 pub mod reddit_html;
+pub mod reddit_modern;
 pub mod response_capture;
 pub mod trust_policy;
 
