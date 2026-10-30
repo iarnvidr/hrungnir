@@ -97,10 +97,17 @@ jobs:
           python3 scripts/ffmpeg_lgpl.py verify "$app/Contents/Resources/bin/ffmpeg"
           "$app/Contents/MacOS/offline-reader-desktop" --cli --data-dir "$verification_dir/cache" doctor
 
+      - name: Bind accepted native archive to producing run
+        run: python3 scripts/release-artifact.py receipt
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # Only trusted main runs are release eligible; PR artifacts remain feedback.
+        # The receipt is generated after extracted-app acceptance above.
+        id: native-artifact
         with:
           name: hrungnir-macos-arm64-pr
           path: |
             artifacts/*.zip
             artifacts/*.zip.sha256
+            artifacts/native-receipt.json
           if-no-files-found: error

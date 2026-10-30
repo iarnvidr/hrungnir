@@ -35,6 +35,7 @@ func (m *HrungnirCi) BuildLintTest(ctx context.Context, source *dagger.Directory
 	python := dag.Container().From(pythonImage).
 		WithDirectory("/src", source).WithWorkdir("/src").
 		WithExec([]string{"python3", "scripts/test-macos-policy.py"}).
+		WithExec([]string{"python3", "scripts/test-release-artifact.py"}).
 		WithExec([]string{"python3", "scripts/test-ffmpeg-lgpl.py"})
 	text, err = python.Stdout(ctx)
 	if err != nil {
