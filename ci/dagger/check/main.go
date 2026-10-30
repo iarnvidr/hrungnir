@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"dagger/check/internal/dagger"
+	"dagger/hrungnir-ci/internal/dagger"
 )
 
 type HrungnirCi struct{}
