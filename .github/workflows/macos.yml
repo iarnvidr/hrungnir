@@ -2,6 +2,7 @@ name: macOS
 
 on:
   pull_request:
+  # Keep the main-branch native artifact producer until release promotion is mapped.
   push:
     branches: [main]
 
