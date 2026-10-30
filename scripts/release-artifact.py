@@ -40,6 +40,10 @@ def receipt(root):
               'event': os.environ['GITHUB_EVENT_NAME'],
               'head': os.environ['GITHUB_SHA'], 'tree': git(root, 'rev-parse', 'HEAD^{tree}'),
               'workflow_sha': os.environ['GITHUB_WORKFLOW_SHA'],
+              'toolchain': {name: subprocess.run(command, capture_output=True, text=True, check=True).stdout.strip()
+                            for name, command in {'rustc': ['rustc', '--version'], 'node': ['node', '--version'],
+                                                  'macos': ['sw_vers', '-productVersion'],
+                                                  'sdk': ['xcrun', '--show-sdk-version']}.items()},
               'platform': 'darwin-aarch64',
               'version': json.loads((root / 'src-tauri/tauri.conf.json').read_text())['version'],
               'files': {p.name: sha(p.read_bytes()) for p in (archive, checksum)}}
@@ -79,6 +83,9 @@ def validate(record, run, artifact, commit, tree, version):
                 'version': version}
     if any(record.get(k) != v for k, v in expected.items()):
         raise ValueError('native receipt identity differs from its producing run or requested release')
+    tools = record.get('toolchain', {})
+    if set(tools) != {'rustc', 'node', 'macos', 'sdk'} or any(not isinstance(v, str) or not v for v in tools.values()):
+        raise ValueError('native toolchain identity is incomplete')
     if artifact.get('expired') or artifact.get('name') != ARTIFACT:
         raise ValueError('native artifact missing or expired')
     files = record.get('files', {})
@@ -140,6 +147,7 @@ def retrieve(root, tag, api=request):
                'producer_run_id': run['id'], 'producer_run_attempt': run['run_attempt'],
                'artifact_id': artifact['id'], 'artifact_digest': artifact['digest'],
                'files': record['files'], 'platform': record['platform']}
+    mapping['toolchain'] = record['toolchain']
     (target / 'release-input.json').write_text(json.dumps(mapping, sort_keys=True) + '\n')
     return mapping
 

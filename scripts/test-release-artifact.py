@@ -33,6 +33,7 @@ class ReleaseArtifactTests(unittest.TestCase):
                        'run_attempt': 2, 'event': 'push', 'head': self.commit, 'tree': self.tree,
                        'workflow_sha': self.commit, 'platform': 'darwin-aarch64', 'version': '1.2.3',
                        'files': {n: release.sha(v) for n, v in self.files.items()}}
+        self.record['toolchain'] = {'rustc': 'rustc fixture', 'node': 'v22 fixture', 'macos': '15', 'sdk': 'fixture'}
         self.artifact = {'id': 456, 'name': release.ARTIFACT, 'expired': False}
 
     def api(self, path, binary=False):
