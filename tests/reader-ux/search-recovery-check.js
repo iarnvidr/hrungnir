@@ -153,13 +153,14 @@ async (page) => {
   await page.locator('#listing-load-more').click();
   await page.waitForFunction(() => window.__ux.search.pageCalls.length === 2 && typeof window.__ux.search.releasePage === 'function');
   assert(await page.evaluate(() => window.__ux.search.pageCalls[0].cursor === window.__ux.search.pageCalls[1].cursor), 'pagination retry advanced or replaced the failed cursor');
-  await page.evaluate(() => {
-    window.__ux.firstListingRow = document.querySelector('.thread-item[data-thread-id="t3_article"]');
-    window.scrollTo(0, 0);
-  });
+  await page.evaluate(() => window.scrollTo(0, 0));
   await page.locator('.thread-item[data-thread-id="t3_article"] .thread-open').click();
-  await page.evaluate(() => window.__ux.search.releasePage());
   await page.waitForFunction(() => document.querySelector('#thread-view')?.textContent.includes('A readable article about the next space mission'));
+  if (await page.evaluate(() => window.__ux.posts.has('t3_article'))) await page.evaluate(() => window.__ux.releasePost('t3_article'));
+  await page.waitForFunction(() => !document.querySelector('.thread-item[data-thread-id="t3_article"]')?.getAttribute('aria-busy')?.includes('true')
+    && document.querySelector('#discussion-comments')?.textContent.includes('A useful discussion, available before the video finishes.'));
+  await page.evaluate(() => { window.__ux.firstListingRow = document.querySelector('.thread-item[data-thread-id="t3_article"]'); });
+  await page.evaluate(() => window.__ux.search.releasePage());
   assert(await page.locator('#thread-view').isVisible(), 'page completion pulled the reader away from the selected post');
   assert((await page.locator('#discussion-comments').innerText()).includes('A useful discussion, available before the video finishes.'), 'page summary replaced downloaded comments while the reader was open');
   await page.locator('#tab-browse').click();
