@@ -1538,7 +1538,7 @@
       event.stopPropagation();
       selectedFlair = selectedFlair === flair ? '' : flair;
       setTab('browse');
-      renderList({ appendOnly: true, appendedIds: new Set(added.map((thread) => thread.id)) });
+      renderList();
     });
     return button;
   }
