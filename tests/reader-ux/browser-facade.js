@@ -15,7 +15,13 @@
     window.__readerUxBridge(JSON.stringify({id, method, args}));
   });
 
-  const visible = node => !!node && !node.hidden && getComputedStyle(node).display !== 'none' && getComputedStyle(node).visibility !== 'hidden';
+  const visible = node => {
+    if (!node || node.hidden) return false;
+    const style = node.ownerDocument.defaultView.getComputedStyle(node);
+    if (style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+    const box = node.getBoundingClientRect();
+    return node.getClientRects().length > 0 && box.width > 0 && box.height > 0;
+  };
   const text = node => (node?.innerText ?? node?.textContent ?? '').trim();
   const accessibleName = node => (node.getAttribute('aria-label') || node.getAttribute('title') || text(node)).trim();
   const targetWindow = () => {
