@@ -3763,7 +3763,10 @@
     if (disclosure) disclosure.open = false;
   }
 
-  function focusHeaderTools() {
+  function focusHeaderTools(event) {
+    const dialog = event?.currentTarget;
+    const active = document.activeElement;
+    if (active !== document.body && !(dialog && (dialog === active || dialog.contains(active)))) return;
     $('.header-tools > summary')?.focus();
   }
 
@@ -3825,7 +3828,7 @@
       if (!(event.repeat && (event.key === 'l' || event.key === 'Enter'))) keyboardNavigationSequence++;
     }, { capture: true });
     document.addEventListener('keydown', (event) => {
-      if (event.key !== 'Escape') return;
+      if (event.key !== 'Escape' || document.querySelector('dialog[open]')) return;
       const options = document.querySelector('.search-options[open]');
       const tools = document.querySelector('.header-tools[open]');
       const disclosure = options || tools;
