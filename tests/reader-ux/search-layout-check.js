@@ -55,6 +55,7 @@ async (page) => {
   });
   for (const post of ['horizontal', 'vertical']) for (const community of ['horizontal', 'vertical']) {
     await page.evaluate(() => window.scrollTo(0, 0));
+    if (!(await page.locator('.header-tools').evaluate(node => node.open))) await page.locator('.header-tools > summary').click();
     await page.locator('#settings-open').click();
     await page.locator('#post-tabs-layout').selectOption(post);
     await page.locator('#subreddit-tabs-layout').selectOption(community);
