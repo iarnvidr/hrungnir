@@ -128,10 +128,26 @@
     return {key:keyName, modifiers:[...mods]};
   }
   const keyboard = {
-    async press(key) { const data = keyParts(key); return window.__readerUxHost('key', {...data, action:'press'}); },
+    async press(key) {
+      const data = keyParts(key), target = targetWindow(), active = target.document.activeElement;
+      window.__readerUxDebug ||= [];
+      window.__readerUxDebug.push({op:'press', key, active:active?.tagName, id:active?.id, value:active?.value});
+      const result = await window.__readerUxHost('key', {...data, action:'press'});
+      const after = target.document.activeElement;
+      window.__readerUxDebug.push({op:'pressed', key, active:after?.tagName, id:after?.id, value:after?.value});
+      return result;
+    },
     async down(key) { const data = keyParts(key); return window.__readerUxHost('key', {...data, action:'down'}); },
     async up(key) { const data = keyParts(key); return window.__readerUxHost('key', {...data, action:'up'}); },
-    async type(value) { return window.__readerUxHost('type', {text:value}); },
+    async type(value) {
+      const target = targetWindow(), active = target.document.activeElement;
+      window.__readerUxDebug ||= [];
+      window.__readerUxDebug.push({op:'type', text:value, active:active?.tagName, id:active?.id, value:active?.value});
+      const result = await window.__readerUxHost('type', {text:value});
+      const after = target.document.activeElement;
+      window.__readerUxDebug.push({op:'typed', active:after?.tagName, id:after?.id, value:after?.value});
+      return result;
+    },
   };
 
   window.__readerUxPage = {

@@ -314,7 +314,11 @@ def main() -> int:
                 source = (HERE / filename).read_text()
                 expression = "(async () => { const check = (" + source + "); return await check(window.__readerUxPage); })()"
                 cdp.page_errors.clear()
-                result = cdp.evaluate(expression)
+                try:
+                    result = cdp.evaluate(expression)
+                except Exception as exc:
+                    debug = cdp.evaluate("window.__readerUxDebug || []")
+                    raise RuntimeError(f"{filename}: {exc}; input trace={json.dumps(debug)}") from exc
                 if cdp.page_errors:
                     raise RuntimeError(f"{filename}: page errors: " + "\n".join(cdp.page_errors))
                 passed = result.get("passed", []) if isinstance(result, dict) else []
