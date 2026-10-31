@@ -218,17 +218,17 @@ async (page) => {
   const oldDiscussion = await page.locator('#discussion-comments').innerText();
   await page.locator('.discussion-refresh').focus();
   await page.keyboard.press('Enter');
-  await page.waitForFunction(() => document.querySelector('#discussion-refresh-status').textContent.includes('Could not refresh comments'));
+  await page.waitForFunction(() => document.querySelector('#discussion-comments .discussion-refresh-status')?.textContent.includes('Could not refresh comments'));
   assert(await page.locator('.discussion-refresh').evaluate(node => node === document.activeElement), 'invalid listing-only refresh response dropped keyboard focus');
   assert((await page.locator('#discussion-comments').innerText()).includes(oldDiscussion.split('\n')[0]), 'listing-only refresh response replaced the cached discussion');
   assert(await page.evaluate(() => document.querySelector('#thread-view video') === window.__ux.videoBeforeRefresh), 'listing-only refresh response remounted the video player');
   await page.evaluate(() => { window.__ux.search.refreshNotLoaded = false; window.__ux.search.refreshError = true; });
   await page.keyboard.press('Enter');
-  await page.waitForFunction(() => document.querySelector('#discussion-refresh-status').textContent.includes('Could not refresh comments'));
+  await page.waitForFunction(() => document.querySelector('#discussion-comments .discussion-refresh-status')?.textContent.includes('Could not refresh comments'));
   assert(await page.evaluate(() => document.querySelector('#thread-view video') === window.__ux.videoBeforeRefresh), 'failed discussion refresh remounted the video player');
   assert(await page.evaluate(() => (document.querySelector('#thread-view video').currentSrc || document.querySelector('#thread-view video').src) === window.__ux.videoSourceBeforeRefresh), 'failed discussion refresh replaced the video source');
   assert((await page.locator('#discussion-comments').innerText()).includes(oldDiscussion.split('\n')[0]), 'failed discussion refresh removed the cached discussion');
-  assert((await page.locator('#discussion-refresh-status').innerText()).includes('still available'), 'refresh failure did not explain that cached comments remain available');
+  assert((await page.locator('#discussion-comments .discussion-refresh-status').innerText()).includes('still available'), 'refresh failure did not explain that cached comments remain available');
   await page.evaluate(() => {
     window.__ux.search.candidateCallsBeforeRefresh = window.__ux.search.streamCandidateCalls.filter(call => call.id === 't3_video').length;
     window.__ux.search.refreshError = false;
