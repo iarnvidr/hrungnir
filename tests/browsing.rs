@@ -1,7 +1,8 @@
 use reddit_offline::{
     browsing::{
-        classic_url, is_listing_partial_url, listing_partial_path, listing_url, public_content_path,
-        reddit_url, subreddit_url, without_challenge_params,
+        classic_url, is_listing_partial_url, listing_partial_path, listing_url,
+        public_content_path, reddit_url, select_listing_threads, subreddit_url,
+        without_challenge_params,
     },
     desktop::DesktopStore,
     proxy::allowed_host,
@@ -67,6 +68,56 @@ fn subreddit_input_and_proxy_boundaries() {
     assert!(allowed_host("www.reddit.com"));
     assert!(!allowed_host("127.0.0.1"));
     assert!(!allowed_host("reddit.com.evil.example"));
+}
+
+#[test]
+fn aggregate_listing_keeps_posts_from_the_requested_ids_across_communities() {
+    let make_thread = |id: &str, subreddit: &str| {
+        let mut thread: reddit_offline::Thread =
+            serde_json::from_str(include_str!("../fixtures/thread.json")).unwrap();
+        thread.id = id.to_owned();
+        thread.subreddit = subreddit.to_owned();
+        thread
+    };
+    let ids = vec!["t3_rust".to_owned(), "t3_soccer".to_owned()];
+
+    for scope in ["all", "/r/POPULAR/"] {
+        let selected = select_listing_threads(
+            vec![
+                make_thread("t3_soccer", "soccer"),
+                make_thread("t3_rust", "rust"),
+                make_thread("t3_not_requested", "soccer"),
+            ],
+            scope,
+            &ids,
+        );
+        assert_eq!(
+            selected
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            ["t3_rust", "t3_soccer"],
+            "aggregate scope {scope} should preserve acquisition order across communities"
+        );
+    }
+
+    let selected = select_listing_threads(
+        vec![
+            make_thread("t3_soccer", "soccer"),
+            make_thread("t3_rust", "rust"),
+            make_thread("t3_not_requested", "soccer"),
+        ],
+        "soccer",
+        &ids,
+    );
+    assert_eq!(
+        selected
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect::<Vec<_>>(),
+        ["t3_soccer"],
+        "a named subreddit must remain limited to its own captured posts"
+    );
 }
 
 #[test]
@@ -153,8 +204,15 @@ fn verification_fields_never_become_part_of_a_content_address() {
 #[test]
 fn only_the_listing_continuation_is_allowed_beyond_public_pages() {
     let ok = "/svc/shreddit/community-more-posts/best/";
+    let popular = "/svc/shreddit/feeds/popular-feed";
+    let popular_query = "adDistance=2&ad_posts_served=0&after=t3_a&cursor=next-page&distance=2&navigationSessionId=abc123&sort=hot";
     assert!(listing_partial_path(ok, Some("after=x&t=DAY&name=soccer")));
     assert!(listing_partial_path("/svc/shreddit/community-more-posts/top/", Some("name=soccer")));
+    assert!(listing_partial_path(popular, Some(popular_query)));
+    assert!(listing_partial_path(
+        popular,
+        Some("cursor=next-page&navigationSessionId=abc123&sort=HOT")
+    ));
     for (path, query) in [
         (ok, None),
         (ok, Some("after=x")),
@@ -164,6 +222,10 @@ fn only_the_listing_continuation_is_allowed_beyond_public_pages() {
         ("/svc/shreddit/community-more-posts/controversial/", Some("name=soccer")),
         ("/svc/shreddit/graphql", Some("name=soccer")),
         ("/svc/shreddit/events", None),
+        (popular, Some("cursor=next-page&navigationSessionId=abc123&sort=new")),
+        (popular, Some("cursor=next-page&navigationSessionId=abc123&sort=hot&unexpected=1")),
+        (popular, Some("cursor=first&cursor=second&navigationSessionId=abc123&sort=hot")),
+        ("/svc/shreddit/feeds/home-feed", Some(popular_query)),
         ("/svc/shreddit/more-comments/soccer/t3_a", Some("name=soccer")),
         ("/user/someone/", None),
     ] {
@@ -173,6 +235,9 @@ fn only_the_listing_continuation_is_allowed_beyond_public_pages() {
     assert!(is_listing_partial_url(
         "https://www.reddit.com/svc/shreddit/community-more-posts/hot/?name=soccer"
     ));
+    assert!(is_listing_partial_url(&format!(
+        "https://www.reddit.com{popular}?{popular_query}"
+    )));
     assert!(!is_listing_partial_url(
         "https://example.com/svc/shreddit/community-more-posts/hot/?name=soccer"
     ));

@@ -20,9 +20,9 @@ class UpdaterPackageTest(unittest.TestCase):
     def test_signed_archive_and_tamper_rejection(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
-            signer = ROOT / 'node_modules/.bin/tauri'
+            signer = updater.tauri_cli()
             key = root / 'test.key'
-            subprocess.run([str(signer), 'signer', 'generate', '--ci', '-w', str(key)],
+            subprocess.run([signer, 'signer', 'generate', '--ci', '-w', str(key)],
                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             public = key.with_suffix('.key.pub').read_text().strip()
             (root / 'src-tauri').mkdir()
@@ -30,7 +30,6 @@ class UpdaterPackageTest(unittest.TestCase):
                 'productName': 'Hrungnir', 'version': '1.2.3',
                 'plugins': {'updater': {'pubkey': public}},
             }))
-            (root / 'node_modules').symlink_to(ROOT / 'node_modules', target_is_directory=True)
             (root / 'docs').mkdir()
             (root / 'docs/RELEASE-1.2.3.md').write_text('Synthetic release notes')
             binary = root / 'artifacts/Hrungnir.app/Contents/MacOS/reader'

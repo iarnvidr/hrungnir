@@ -15,7 +15,10 @@ pub const MAX_THREADS: usize = 25;
 pub fn is_modern(document: &Html) -> bool {
     document
         .select(&selector(
-            "shreddit-post, shreddit-comment-tree, [data-testid=\"search-sdui-post\"], search-results-page-tabs",
+            "shreddit-post, shreddit-comment-tree, \
+             [data-testid=\"search-sdui-post\"], \
+             [data-testid=\"search-post-with-content-preview\"], \
+             search-results-page-tabs",
         ))
         .next()
         .is_some()
@@ -23,7 +26,10 @@ pub fn is_modern(document: &Html) -> bool {
 
 /// A server-rendered listing holds only a few posts and names the read-only
 /// request that returns the rest.
-pub fn more_posts_url(document: &Html) -> Option<String> {
+pub fn more_posts_url(document: &Html, listing: &Url) -> Option<String> {
+    let listing_parts: Vec<_> = listing.path().trim_matches('/').split('/').collect();
+    let popular_hot_listing =
+        listing_parts.len() == 3 && listing_parts[..] == ["r", "popular", "hot"];
     document
         .select(&selector("faceplate-partial[slot=\"load-after\"][src]"))
         .filter_map(|partial| {
@@ -31,7 +37,9 @@ pub fn more_posts_url(document: &Html) -> Option<String> {
                 .ok()?
                 .join(partial.value().attr("src")?)
                 .ok()?;
-            crate::browsing::listing_partial_path(url.path(), url.query())
+            (crate::browsing::listing_partial_path(url.path(), url.query())
+                && (!crate::browsing::popular_feed_partial_path(url.path(), url.query())
+                    || popular_hot_listing))
                 .then(|| format!("{}?{}", url.path(), url.query().unwrap_or_default()))
         })
         .next()
@@ -60,9 +68,7 @@ fn listing_subreddit(base: &Url) -> String {
 }
 
 fn accepts(subreddit: &str, actual: &str) -> bool {
-    subreddit.is_empty()
-        || matches!(subreddit, "popular" | "all")
-        || actual.eq_ignore_ascii_case(subreddit)
+    subreddit.is_empty() || crate::browsing::listing_scope_matches(subreddit, actual)
 }
 
 fn nearest<'a>(node: ElementRef<'a>, tag: &str) -> Option<ElementRef<'a>> {
@@ -255,7 +261,12 @@ fn collect_comments(document: &Html, thread: &mut Thread) {
 fn search_threads(document: &Html, base: &Url) -> Vec<Thread> {
     let scope = listing_subreddit(base);
     let mut threads: Vec<Thread> = Vec::new();
-    for result in document.select(&selector("[data-testid=\"search-sdui-post\"]")) {
+    // Reddit currently renders one full SDUI result plus additional lightweight
+    // preview cards on global search pages. Both carry the same post-title
+    // links, so validate through the permalink and deduplicate by fullname.
+    for result in document.select(&selector(
+        "[data-testid=\"search-sdui-post\"], [data-testid=\"search-post-with-content-preview\"]",
+    )) {
         if threads.len() >= MAX_THREADS {
             break;
         }

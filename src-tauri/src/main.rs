@@ -8,6 +8,9 @@ use tauri_plugin_dialog::DialogExt;
 mod browser;
 mod web_links;
 mod connection_test;
+mod native_cli;
+#[cfg(debug_assertions)]
+mod native_probe;
 mod updates;
 #[cfg(target_os = "macos")]
 mod trust_mac;
@@ -179,13 +182,12 @@ async fn on_main<T: Send + 'static>(
     rx.await.map_err(|e| e.to_string())?
 }
 
-#[tauri::command(rename_all = "snake_case")]
-async fn fetch_subreddit(
-    browser: State<'_, Arc<browser::Browser>>,
-    links: State<'_, web_links::LinkStore>,
-    subreddit: String,
-    sort: Option<String>,
-    top_period: Option<String>,
+async fn fetch_subreddit_operation(
+    browser: &Arc<browser::Browser>,
+    links: Option<&web_links::LinkStore>,
+    subreddit: &str,
+    sort: &str,
+    top_period: &str,
 ) -> Result<Snapshot, String> {
     let started = std::time::Instant::now();
     browser.record("listing_queue", "running", 0, None);
@@ -199,25 +201,17 @@ async fn fetch_subreddit(
     browser.record("listing", "running", 0, None);
     let result = async {
         let ids = browser
-            .subreddit(
-                &subreddit,
-                sort.as_deref().unwrap_or("hot"),
-                top_period.as_deref().unwrap_or("day"),
-            )
+            .subreddit(subreddit, sort, top_period)
             .await?;
         let mut snapshot = browser
             .store
             .snapshot_for_ids(Some(&ids))
             .map_err(|e| e.to_string())?;
-        let name = subreddit.trim().trim_matches('/');
-        let name = name.strip_prefix("r/").unwrap_or(name);
-        snapshot.threads.retain(|thread| {
-            thread.subreddit.eq_ignore_ascii_case(name) && ids.contains(&thread.id)
-        });
-        snapshot
-            .threads
-            .sort_by_key(|thread| ids.iter().position(|id| id == &thread.id));
-        links.enrich(&mut snapshot);
+        snapshot.threads =
+            reddit_offline::browsing::select_listing_threads(snapshot.threads, subreddit, &ids);
+        if let Some(links) = links {
+            links.enrich(&mut snapshot);
+        }
         Ok(snapshot)
     }
     .await;
@@ -227,6 +221,66 @@ async fn fetch_subreddit(
         started.elapsed().as_millis() as u64,
         result.as_ref().err().cloned(),
     );
+    result
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn fetch_subreddit(
+    browser: State<'_, Arc<browser::Browser>>,
+    links: State<'_, web_links::LinkStore>,
+    subreddit: String,
+    sort: Option<String>,
+    top_period: Option<String>,
+) -> Result<Snapshot, String> {
+    fetch_subreddit_operation(
+        browser.inner(),
+        Some(links.inner()),
+        &subreddit,
+        sort.as_deref().unwrap_or("hot"),
+        top_period.as_deref().unwrap_or("day"),
+    )
+    .await
+}
+
+async fn search_reddit_operation(
+    browser: &Arc<browser::Browser>,
+    links: Option<&web_links::LinkStore>,
+    query: &str,
+    subreddit: Option<&str>,
+    sort: &str,
+    period: &str,
+    smart: bool,
+) -> Result<Snapshot, String> {
+    let url = reddit_offline::browsing::search_url(query, subreddit, sort, period)
+        .map_err(|e| e.to_string())?;
+    let discovery = if smart && sort == "relevance" {
+        reddit_offline::search_query::discovery_query(query)
+    } else { None };
+    let started = std::time::Instant::now();
+    browser.record("search_queue", "running", 0, None);
+    let _guard = browser.gate.lock().await;
+    browser.record("search_queue", "complete", started.elapsed().as_millis() as u64, None);
+    browser.record("search", "running", 0, None);
+    let result = async {
+        let mut ids = browser.search(url).await?;
+        if let Some(discovery) = discovery.as_ref() {
+            let url = reddit_offline::browsing::search_url(discovery, subreddit, "relevance", period).map_err(|e|e.to_string())?;
+            match browser.search(url).await {
+                Ok(extra) => for id in extra { if !ids.contains(&id) { ids.push(id); } },
+                Err(error) => browser.record("search_discovery", "failed", 0, Some(error)),
+            }
+        }
+        let mut snapshot = browser.store.snapshot_for_ids(Some(&ids)).map_err(|e|e.to_string())?;
+        snapshot.threads.sort_by_key(|thread|ids.iter().position(|id|id==&thread.id));
+        if discovery.is_some() {
+            snapshot.threads.sort_by_key(|thread| std::cmp::Reverse(reddit_offline::search_query::discovery_score(query, &thread.title)));
+        }
+        if let Some(links) = links {
+            links.enrich(&mut snapshot);
+        }
+        Ok(snapshot)
+    }.await;
+    browser.record("search", if result.is_ok(){"complete"}else{"failed"}, started.elapsed().as_millis() as u64, result.as_ref().err().cloned());
     result
 }
 
@@ -240,34 +294,16 @@ async fn search_reddit(
     period: Option<String>,
     smart: Option<bool>,
 ) -> Result<Snapshot, String> {
-    let url = reddit_offline::browsing::search_url(&query, subreddit.as_deref(), sort.as_deref().unwrap_or("relevance"), period.as_deref().unwrap_or("all")).map_err(|e|e.to_string())?;
-    let discovery = if smart.unwrap_or(true) && sort.as_deref().unwrap_or("relevance") == "relevance" {
-        reddit_offline::search_query::discovery_query(&query)
-    } else { None };
-    let started = std::time::Instant::now();
-    browser.record("search_queue", "running", 0, None);
-    let _guard = browser.gate.lock().await;
-    browser.record("search_queue", "complete", started.elapsed().as_millis() as u64, None);
-    browser.record("search", "running", 0, None);
-    let result = async {
-        let mut ids = browser.search(url).await?;
-        if let Some(discovery) = discovery.as_ref() {
-            let url = reddit_offline::browsing::search_url(discovery, subreddit.as_deref(), "relevance", period.as_deref().unwrap_or("all")).map_err(|e|e.to_string())?;
-            match browser.search(url).await {
-                Ok(extra) => for id in extra { if !ids.contains(&id) { ids.push(id); } },
-                Err(error) => browser.record("search_discovery", "failed", 0, Some(error)),
-            }
-        }
-        let mut snapshot = browser.store.snapshot_for_ids(Some(&ids)).map_err(|e|e.to_string())?;
-        snapshot.threads.sort_by_key(|thread|ids.iter().position(|id|id==&thread.id));
-        if discovery.is_some() {
-            snapshot.threads.sort_by_key(|thread| std::cmp::Reverse(reddit_offline::search_query::discovery_score(&query, &thread.title)));
-        }
-        links.enrich(&mut snapshot);
-        Ok(snapshot)
-    }.await;
-    browser.record("search", if result.is_ok(){"complete"}else{"failed"}, started.elapsed().as_millis() as u64, result.as_ref().err().cloned());
-    result
+    search_reddit_operation(
+        browser.inner(),
+        Some(links.inner()),
+        &query,
+        subreddit.as_deref(),
+        sort.as_deref().unwrap_or("relevance"),
+        period.as_deref().unwrap_or("all"),
+        smart.unwrap_or(true),
+    )
+    .await
 }
 
 struct MediaStore {
@@ -615,12 +651,26 @@ async fn search_cache(
     subreddit: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<reddit_offline::desktop::SearchHit>, String> {
-    let store = store.inner().clone();
+    search_cache_operation(
+        store.inner().clone(),
+        query,
+        subreddit,
+        limit.unwrap_or(50),
+    )
+    .await
+}
+
+async fn search_cache_operation(
+    store: DesktopStore,
+    query: String,
+    subreddit: Option<String>,
+    limit: usize,
+) -> Result<Vec<reddit_offline::desktop::SearchHit>, String> {
     let started = std::time::Instant::now();
     let query_chars = query.chars().count();
     let result = tauri::async_runtime::spawn_blocking(move || {
         store
-            .search(&query, subreddit.as_deref(), limit.unwrap_or(50))
+            .search(&query, subreddit.as_deref(), limit)
             .map_err(|e| e.to_string())
     })
     .await
@@ -1063,7 +1113,21 @@ fn prune_cache(store: State<'_, DesktopStore>, before: i64) -> Result<Snapshot, 
 }
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("--cli") {
+    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    let live_cli_request = if arguments.first().map(String::as_str) == Some("--cli") {
+        match native_cli::parse(&arguments[1..]) {
+            Ok(request) => request,
+            Err(error) => {
+                println!("{}", serde_json::json!({"ok":false,"error":error}));
+                std::process::exit(2);
+            }
+        }
+    } else {
+        None
+    };
+    if arguments.first().map(String::as_str) == Some("--cli")
+        && live_cli_request.is_none()
+    {
 
         let executable = std::env::current_exe().expect("Could not locate Hrungnir executable");
         #[cfg(target_os = "macos")]
@@ -1075,15 +1139,17 @@ fn main() {
             .join("Resources/bin");
         #[cfg(not(target_os = "macos"))]
         let tools = executable.parent().unwrap().join("bin");
-        if let Err(error) = reddit_offline::cli::run(std::env::args().skip(2).collect(), tools) {
+        if let Err(error) = reddit_offline::cli::run(arguments.into_iter().skip(1).collect(), tools) {
             eprintln!("Hrungnir: {error}");
             std::process::exit(1);
         }
         return;
     }
-    let utility = std::env::args()
-        .nth(1)
-        .is_some_and(|arg| matches!(arg.as_str(), "--support-export" | "--connection-test"));
+    let utility = arguments
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "--support-export" | "--connection-test"))
+        || live_cli_request.is_some()
+        || (cfg!(debug_assertions) && std::env::var_os("HRUNGNIR_NATIVE_PROBE").is_some());
     let mut builder = tauri::Builder::default().manage(PendingAppLinks::default());
     if !utility {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -1094,8 +1160,16 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(updates::UpdateState::default())
-        .setup(|app| {
-            let directory = app.path().app_data_dir()?;
+        .setup(move |app| {
+            let mut live_cli_request = live_cli_request;
+            let directory = live_cli_request
+                .as_ref()
+                .and_then(|request| {
+                    request.data_dir.clone().or_else(|| {
+                        std::env::var_os("HRUNGNIR_DATA_DIR").map(std::path::PathBuf::from)
+                    })
+                })
+                .unwrap_or(app.path().app_data_dir()?);
             std::fs::create_dir_all(&directory)?;
             let args: Vec<_> = std::env::args_os().skip(1).collect();
             if args.first().is_some_and(|arg| arg == "--support-export") {
@@ -1112,13 +1186,25 @@ fn main() {
             } else {
                 None
             };
-            if connection_output.is_none() {
+            #[cfg(debug_assertions)]
+            let native_probe_output =
+                std::env::var_os("HRUNGNIR_NATIVE_PROBE").map(std::path::PathBuf::from);
+            #[cfg(not(debug_assertions))]
+            let native_probe_output: Option<std::path::PathBuf> = None;
+            if connection_output.is_none()
+                && native_probe_output.is_none()
+                && live_cli_request.is_none()
+            {
                 install_tab_menu(app.handle())?;
             }
             let ca_directory = directory.join("ca");
             let directory = if connection_output.is_some() {
                 directory
                     .join("connection-tests")
+                    .join(diagnostics::now_ms().to_string())
+            } else if native_probe_output.is_some() {
+                directory
+                    .join("native-probes")
                     .join(diagnostics::now_ms().to_string())
             } else {
                 directory
@@ -1136,8 +1222,23 @@ fn main() {
             )?;
             app.manage(store.clone());
             app.manage(tauri::async_runtime::block_on(web_links::LinkStore::new(directory.clone()))?);
-            let browser = browser::Browser::new(app.handle().clone(), store, proxy);
+            let store_identifier = browser::webview_store_identifier(
+                &directory,
+                live_cli_request.is_some(),
+            )
+            .map_err(|error| format!("Could not select isolated WebKit data store: {error}"))?;
+            let browser = browser::Browser::new(
+                app.handle().clone(),
+                store,
+                proxy,
+                store_identifier,
+            );
             app.manage(browser.clone());
+            if live_cli_request.is_some() {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.hide()?;
+                }
+            }
             let media_root = directory.join("media");
             if let Err(error) = reddit_offline::media_watch::sweep(
                 &media_root,
@@ -1186,13 +1287,38 @@ fn main() {
                     }
                 }
             });
-            if let Some(output) = connection_output {
+            if let Some(request) = live_cli_request.take() {
+                tauri::async_runtime::spawn(native_cli::run(
+                    app.handle().clone(),
+                    browser,
+                    request,
+                ));
+            } else {
+                #[cfg(debug_assertions)]
+                if let Some(output) = native_probe_output {
+                tauri::async_runtime::spawn(native_probe::run(
+                    app.handle().clone(),
+                    browser.clone(),
+                    output,
+                    directory,
+                ));
+                } else if let Some(output) = connection_output {
                 tauri::async_runtime::spawn(connection_test::run(
                     app.handle().clone(),
                     browser,
                     output,
                     directory,
                 ));
+                }
+                #[cfg(not(debug_assertions))]
+                if let Some(output) = connection_output {
+                tauri::async_runtime::spawn(connection_test::run(
+                    app.handle().clone(),
+                    browser,
+                    output,
+                    directory,
+                ));
+                }
             }
             open_app_links(app.handle(), std::env::args().skip(1));
             Ok(())

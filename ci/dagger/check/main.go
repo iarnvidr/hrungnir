@@ -11,10 +11,8 @@ import (
 type HrungnirCi struct{}
 
 const (
-	rustImage       = "rust:1.99.1-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b"
-	pythonImage     = "python:3.12-slim-bookworm@sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337"
-	nodeImage       = "node:22.23.3-bookworm-slim@sha256:3ed98443660ff48413b5af19ecefce3b9d50845a901a43420d47cc63a9fddbe9"
-	playwrightImage = "mcr.microsoft.com/playwright:v1.64.1-noble@sha256:47b510dd9230bf0b9bfc9b20102241e577ea7a99334ab4c3ca19f19770e9b8ea"
+	rustImage   = "rust:1.99.1-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b"
+	pythonImage = "python:3.12-slim-bookworm@sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337"
 )
 
 // BuildLintTest runs the Linux Rust, packaging-policy, and syntax checks.
@@ -43,23 +41,16 @@ func (m *HrungnirCi) BuildLintTest(ctx context.Context, source *dagger.Directory
 	}
 	out.WriteString(text)
 
-	node := dag.Container().From(nodeImage).
-		WithDirectory("/src", source).WithWorkdir("/src").
-		WithExec([]string{"npm", "ci"}).
-		WithExec([]string{"node", "--check", "reader/app.js"})
-	text, err = node.Stdout(ctx)
-	if err != nil {
-		return "", fmt.Errorf("Node install/syntax check: %w", err)
-	}
-	out.WriteString(text)
 	return out.String(), nil
 }
 
-// ReaderUX runs the pinned Chromium interaction suite in its official Playwright image.
+// ReaderUX runs the existing interaction assertions in Chromium through the Python CDP runner.
 func (m *HrungnirCi) ReaderUX(ctx context.Context, source *dagger.Directory) (string, error) {
-	node := dag.Container().From(nodeImage)
-	return dag.Container().From(playwrightImage).
-		WithFile("/usr/local/bin/node", node.File("/usr/local/bin/node")).
+	return dag.Container().From(pythonImage).
+		WithExec([]string{"sh", "-ec", "apt-get update && apt-get install -y --no-install-recommends chromium && rm -rf /var/lib/apt/lists/*"}).
 		WithDirectory("/src", source).WithWorkdir("/src").
-		WithExec([]string{"sh", "-ec", "test \"$(node --version)\" = v22.23.3 && npm ci --ignore-scripts && npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1 && npx playwright install --with-deps chromium && node tests/reader-ux/run.cjs"}).Stdout(ctx)
+		WithEnvVariable("READER_UX_CONTAINER", "1").
+		WithEnvVariable("CHROMIUM_BIN", "/usr/bin/chromium").
+		WithExec([]string{"python3", "-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir", "-r", "tests/reader-ux/requirements.txt"}).
+		WithExec([]string{"python3", "tests/reader-ux/run.py"}).Stdout(ctx)
 }

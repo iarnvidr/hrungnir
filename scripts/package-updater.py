@@ -4,9 +4,26 @@ import base64
 import datetime
 import json
 import pathlib
+import os
+import shutil
 import subprocess
 import tarfile
 import tempfile
+
+
+def tauri_cli():
+    """Resolve the Rust-installed Tauri CLI without falling back to Node."""
+    configured = os.environ.get('TAURI_CLI', 'cargo-tauri')
+    resolved = shutil.which(configured)
+    if resolved:
+        return resolved
+    candidate = pathlib.Path(configured)
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate)
+    raise FileNotFoundError(
+        f"Tauri Rust CLI not found: {configured}; install it with "
+        "cargo install tauri-cli --version 2.12.4 --locked"
+    )
 
 
 def package(root):
@@ -18,7 +35,7 @@ def package(root):
     archive = artifacts / f'{name}-{version}-macos-arm64.app.tar.gz'
     with tarfile.open(archive, 'w:gz', dereference=False) as output:
         output.add(app, arcname=app.name)
-    subprocess.run([str(root / 'node_modules/.bin/tauri'), 'signer', 'sign',
+    subprocess.run([tauri_cli(), 'signer', 'sign',
                     '--app-version', version, str(archive)], check=True)
     signature = archive.with_suffix(archive.suffix + '.sig').read_text().strip()
     # Independently verify what the CLI signed before publishing the manifest.

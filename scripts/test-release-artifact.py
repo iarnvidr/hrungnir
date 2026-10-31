@@ -28,6 +28,15 @@ def zip_data(files):
 
 
 class ReleaseArtifactTests(unittest.TestCase):
+    def test_toolchain_validation_keeps_existing_receipts_usable(self):
+        self.assertTrue(release.valid_toolchain({
+            'rustc': 'rustc fixture', 'node': 'v22 fixture', 'macos': '15', 'sdk': 'fixture'
+        }))
+        self.assertTrue(release.valid_toolchain({
+            'rustc': 'rustc fixture', 'tauri_cli': 'tauri-cli fixture', 'macos': '15', 'sdk': 'fixture'
+        }))
+        self.assertFalse(release.valid_toolchain({'rustc': 'rustc fixture', 'macos': '15', 'sdk': 'fixture'}))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -104,7 +113,7 @@ class ReleaseArtifactTests(unittest.TestCase):
             'run_id': run['id'], 'run_attempt': run['run_attempt'], 'event': event,
             'head': self.pr_head if event == 'pull_request' else self.commit,
             'tree': tree or self.tree, 'workflow_sha': self.workflow_sha,
-            'toolchain': {'rustc': 'rustc fixture', 'node': 'v22 fixture', 'macos': '15', 'sdk': 'fixture'},
+            'toolchain': {'rustc': 'rustc fixture', 'tauri_cli': 'tauri-cli fixture', 'macos': '15', 'sdk': 'fixture'},
             'platform': release.PLATFORM, 'version': '1.2.3',
             'files': {name: digest(contents) for name, contents in self.files.items()},
         }

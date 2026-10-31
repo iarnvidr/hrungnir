@@ -48,7 +48,7 @@ Data lives under `~/Library/Application Support/io.github.iarnvidr.hrungnir/`. S
 
 ## Rebuild and Linux verification
 
-On Mac with Tauri prerequisites: `npm ci`, prepare helpers with `python3 scripts/fetch-media-tools.py`, then `npm run build`. Release packaging from Linux uses `bash scripts/build-macos.sh` and a disposable SDK/zigbuild/rcodesign container.
+For local Mac development, install the Rust Tauri CLI and use `sh scripts/dev.sh`; it uses a separate app identity and data directory. Prepare media helpers with `python3 scripts/fetch-media-tools.py`. See the README for the distributable source build. Release packaging from Linux uses `bash scripts/build-macos.sh` and a disposable SDK/zigbuild/rcodesign container.
 
 Linux development needs yt-dlp, FFmpeg, GTK/WebKit and the Tauri build prerequisites. Native checks use Xvfb, OS clicks, screenshots, SQLite inspection and WebDriver. WebKitWebDriver can invalidate its inspector when a background source window is destroyed; the acquisition flow is therefore also checked with OS clicks and persisted results. Cached rendering/playback can be checked after a fresh process start without an acquisition window.
 
