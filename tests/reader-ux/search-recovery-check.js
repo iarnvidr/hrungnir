@@ -308,11 +308,16 @@ async (page) => {
   await page.locator('#listing-load-more').click();
   await page.waitForFunction(() => document.querySelector('#listing-pagination-status').textContent.includes('cursor expired'));
   assert(await page.locator('#listing-load-more').innerText() === 'Refresh listing', 'expired continuation did not offer a fresh listing action');
-  await page.evaluate(() => { window.__ux.search.communityCountBeforeCursorRefresh = window.__ux.search.completedCommunities.length; });
+  await page.evaluate(() => {
+    window.__ux.search.communityCountBeforeCursorRefresh = window.__ux.search.completedCommunities.length;
+    window.__ux.search.freshCursorNext = true;
+  });
   await page.locator('#listing-load-more').click();
   await page.waitForFunction(() => window.__ux.search.completedCommunities.length > window.__ux.search.communityCountBeforeCursorRefresh && !document.querySelector('#browse-submit').disabled);
   assert((await page.locator('#current-subreddit').innerText()).includes('Posts in r/space'), 'expired cursor recovery refreshed the wrong community');
-  assert((await page.locator('#listing-pagination-status').innerText()).includes('Scroll to load more'), 'expired cursor recovery did not install a fresh continuation');
-  assert(await page.locator('.thread-item').count() === 25, 'expired cursor recovery did not return to a clean first page');
+  await page.waitForFunction(() => window.__ux.search.pageCalls.some(call => call.cursor === 'fresh-page-1'));
+  const recoveredPaginationStatus = await page.locator('#listing-pagination-status').innerText();
+  assert(!recoveredPaginationStatus.includes('cursor expired'), `fresh continuation reused an expired cursor; status: ${recoveredPaginationStatus}`);
+  assert(await page.locator('.thread-item').count() >= 25, 'expired cursor recovery lost the clean first page');
   return {passed:['failed subreddit preserves listing and focus','retry commits requested community','r/all redirect explanation and explicit search action','stale subreddit response cannot replace newer search','stale community completion preserves Library and clears busy state','downloaded search retry and retained focus/query','stale suggestion response cannot cross search scopes','pagination failure preserves posts and retries same cursor','pagination deduplicates and auto loads to exhaustion without scroll jump','continued media hint streams only on explicit play, survives offline save, and falls back locally','repeated continuation cursor stops safely','expired listing cursor offers a fresh transactional listing','refresh rejects listing-only responses and preserves keyboard focus, comments, and video; refresh updates source total and new replies','More/search Options disclosures close with Escape and outside interaction','720px dark theme at enlarged text','1100px light theme']};
 }

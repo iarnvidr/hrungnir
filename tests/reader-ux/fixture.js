@@ -24,7 +24,7 @@
     rows: threads, hits: [], error: false, comments: null,
     failCommunity: null, failAllRedirect: false, holdCommunityFor: null, completedCommunities: [],
     cacheError: false, holdCache: false, completedCacheQueries: [],
-      enablePaging: false, pageError: false, pageExpired: false, holdPage: false, pageCalls: [], repeatCursor: false, pageThreads: [],
+      enablePaging: false, pageError: false, pageExpired: false, freshCursorNext: false, holdPage: false, pageCalls: [], repeatCursor: false, pageThreads: [],
       refreshError: false, refreshNotLoaded: false, refreshHold: false, refreshedComments: null, refreshedMediaUrls: null, provideMedia: false,
       streamCandidateCalls: [], streamPlayCalls: [], streamPlayRejectOnce: false,
   };
@@ -105,23 +105,25 @@
         search.completedCommunities.push(args.subreddit);
         if (search.enablePaging) {
           search.pageThreads = pagedThreads.map(thread => ({ ...thread, subreddit: args.subreddit }));
-          return { ...snap(search.pageThreads.slice(0, 25)), listing_page: { cursor: 'page-1', exhausted: false } };
+          const cursor = search.freshCursorNext ? 'fresh-page-1' : 'page-1';
+          search.freshCursorNext = false;
+          return { ...snap(search.pageThreads.slice(0, 25)), listing_page: { cursor, exhausted: false } };
         }
         return snap();
       }
       if (command === 'fetch_listing_page') {
         search.pageCalls.push({ ...args });
         if (search.holdPage) await new Promise(resolve => { search.releasePage = resolve; });
-        if (search.pageExpired) throw new Error('Listing cursor expired; refresh the listing.');
+        if (search.pageExpired && args.cursor === 'page-1') throw new Error('Listing cursor expired; refresh the listing.');
         if (search.pageError) throw new Error('Continuation source unavailable');
-        if (args.cursor === 'page-1') return {
+        if (args.cursor === 'page-1' || args.cursor === 'fresh-page-1') return {
           posts: [
             { ...search.pageThreads[0], body: '', comments: [], missing: [], comments_status: 'not_loaded', comment_count: 30 },
             search.pageThreads[24], search.pageThreads[25], search.pageThreads[26],
           ],
-          listing_page: { cursor: search.repeatCursor ? 'page-1' : 'page-2', exhausted: false },
+          listing_page: { cursor: search.repeatCursor ? args.cursor : (args.cursor === 'fresh-page-1' ? 'fresh-page-2' : 'page-2'), exhausted: false },
         };
-        if (args.cursor === 'page-2') return {
+        if (args.cursor === 'page-2' || args.cursor === 'fresh-page-2') return {
           posts: [search.pageThreads[26], search.pageThreads[27]],
           media_hints: { t3_fixture27: { kind: 'video', count: 1 } },
           listing_page: { cursor: null, exhausted: true },
