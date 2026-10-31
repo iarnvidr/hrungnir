@@ -49,8 +49,8 @@ func (m *HrungnirCi) ReaderUX(ctx context.Context, source *dagger.Directory) (st
 	return readerUXContainer(source).Stdout(ctx)
 }
 
-// ReaderUXReport exports the rendered review images after every interaction check passes.
-func (m *HrungnirCi) ReaderUXReport(source *dagger.Directory) *dagger.Directory {
+// ReaderReport exports the rendered review images after every interaction check passes.
+func (m *HrungnirCi) ReaderReport(source *dagger.Directory) *dagger.Directory {
 	return readerUXContainer(source).Directory("/src/artifacts/reader-ux")
 }
 
