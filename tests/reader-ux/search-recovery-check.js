@@ -252,6 +252,7 @@ async (page) => {
     input.dispatchEvent(new Event('input', {bubbles:true}));
   });
   await page.locator('#settings-close').click();
+  await page.waitForFunction(() => document.querySelector('.header-tools > summary') === document.activeElement);
   assert(await page.locator('.header-tools > summary').evaluate(node => node === document.activeElement), 'closing Settings did not return focus to More tools');
   await page.locator('#cache-search-input').fill('same query');
   await page.waitForFunction(() => document.querySelector('#cache-search-list .cache-search-title')?.textContent === 'All Reddit downloaded result');

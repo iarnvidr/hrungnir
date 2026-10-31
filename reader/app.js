@@ -3929,8 +3929,10 @@
   function focusHeaderTools(event) {
     const dialog = event?.currentTarget;
     const active = document.activeElement;
-    if (active !== document.body && !(dialog && (dialog === active || dialog.contains(active)))) return;
-    $('.header-tools > summary')?.focus();
+    const disclosure = $('.header-tools');
+    const focusReturnedToClosedOpener = disclosure && !disclosure.open && disclosure.contains(active);
+    if (active !== document.body && !focusReturnedToClosedOpener && !(dialog && (dialog === active || dialog.contains(active)))) return;
+    disclosure?.querySelector(':scope > summary')?.focus();
   }
 
   async function checkForUpdates(quiet = false) {
