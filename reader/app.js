@@ -1346,7 +1346,11 @@
       }
       state.error = '';
       const currentBrowseView = activeSubreddit === subreddit && !redditSearch && !ui.browsePanel.hidden && scrollView === `browse:${subreddit}`;
-      if (currentBrowseView) renderList({ appendOnly: true, appendedIds: new Set(added.map((thread) => thread.id)) });
+      if (currentBrowseView) {
+        const scrollBeforeAppend = window.scrollY;
+        renderList({ appendOnly: true, appendedIds: new Set(added.map((thread) => thread.id)) });
+        if (window.scrollY !== scrollBeforeAppend) window.scrollTo(0, scrollBeforeAppend);
+      }
       else for (const thread of added) state.unrenderedIds.add(thread.id);
       requestLinkPreviews(added);
     } catch (error) {
