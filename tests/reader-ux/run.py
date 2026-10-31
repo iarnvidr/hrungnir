@@ -155,6 +155,7 @@ class Cdp:
         while time.monotonic() < deadline:
             try:
                 if self.evaluate(expression):
+                    self.evaluate("document.querySelector('#reader-fixture').focus()")
                     return
             except Exception:
                 pass
