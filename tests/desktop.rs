@@ -103,6 +103,7 @@ fn real_detail_refresh_replaces_old_body_comments_and_media_identity() {
     thread.source = Some("proxy".into());
     thread.permalink = Some("https://www.reddit.com/r/soccer/comments/fixture/title/".into());
     thread.comments_status = Some("partial_proxy".into());
+    thread.comment_count = Some(42);
     thread.link_url = Some("https://streamable.com/oldclip".into());
     thread.media_urls = vec!["https://preview.redd.it/old.jpg".into()];
     capture(&store, thread.permalink.as_deref().unwrap(), &thread);
@@ -110,6 +111,7 @@ fn real_detail_refresh_replaces_old_body_comments_and_media_identity() {
     thread.comments.clear();
     thread.missing.clear();
     thread.comments_status = Some("empty_confirmed".into());
+    thread.comment_count = None;
     thread.link_url = Some("https://streamable.com/newclip".into());
     thread.media_urls.clear();
     capture(&store, thread.permalink.as_deref().unwrap(), &thread);
@@ -117,6 +119,7 @@ fn real_detail_refresh_replaces_old_body_comments_and_media_identity() {
     assert!(reddit_offline::browsing::comments_ready(&cached));
     assert_eq!(cached.body, thread.body);
     assert!(cached.comments.is_empty());
+    assert_eq!(cached.comment_count, Some(0));
     assert!(cached.media_urls.is_empty());
     assert_eq!(cached.link_url, thread.link_url);
     std::fs::remove_dir_all(root).unwrap();

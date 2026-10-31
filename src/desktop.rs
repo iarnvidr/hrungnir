@@ -252,7 +252,12 @@ impl DesktopStore {
                             );
                         }
                     } else if thread.comment_count.is_none() {
-                        thread.comment_count = previous.comment_count;
+                        thread.comment_count =
+                            if thread.comments_status.as_deref() == Some("empty_confirmed") {
+                                Some(0)
+                            } else {
+                                previous.comment_count
+                            };
                     }
                 }
             }
