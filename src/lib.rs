@@ -61,6 +61,9 @@ pub struct Thread {
     pub source: Option<String>,
     #[serde(default)]
     pub comments_status: Option<String>,
+    /// Source-reported total replies; cached `comments` may be only a subset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_count: Option<u64>,
     #[serde(default)]
     pub media_urls: Vec<String>,
 }

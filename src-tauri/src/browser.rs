@@ -5,13 +5,79 @@ use reddit_offline::{
     proxy::BrowserProxy,
 };
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const WORKER: &str = "reddit-live";
+
+fn normalize_listing_scope(input: &str) -> Result<String, String> {
+    let url = tauri::Url::parse(input).map_err(|_| "Invalid listing scope")?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("www.reddit.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some_and(|port| port != 443)
+        || url.fragment().is_some()
+    {
+        return Err("Listing scope must be a canonical public Reddit URL".into());
+    }
+    let parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
+    if parts.len() != 3 || parts[0] != "r" || parts[1].eq_ignore_ascii_case("all") {
+        return Err("Listing scope must name a public community listing".into());
+    }
+    let sort = parts[2];
+    let period = if sort == "top" {
+        let mut values = url.query_pairs();
+        let Some((key, value)) = values.next() else {
+            return Err("Top listing scope requires a time period".into());
+        };
+        if key != "t" || values.next().is_some() {
+            return Err("Unsupported listing scope query".into());
+        }
+        value.into_owned()
+    } else {
+        if url.query().is_some() {
+            return Err("Unsupported listing scope query".into());
+        }
+        "day".to_owned()
+    };
+    listing_url(parts[1], sort, &period).map_err(|error| error.to_string())
+}
+
+fn cursor_matches_scope(scope: &str, cursor: &str) -> bool {
+    let (Ok(scope), Ok(cursor)) = (tauri::Url::parse(scope), tauri::Url::parse(cursor)) else {
+        return false;
+    };
+    if !reddit_url(cursor.as_str())
+        || !reddit_offline::browsing::listing_partial_path(cursor.path(), cursor.query())
+    {
+        return false;
+    }
+    if reddit_offline::browsing::popular_feed_partial_path(cursor.path(), cursor.query()) {
+        return scope.path() == "/r/popular/hot/";
+    }
+    let fields: BTreeMap<_, _> = cursor.query_pairs().collect();
+    let subreddit = scope.path().trim_matches('/').split('/').nth(1).unwrap_or_default();
+    let sort = scope.path().trim_matches('/').split('/').nth(2).unwrap_or_default();
+    let continuation_sort = cursor.path().trim_matches('/').split('/').last().unwrap_or_default();
+    fields.get("name").is_some_and(|name| name.eq_ignore_ascii_case(subreddit))
+        && (continuation_sort == sort || (sort == "hot" && continuation_sort == "best"))
+}
+
+fn cursor_state_matches(requested_scope: &str, registered_scope: &str, cursor: &str) -> bool {
+    requested_scope == registered_scope && cursor_matches_scope(registered_scope, cursor)
+}
+
+fn unseen_page_ids(ids: impl IntoIterator<Item = String>, seen: &BTreeSet<String>) -> Vec<String> {
+    let mut page_seen = BTreeSet::new();
+    ids.into_iter()
+        .filter(|id| !seen.contains(id) && page_seen.insert(id.clone()))
+        .take(25)
+        .collect()
+}
 
 /// Keep explicit live CLI data roots on separate macOS WebKit profiles. Hash
 /// canonical paths instead of exposing paths in the fixed-size store ID.
@@ -33,6 +99,38 @@ pub fn webview_store_identifier(data_dir: &Path, live_cli: bool) -> Result<[u8; 
     Ok(identifier)
 }
 
+#[cfg(test)]
+mod listing_cursor_tests {
+    use super::*;
+
+    #[test]
+    fn listing_scope_and_cursor_are_bound_to_community_sort_and_period() {
+        let scope = normalize_listing_scope("https://www.reddit.com/r/rust/top/?t=week").unwrap();
+        assert_eq!(scope, "https://www.reddit.com/r/rust/top/?t=week");
+        let cursor = "https://www.reddit.com/svc/shreddit/community-more-posts/top?name=rust&after=t3_x";
+        assert!(cursor_matches_scope(&scope, cursor));
+        assert!(!cursor_matches_scope("https://www.reddit.com/r/rust/new/", cursor));
+        assert!(!cursor_matches_scope("https://www.reddit.com/r/go/top/?t=week", cursor));
+        assert!(!cursor_state_matches("https://www.reddit.com/r/rust/top/?t=month", &scope, cursor));
+        assert!(!cursor_matches_scope(&scope, "https://evil.example/svc/shreddit/community-more-posts/top?name=rust"));
+    }
+
+    #[test]
+    fn next_page_deduplicates_prior_and_repeated_ids_and_caps_results() {
+        let seen = ["t3_old".to_owned()].into_iter().collect();
+        let ids = ["t3_old", "t3_new", "t3_new", "t3_last"].into_iter().map(str::to_owned);
+        assert_eq!(unseen_page_ids(ids, &seen), ["t3_new", "t3_last"]);
+    }
+
+    #[test]
+    fn scope_rejects_redirecting_or_unbounded_listing_targets() {
+        assert!(normalize_listing_scope("https://www.reddit.com/r/all/hot/").is_err());
+        assert!(normalize_listing_scope("https://example.com/r/rust/hot/").is_err());
+        assert!(normalize_listing_scope("https://www.reddit.com/r/rust/hot/?after=x").is_err());
+        assert!(normalize_listing_scope("https://www.reddit.com/r/rust/hot/#fragment").is_err());
+    }
+}
+
 struct Progress {
     generation: u64,
     url: String,
@@ -46,6 +144,43 @@ struct Progress {
     /// A listing's remaining posts arrive in a follow-up response; until this
     /// instant the acquisition keeps waiting for it.
     more_until: Option<Instant>,
+    page_scope: String,
+    requested_cursor: Option<String>,
+    more_url: Option<String>,
+}
+
+#[derive(Clone)]
+struct ListingCursor {
+    scope: String,
+    url: String,
+    seen: BTreeSet<String>,
+    created_at: Instant,
+}
+
+fn invalidate_listing_generation(cursors: &mut BTreeMap<String, ListingCursor>, scope: &str) {
+    cursors.retain(|_, cursor| cursor.scope != scope);
+}
+
+#[cfg(test)]
+mod listing_generation_tests {
+    use super::*;
+
+    #[test]
+    fn refreshing_one_feed_invalidates_its_cursor_but_keeps_other_feed_context() {
+        let mut cursors = BTreeMap::new();
+        for (token, scope) in [
+            ("old-rust", "https://www.reddit.com/r/rust/hot/"),
+            ("soccer", "https://www.reddit.com/r/soccer/hot/"),
+        ] {
+            cursors.insert(token.into(), ListingCursor {
+                scope: scope.into(), url: "/svc/shreddit/community-more-posts/hot/?name=x".into(),
+                seen: BTreeSet::new(), created_at: Instant::now(),
+            });
+        }
+        invalidate_listing_generation(&mut cursors, "https://www.reddit.com/r/rust/hot/");
+        assert!(!cursors.contains_key("old-rust"));
+        assert!(cursors.contains_key("soccer"));
+    }
 }
 pub struct Browser {
     app: AppHandle,
@@ -59,6 +194,7 @@ pub struct Browser {
     operations: Mutex<VecDeque<serde_json::Value>>,
     active: Mutex<BTreeMap<String, (u64, u64)>>,
     ready: tokio::sync::Notify,
+    listing_cursors: Mutex<BTreeMap<String, ListingCursor>>,
 }
 
 impl Browser {
@@ -87,6 +223,9 @@ impl Browser {
                 layout: None,
                 preference_present: false,
                 more_until: None,
+                page_scope: String::new(),
+                requested_cursor: None,
+                more_url: None,
             }),
             gate: tokio::sync::Mutex::new(()),
             trust_gate: tokio::sync::Mutex::new(()),
@@ -96,6 +235,7 @@ impl Browser {
             operations: Mutex::new(VecDeque::new()),
             active: Mutex::new(BTreeMap::new()),
             ready: tokio::sync::Notify::new(),
+            listing_cursors: Mutex::new(BTreeMap::new()),
         });
         if let Some(mut failures) = failures {
             let weak = Arc::downgrade(&browser);
@@ -178,7 +318,10 @@ impl Browser {
                                 let progress = browser.progress.lock().unwrap_or_else(|e| e.into_inner());
                                 (progress.url.clone(), progress.ids.len())
                             };
-                            reddit_offline::reddit_html::parse_listing_partial(response, &listing, 25usize.saturating_sub(taken))
+                            // Parse one whole source fragment. Up to 25 posts are
+                            // returned; a 26th sentinel detects an oversized
+                            // fragment instead of advancing past discarded posts.
+                            reddit_offline::reddit_html::parse_listing_partial(response, &listing, 26usize.saturating_sub(taken))
                         } else {
                             reddit_offline::reddit_html::parse(response)
                         };
@@ -191,9 +334,21 @@ impl Browser {
                                     .map_err(|error| error.to_string())?;
                                 let json = serde_json::to_string(&page)
                                     .map_err(|error| error.to_string())?;
-                                let more = page.more_url.clone();
-                                let count = browser.capture_page(&json, actual, generation, partial, more.is_some())?;
-                                if let Some(more) = more {
+                                let page_more = page.more_url.clone();
+                                let more = if partial {
+                                    page_more.clone()
+                                } else {
+                                    let progress = browser.progress.lock().unwrap_or_else(|e| e.into_inner());
+                                    progress.requested_cursor.clone().or_else(|| page_more.clone())
+                                };
+                                let count = browser.capture_page(&json, actual, generation, partial, more.is_some(), page_more)?;
+                                let can_continue = {
+                                    let progress = browser.progress.lock().unwrap_or_else(|e| e.into_inner());
+                                    progress.generation == generation
+                                        && progress.ids.len() < 25
+                                        && progress.more_until.is_some()
+                                };
+                                if let Some(more) = more.filter(|_| can_continue) {
                                     browser.request_more(generation, &more);
                                 }
                                 Ok(count)
@@ -201,9 +356,15 @@ impl Browser {
                         if let Err(error) = result {
                             eprintln!("proxy capture rejected: {error}");
                             if partial {
-                                // The listing itself is already stored: a missing
-                                // continuation only means fewer posts.
-                                browser.stop_waiting_for_more(generation);
+                                let requested_page = browser.progress.lock().unwrap_or_else(|e| e.into_inner())
+                                    .requested_cursor.is_some();
+                                if requested_page {
+                                    browser.fail_generation(generation, &error);
+                                } else {
+                                    // The initial listing is useful even when its optional
+                                    // continuation cannot be read.
+                                    browser.stop_waiting_for_more(generation);
+                                }
                             } else if error != "Expired acquisition request"
                                 && !reddit_offline::reddit_html::is_interim(&error)
                             {
@@ -229,6 +390,7 @@ impl Browser {
         generation: u64,
         partial: bool,
         more_expected: bool,
+        more_url: Option<String>,
     ) -> Result<usize, String> {
         if json.len() > 512 * 1024 {
             return Err("Capture exceeds 512 KiB".into());
@@ -258,16 +420,25 @@ impl Browser {
                     progress.ids.push(thread.id.clone());
                 }
             }
+            progress.more_url = more_url.clone();
+            // One continuation request is one UI page. The next cursor is
+            // returned immediately; chaining here could skip overflow posts.
             progress.more_until = None;
             self.ready.notify_one();
             return Ok(count);
         }
-        progress.more_until = more_expected.then(|| Instant::now() + Duration::from_secs(6));
-        progress.ids = page
-            .threads
-            .iter()
-            .map(|thread| thread.id.clone())
-            .collect();
+        progress.more_url = more_url;
+        // Initial listings return their server-rendered first chunk and cursor.
+        // The UI requests the bounded continuation only when its scroll sentinel
+        // needs another page. A continuation acquisition can follow its own
+        // fragment chain, capped at 25 posts.
+        progress.more_until = (progress.requested_cursor.is_some() && more_expected)
+            .then(|| Instant::now() + Duration::from_secs(6));
+        progress.ids = if progress.requested_cursor.is_some() {
+            Vec::new()
+        } else {
+            page.threads.iter().map(|thread| thread.id.clone()).collect()
+        };
         progress.layout = page.layout.clone();
         if let Some(present) = page.layout_preference {
             progress.preference_present = present;
@@ -312,7 +483,7 @@ impl Browser {
         Ok(finished)
     }
 
-    fn start(self: &Arc<Self>, url: String) -> Result<(), String> {
+    fn start(self: &Arc<Self>, url: String, requested_cursor: Option<String>) -> Result<(), String> {
         let generation = self.proxy.begin_acquisition();
         self.proxy.set_online(true);
         *self.progress.lock().unwrap_or_else(|e| e.into_inner()) = Progress {
@@ -326,6 +497,9 @@ impl Browser {
             layout: None,
             preference_present: false,
             more_until: None,
+            page_scope: url.clone(),
+            requested_cursor,
+            more_url: None,
         };
         let navigation = self.clone();
         let builder = WebviewWindowBuilder::new(
@@ -613,7 +787,16 @@ impl Browser {
         true
     }
 
-    pub async fn acquire(self: &Arc<Self>, url: String, _post: bool) -> Result<(), String> {
+    pub async fn acquire(self: &Arc<Self>, url: String, post: bool) -> Result<(), String> {
+        self.acquire_page(url, post, None).await
+    }
+
+    async fn acquire_page(
+        self: &Arc<Self>,
+        url: String,
+        _post: bool,
+        requested_cursor: Option<String>,
+    ) -> Result<(), String> {
         if !reddit_url(&url)
             || !reddit_offline::browsing::public_content_path(url.parse::<tauri::Url>().map_err(|e|e.to_string())?.path())
         {
@@ -627,7 +810,7 @@ impl Browser {
         self.record("source", "running", 0, None);
         let setup = Instant::now();
         self.record("source_startup", "running", 0, None);
-        if let Err(error) = super::on_main(self.app.clone(), move || browser.start(classic)).await {
+        if let Err(error) = super::on_main(self.app.clone(), move || browser.start(classic, requested_cursor)).await {
             let _ = self.stop().await;
             self.record(
                 "source_startup",
@@ -760,6 +943,89 @@ impl Browser {
             .unwrap_or_else(|e| e.into_inner())
             .ids
             .clone())
+    }
+
+    pub fn listing_page_state(
+        &self,
+        scope: &str,
+        seen_ids: &[String],
+    ) -> Result<reddit_offline::desktop::ListingPageState, String> {
+        let scope = normalize_listing_scope(scope)?;
+        let (next, acquired_scope) = {
+            let progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+            (progress.more_url.clone(), progress.page_scope.clone())
+        };
+        if !acquired_scope.is_empty() && normalize_listing_scope(&acquired_scope)? != scope {
+            return Err("Listing cursor scope does not match the completed acquisition".into());
+        }
+        let Some(url) = next else {
+            invalidate_listing_generation(
+                &mut self.listing_cursors.lock().unwrap_or_else(|e| e.into_inner()),
+                &scope,
+            );
+            return Ok(reddit_offline::desktop::ListingPageState { cursor: None, exhausted: true });
+        };
+        if !cursor_matches_scope(&scope, &format!("https://www.reddit.com{url}")) {
+            return Err("Source returned an unsupported listing continuation".into());
+        }
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random).map_err(|error| format!("Could not create paging token: {error}"))?;
+        let token: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        let url = format!("https://www.reddit.com{url}");
+        let mut cursors = self.listing_cursors.lock().unwrap_or_else(|e| e.into_inner());
+        invalidate_listing_generation(&mut cursors, &scope);
+        if cursors.len() >= 128 {
+            cursors.pop_first();
+        }
+        cursors.insert(token.clone(), ListingCursor {
+            scope,
+            url,
+            seen: seen_ids.iter().cloned().collect(),
+            created_at: Instant::now(),
+        });
+        Ok(reddit_offline::desktop::ListingPageState { cursor: Some(token), exhausted: false })
+    }
+
+    pub async fn fetch_listing_page(
+        self: &Arc<Self>,
+        scope: &str,
+        token: &str,
+    ) -> Result<reddit_offline::desktop::ListingPageResponse, String> {
+        let scope = normalize_listing_scope(scope)?;
+        let cursor = self.listing_cursors.lock().unwrap_or_else(|e| e.into_inner())
+            .get(token).cloned().ok_or("Listing cursor expired; refresh the listing")?;
+        if cursor.created_at.elapsed() > Duration::from_secs(15 * 60) {
+            self.listing_cursors.lock().unwrap_or_else(|e| e.into_inner()).remove(token);
+            return Err("Listing cursor expired; refresh the listing".into());
+        }
+        if !cursor_state_matches(&scope, &cursor.scope, &cursor.url) {
+            return Err("Listing cursor does not match this scope".into());
+        }
+        let cursor_url = tauri::Url::parse(&cursor.url).map_err(|_| "Invalid stored listing cursor")?;
+        let cursor_target = match cursor_url.query() {
+            Some(query) => format!("{}?{query}", cursor_url.path()),
+            None => cursor_url.path().to_owned(),
+        };
+        self.acquire_page(scope.clone(), false, Some(cursor_target)).await?;
+        let ids = self.progress.lock().unwrap_or_else(|e| e.into_inner()).ids.clone();
+        let seen = cursor.seen;
+        let new_ids = unseen_page_ids(ids, &seen);
+        let mut posts = self.store.listing_snapshot_for_ids(&new_ids).map_err(|e| e.to_string())?.threads;
+        let media_hints = posts.iter()
+            .filter_map(|thread| reddit_offline::media::hint(thread).map(|hint| (thread.id.clone(), hint)))
+            .collect();
+        let mut next_seen = seen;
+        next_seen.extend(new_ids);
+        {
+            let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+            if progress.more_url.as_deref().is_some_and(|url| format!("https://www.reddit.com{url}") == cursor.url) {
+                progress.more_url = None;
+            }
+        }
+        let state = self.listing_page_state(&scope, &next_seen.iter().cloned().collect::<Vec<_>>())?;
+        self.listing_cursors.lock().unwrap_or_else(|e| e.into_inner()).remove(token);
+        posts.truncate(25);
+        Ok(reddit_offline::desktop::ListingPageResponse { posts, listing_page: state, media_hints })
     }
 
     pub async fn search(self: &Arc<Self>, url: String) -> Result<Vec<String>, String> {

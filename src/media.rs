@@ -267,6 +267,57 @@ pub fn sources(thread: &Thread) -> Vec<String> {
     urls
 }
 
+/// Return a parser-derived Reddit HLS manifest only for a thread acquired from
+/// the trusted Reddit source. The result is suitable for assigning to a native
+/// video element; callers must never accept a URL from the UI.
+pub fn validated_reddit_hls_source(thread: &Thread) -> Option<url::Url> {
+    if !matches!(thread.source.as_deref(), Some("browser" | "proxy")) {
+        return None;
+    }
+
+    for source in sources(thread) {
+        let Ok(url) = url::Url::parse(&source) else {
+            continue;
+        };
+        let mut segments = url.path().split('/').filter(|segment| !segment.is_empty());
+        let Some(video_id) = segments.next() else {
+            continue;
+        };
+        if url.scheme() != "https"
+            || url.host_str() != Some("v.redd.it")
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.port().is_some()
+            || video_id.is_empty()
+            || video_id.len() > 64
+            || !video_id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            || segments.next() != Some("HLSPlaylist.m3u8")
+            || segments.next().is_some()
+            || url.fragment().is_some()
+        {
+            continue;
+        }
+
+        let mut query_keys = std::collections::BTreeSet::new();
+        let valid_query = url.query_pairs().all(|(key, value)| {
+            matches!(key.as_ref(), "a" | "f" | "v")
+                && query_keys.insert(key.to_string())
+                && !value.is_empty()
+                && value.len() <= 256
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || b"-_.~+/=".contains(&byte)
+                        || (matches!(key.as_ref(), "a" | "f") && byte == b',')
+                })
+        });
+        if !valid_query {
+            continue;
+        }
+        return Some(url);
+    }
+    None
+}
+
 /// A URL-free UI hint using the same candidates as acquisition; no probing.
 pub fn hint(thread: &Thread) -> Option<MediaHint> {
     let sources = sources(thread);
@@ -563,6 +614,23 @@ pub fn cached_assets(root: &Path, thread: &Thread) -> Option<Vec<MediaAsset>> {
         touch_access(&directory);
     }
     result
+}
+
+/// Check for a valid completed local video without refreshing cache recency.
+/// The stream-candidate lookup uses this to keep offline media preferred after
+/// restart, when in-memory player state has not yet been populated.
+pub fn cached_video_available(root: &Path, thread: &Thread) -> bool {
+    if !thread.id.starts_with("t3_")
+        || thread.id.len() > 128
+        || !thread
+            .id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return false;
+    }
+    cached(&root.join(&thread.id), &sources(thread))
+        .is_some_and(|assets| assets.iter().any(|asset| asset.kind == "video"))
 }
 
 fn touch_access(directory: &Path) {
@@ -971,5 +1039,124 @@ mod streamff_tests {
                     .is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod reddit_hls_source_tests {
+    use super::*;
+
+    fn thread(source: Option<&str>, candidate: &str) -> Thread {
+        Thread {
+            id: "t3_post123".into(),
+            subreddit: "soccer".into(),
+            title: "Test post".into(),
+            body: String::new(),
+            captured_at: 0,
+            comments: Vec::new(),
+            missing: Vec::new(),
+            permalink: Some("https://www.reddit.com/r/soccer/comments/post123/".into()),
+            link_url: Some(candidate.into()),
+            thumbnail_url: None,
+            flair: None,
+            source: source.map(str::to_owned),
+            comments_status: None,
+            comment_count: None,
+            media_urls: vec![candidate.into()],
+        }
+    }
+
+    #[test]
+    fn completed_local_video_suppresses_stream_candidate_without_touching_cache() {
+        let root = std::env::temp_dir().join(format!(
+            "reddit-offline-video-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let video = thread(
+            Some("browser"),
+            "https://v.redd.it/clip123/HLSPlaylist.m3u8?a=1234567890,AbC0123456789%2B%2F==&f=web,hls&v=1",
+        );
+        let directory = root.join(&video.id);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("clip.mp4"), b"valid cached video").unwrap();
+        let manifest = Manifest {
+            sources: sources(&video),
+            files: vec!["clip.mp4".into()],
+        };
+        std::fs::write(
+            directory.join("complete.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let modified = std::fs::metadata(&directory).unwrap().modified().unwrap();
+
+        assert!(cached_video_available(&root, &video));
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().modified().unwrap(),
+            modified,
+            "a candidate lookup must not update cache LRU timestamps"
+        );
+
+        let rotated_query = thread(
+            Some("browser"),
+            "https://v.redd.it/clip123/HLSPlaylist.m3u8?a=rotated-signature&f=web,hls&v=1",
+        );
+        assert!(cached_video_available(&root, &rotated_query));
+
+        let invalid = thread(Some("browser"), "https://v.redd.it/different/HLSPlaylist.m3u8");
+        assert!(!cached_video_available(&root, &invalid));
+
+        let incomplete = thread(Some("browser"), "https://v.redd.it/incomplete/HLSPlaylist.m3u8");
+        let incomplete_directory = root.join(&incomplete.id);
+        std::fs::write(incomplete_directory.join("complete.json"), b"not a valid manifest").unwrap();
+        assert!(!cached_video_available(&root, &incomplete));
+        assert!(!cached_video_available(
+            &root,
+            &thread(Some("browser"), "https://v.redd.it/missing/HLSPlaylist.m3u8")
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn validated_reddit_hls_source_accepts_only_parser_scoped_public_candidates() {
+        let valid =
+            "https://v.redd.it/clip123/HLSPlaylist.m3u8?a=1234567890,AbC0123456789%2B%2F==&f=web,hls&v=1";
+        assert_eq!(
+            validated_reddit_hls_source(&thread(Some("proxy"), valid))
+                .as_ref()
+                .map(url::Url::as_str),
+            Some(valid)
+        );
+        assert_eq!(
+            validated_reddit_hls_source(&thread(Some("browser"), valid))
+                .as_ref()
+                .map(url::Url::as_str),
+            Some(valid)
+        );
+
+        for candidate in [
+            "http://v.redd.it/clip123/HLSPlaylist.m3u8",
+            "https://user@v.redd.it/clip123/HLSPlaylist.m3u8",
+            "https://v.redd.it:8443/clip123/HLSPlaylist.m3u8",
+            "https://v.redd.it.evil.example/clip123/HLSPlaylist.m3u8",
+            "https://v.redd.it/clip123/DASHPlaylist.mpd",
+            "https://v.redd.it/clip123/HLSPlaylist.m3u8/extra",
+            "https://v.redd.it/clip123/HLSPlaylist.m3u8?redirect=https%3A%2F%2Fevil.example",
+            "https://v.redd.it/clip123/HLSPlaylist.m3u8?a=one&a=two",
+            "https://v.redd.it/clip123/HLSPlaylist.m3u8#fragment",
+            "https://evil.example/video.m3u8",
+        ] {
+            assert!(
+                validated_reddit_hls_source(&thread(Some("proxy"), candidate)).is_none(),
+                "unexpectedly accepted {candidate}"
+            );
+        }
+        assert!(validated_reddit_hls_source(&thread(None, valid)).is_none());
+        assert!(validated_reddit_hls_source(&thread(Some("linked"), valid)).is_none());
     }
 }

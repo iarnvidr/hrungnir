@@ -21,6 +21,11 @@ def main():
     source = APP / "assets/hrungnir-logo.png"
     icons = APP / "src-tauri/icons"
     icons.mkdir(parents=True, exist_ok=True)
+    opaque = subprocess.check_output(
+        ["magick", "identify", "-format", "%[opaque]", source], text=True
+    ).strip().lower()
+    if opaque == "true":
+        raise SystemExit("logo source must contain transparency; refusing to export a nested black square")
     with tempfile.TemporaryDirectory() as directory:
         tmp = Path(directory)
         # Preserve the complete transparent figure. Fit it to a square with room

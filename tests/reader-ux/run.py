@@ -29,6 +29,7 @@ CHECKS = (
     "settings-update-check.js",
     "search-keyboard-check.js",
     "search-layout-check.js",
+    "search-recovery-check.js",
 )
 
 
@@ -114,7 +115,9 @@ class Cdp:
                 })
             elif method == "screenshot":
                 result = self.command("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": True})
-                Path(args["path"]).write_bytes(base64.b64decode(result["data"]))
+                screenshot_path = Path(args["path"])
+                screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+                screenshot_path.write_bytes(base64.b64decode(result["data"]))
                 value = True
             else:
                 raise ValueError(f"unknown browser operation: {method}")
@@ -310,6 +313,9 @@ def main() -> int:
             cdp.command("Page.navigate", {"url": url + "__runner.html"})
             cdp.wait_ready()
             cdp.wait_fixture_ready()
+            startup_errors = list(cdp.page_errors)
+            if startup_errors:
+                raise RuntimeError("browser exceptions during fixture startup: " + "\n".join(startup_errors))
 
             for filename in CHECKS:
                 source = (HERE / filename).read_text()
@@ -318,8 +324,19 @@ def main() -> int:
                 try:
                     result = cdp.evaluate(expression)
                 except Exception as exc:
-                    debug = cdp.evaluate("window.__readerUxDebug || []")
-                    raise RuntimeError(f"{filename}: {exc}; input trace={json.dumps(debug)}") from exc
+                    try:
+                        screenshot = cdp.command("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": True})
+                        failure_path = HERE.parent.parent / "artifacts" / "reader-ux" / f"failure-{Path(filename).stem}.png"
+                        failure_path.parent.mkdir(parents=True, exist_ok=True)
+                        failure_path.write_bytes(base64.b64decode(screenshot["data"]))
+                    except Exception:
+                        pass  # Keep the original assertion failure even if capture fails.
+                    try:
+                        debug = cdp.evaluate("(() => { const frame=document.querySelector('#reader-fixture'); const doc=frame?.contentDocument; return {inputTrace:(window.__readerUxDebug||[]).slice(-15), frameUrl:frame?.src||null, readyState:doc?.readyState||null, title:doc?.title||null, threadRows:doc?.querySelectorAll('.thread-item').length??null, status:doc?.querySelector('#connection-status')?.textContent||null, pageBody:doc?.body?.innerText?.slice(0,600)||null}; })()")
+                    except Exception as diagnostic_error:
+                        debug = {"diagnosticError": str(diagnostic_error)}
+                    errors = "\n".join(cdp.page_errors) or "none captured"
+                    raise RuntimeError(f"{filename}: {exc}; page exceptions={errors}; fixture diagnostics={json.dumps(debug)}") from exc
                 if cdp.page_errors:
                     raise RuntimeError(f"{filename}: page errors: " + "\n".join(cdp.page_errors))
                 passed = result.get("passed", []) if isinstance(result, dict) else []

@@ -9,6 +9,7 @@ hrungnir --cli library list
 hrungnir --cli library search 'goal clip'
 hrungnir --cli search 'cached comment'
 hrungnir --cli fetch-reddit soccer --sort hot --period day
+hrungnir --cli fetch-reddit soccer --sort hot --period day --pages 3
 hrungnir --cli fetch-reddit all
 hrungnir --cli search-reddit 'goal clip' --subreddit soccer
 hrungnir --cli search-reddit rust --sort relevance --period all
@@ -29,6 +30,8 @@ hrungnir --cli doctor
 Replace example URLs/IDs with the chosen item. `library save` protects an already-cached post; `save-url` downloads one explicitly selected linked article/video/image. Saves default to forever. `library remove ID` releases library membership/protection without immediately deleting files. `groups delete ID` removes the policy and membership, returning those subreddits to global defaults.
 
 `search QUERY` and `library search QUERY` stay local. `search-reddit QUERY` acquires public Reddit search results; add `--subreddit NAME` for a community-scoped search. Live commands accept `--sort` and `--period` options and return a nonzero process status with JSON error output if acquisition fails. An empty search is a successful empty result. Reddit routes that redirect outside public community pages, such as the current `/r/all` redirect, remain unavailable; the CLI does not follow them into account or home pages.
+
+`fetch-reddit --pages N` requests 1–20 subreddit-listing pages (default 1). The first page contains the posts Reddit server-rendered for that listing; it can have fewer than 25 posts. Each later page consumes one validated continuation fragment and returns at most 25 posts, along with an opaque cursor and explicit exhaustion state. Pagination deduplicates post IDs and keeps complete cached post bodies/comments locally; listing rows carry source-reported `comment_count` separately from the cached comment subset. A listing refresh can update that total without replacing the cached discussion. Search results do not currently paginate. Cursors are tied to the listing scope and expire after 15 minutes; refresh the listing if one expires.
 
 Example group JSON:
 
@@ -51,6 +54,7 @@ For a live development smoke check, build or launch the separate development app
 ```sh
 BIN=/Users/et/Documents/Codex/2026-10-31/sim/hrungnir/src-tauri/target/debug/offline-reader-desktop
 "$BIN" --cli fetch-reddit soccer --data-dir /private/tmp/hrungnir-live-soccer
+"$BIN" --cli fetch-reddit soccer --sort hot --period day --pages 3 --data-dir /private/tmp/hrungnir-live-soccer-pages
 "$BIN" --cli search-reddit rust --data-dir /private/tmp/hrungnir-live-global-search
 "$BIN" --cli search-reddit goal --subreddit soccer --data-dir /private/tmp/hrungnir-live-soccer-search
 "$BIN" --cli --data-dir /private/tmp/hrungnir-local-search search 'cached comment'

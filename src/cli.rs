@@ -203,7 +203,7 @@ fn import_links(cache: &Cache, file: &Path, collection: &str) -> Result<serde_js
             continue;
         }
         if cache.read(&id)?.is_none() {
-            threads.push(Thread{id:id.clone(),subreddit:"saved_links".into(),title:title.chars().take(1000).collect(),body:"Saved bookmark. Article/media has not been downloaded. Use Save linked content to download this item.".into(),captured_at:now,comments:vec![],missing:vec![],permalink:None,link_url:Some(url.to_string()),thumbnail_url:None,flair:None,source:Some("linked_bookmark".into()),comments_status:Some("empty_confirmed".into()),media_urls:vec![]});
+            threads.push(Thread{id:id.clone(),subreddit:"saved_links".into(),title:title.chars().take(1000).collect(),body:"Saved bookmark. Article/media has not been downloaded. Use Save linked content to download this item.".into(),captured_at:now,comments:vec![],missing:vec![],permalink:None,link_url:Some(url.to_string()),thumbnail_url:None,flair:None,source:Some("linked_bookmark".into()),comments_status:Some("empty_confirmed".into()),comment_count:None,media_urls:vec![]});
         }
         items.push(SavedItem {
             id,

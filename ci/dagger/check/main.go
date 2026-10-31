@@ -46,11 +46,19 @@ func (m *HrungnirCi) BuildLintTest(ctx context.Context, source *dagger.Directory
 
 // ReaderUX runs the existing interaction assertions in Chromium through the Python CDP runner.
 func (m *HrungnirCi) ReaderUX(ctx context.Context, source *dagger.Directory) (string, error) {
+	return readerUXContainer(source).WithExec([]string{"python3", "tests/reader-ux/run.py"}).Stdout(ctx)
+}
+
+// ReaderReport exports evidence even on assertion failure; CI verifies result.json separately.
+func (m *HrungnirCi) ReaderReport(source *dagger.Directory) *dagger.Directory {
+	return readerUXContainer(source).WithExec([]string{"python3", "scripts/reader-ux-report.py"}).Directory("/src/artifacts/reader-ux")
+}
+
+func readerUXContainer(source *dagger.Directory) *dagger.Container {
 	return dag.Container().From(pythonImage).
 		WithExec([]string{"sh", "-ec", "apt-get update && apt-get install -y --no-install-recommends chromium && rm -rf /var/lib/apt/lists/*"}).
 		WithDirectory("/src", source).WithWorkdir("/src").
 		WithEnvVariable("READER_UX_CONTAINER", "1").
 		WithEnvVariable("CHROMIUM_BIN", "/usr/bin/chromium").
-		WithExec([]string{"python3", "-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir", "-r", "tests/reader-ux/requirements.txt"}).
-		WithExec([]string{"python3", "tests/reader-ux/run.py"}).Stdout(ctx)
+		WithExec([]string{"python3", "-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir", "-r", "tests/reader-ux/requirements.txt"})
 }

@@ -55,10 +55,20 @@ async (page) => {
   });
   for (const post of ['horizontal', 'vertical']) for (const community of ['horizontal', 'vertical']) {
     await page.evaluate(() => window.scrollTo(0, 0));
+    if (!(await page.locator('.header-tools').evaluate(node => node.open))) await page.locator('.header-tools > summary').click();
     await page.locator('#settings-open').click();
     await page.locator('#post-tabs-layout').selectOption(post);
     await page.locator('#subreddit-tabs-layout').selectOption(community);
     await page.locator('#settings-close').click();
+    if (community === 'horizontal') {
+      assert(!(await page.locator('.subreddit-tools').evaluate(node => node.open)), 'horizontal community toolbar should start compact');
+      await page.locator('.subreddit-tools > summary').click();
+      assert(await page.locator('#browse-form').isVisible(), 'horizontal community toolbar does not expose subreddit fetching');
+      await page.locator('.subreddit-tools > summary').click();
+    } else {
+      assert(await page.locator('.subreddit-tools').evaluate(node => node.open), 'vertical community tools were hidden');
+      assert(!(await page.locator('.subreddit-tools > summary').isVisible()), 'vertical community tools keep a redundant disclosure control');
+    }
     assert(await page.locator('.subreddit-visit').first().isVisible(), `${post}/${community}: communities hidden in reader`);
     assert(await page.locator('.post-tab-open').first().isVisible(), `${post}/${community}: posts hidden in reader`);
     const posts = await page.locator('.post-tab-open').all();
@@ -67,9 +77,13 @@ async (page) => {
     const communities = await page.locator('.subreddit-visit').all();
     const c0 = await communities[0].boundingBox(), c1 = await communities[1].boundingBox();
     assert(community === 'vertical' ? c1.y > c0.y + 10 : Math.abs(c1.y - c0.y) < 2, `${post}/${community}: wrong community orientation`);
-    for (const width of [1200, 500]) {
+    for (const width of [1200, 1100, 720, 500]) {
       await page.setViewportSize({width, height: 760});
-      assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), `${post}/${community}: horizontal page overflow at ${width}`);
+      const overflow = await page.evaluate(() => [...document.querySelectorAll('body *')].map(node => {
+        const rect = node.getBoundingClientRect();
+        return {tag:node.tagName, id:node.id, className:String(node.className || '').slice(0,60), left:Math.round(rect.left), right:Math.round(rect.right), width:Math.round(rect.width)};
+      }).filter(item => item.width > 0 && (item.left < -1 || item.right > innerWidth + 1)).slice(0,6));
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), `${post}/${community}: horizontal page overflow at ${width}; elements=${JSON.stringify(overflow)}`);
     }
     await page.setViewportSize({width: 1200, height: 760});
     await page.evaluate(() => window.scrollTo(0, 500));

@@ -37,8 +37,8 @@ the downloadable app. Linux is used for development and testing.
 
 ## What it does
 
-- Read subreddit listings and threaded comments, with collapsed replies,
-  parent previews and saved reading position.
+- Browse subreddit listings as they load, and read threaded comments with
+  collapsed replies, parent previews and saved reading position.
 - Download images and supported videos, including audio, for local playback.
 - Search all Reddit, the current community, or downloaded posts and comments;
   episode searches match common alternative numbering formats.

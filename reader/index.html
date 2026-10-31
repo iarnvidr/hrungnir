@@ -22,57 +22,68 @@
   <header class="masthead">
     <a class="wordmark" href="#browse-panel" aria-label="Hrungnir home"><img src="hrungnir.png" alt=""><span><b>Hrungnir</b><small>OFFLINE READER</small></span></a>
     <form id="header-search-form" class="header-search" role="search" autocomplete="off">
-      <label class="sr-only" for="cache-search-input">Search Reddit; cached matches appear while typing</label>
-      <input id="cache-search-input" type="search" autocomplete="off" placeholder="Search Reddit or cached posts…" aria-label="Search Reddit; cached matches appear while typing" aria-controls="cache-search-results thread-list" aria-autocomplete="list">
+      <label class="sr-only" for="cache-search-input">Search Reddit; downloaded matches appear while typing</label>
+      <input id="cache-search-input" type="search" autocomplete="off" placeholder="Search Reddit or downloaded posts…" aria-label="Search Reddit; downloaded matches appear while typing" aria-controls="cache-search-results cache-search-list thread-list" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false">
       <label class="sr-only" for="search-scope">Search in</label>
       <select id="search-scope" class="select-control" aria-label="Search in"><option value="all">All Reddit</option><option value="subreddit">This subreddit</option><option value="cache">Downloaded posts</option></select>
       <button id="header-search-submit" class="button" type="submit">Search</button>
-      <button id="cache-search-clear" class="button secondary" type="button" aria-label="Clear search" title="Clear search">Clear</button>
+      <button id="cache-search-clear" class="button secondary" type="button" aria-label="Clear search" title="Clear search" hidden>Clear</button>
       <details class="search-options"><summary>Options</summary><div><label><input id="search-smart" type="checkbox" checked> Discover episode discussions</label><p class="small muted">Relevance search combines your original query with a series-name search, including discussions without an exact episode code. Quoted phrases and Reddit operators stay as typed. Downloaded posts match alternative episode spellings.</p></div></details>
-      <div id="cache-search-results" class="cache-search-results" role="listbox" aria-label="Cached matches" hidden></div>
+      <div id="cache-search-results" class="cache-search-results" role="region" aria-label="Downloaded post search suggestions" hidden>
+        <p id="cache-search-status" class="cache-search-status" role="status" aria-live="polite" hidden></p>
+        <button id="cache-search-retry" class="button secondary cache-search-retry" type="button" hidden>Retry downloaded search</button>
+        <div id="cache-search-list" role="listbox" aria-label="Downloaded matches" aria-busy="false"></div>
+      </div>
     </form>
     <button id="tab-library" class="button secondary" type="button" aria-pressed="false" aria-controls="library-panel" data-tab="library">Library</button>
-    <button id="settings-open" class="button settings-open" type="button" aria-haspopup="dialog" aria-controls="settings-dialog">Settings</button>
-    <button id="keyboard-help-open" class="button secondary" type="button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button>
-    <button id="diagnostics-open" class="button diagnostics-open" type="button">Diagnostics</button>
+    <details class="header-tools">
+      <summary aria-label="More tools" title="More tools">More</summary>
+      <div class="header-tools-menu">
+        <button id="settings-open" class="button settings-open" type="button" aria-haspopup="dialog" aria-controls="settings-dialog">Settings</button>
+        <button id="keyboard-help-open" class="button secondary" type="button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">Keyboard shortcuts</button>
+        <button id="diagnostics-open" class="button diagnostics-open" type="button">Diagnostics</button>
+      </div>
+    </details>
     <div class="masthead-status"><span class="status-dot" aria-hidden="true"></span><span id="connection-status">Checking native cache…</span></div>
   </header>
 
   <div id="reader-feedback" class="browse-feedback" role="status" aria-live="polite" hidden></div>
 
-      <aside class="rail" aria-label="Subreddit lists and cache actions">
-        <nav id="subreddit-list" class="subreddit-list" aria-label="Favorite and recent subreddits"></nav>
-        <p id="subreddit-empty" class="muted empty">Fetched subreddits will appear here.</p>
-        <details class="subreddit-tools"><summary>Subreddit options</summary>
-        <section class="rail-section subreddit-fetch-section">
-          <h1>Fetch subreddit</h1>
-          <form id="browse-form" class="browse-form" autocomplete="off">
-            <label class="sr-only" for="subreddit-input">Subreddit</label>
-            <input id="subreddit-input" name="subreddit" value="/r/soccer" placeholder="/r/soccer" aria-label="Subreddit, such as /r/soccer" spellcheck="false" autocapitalize="off" autocorrect="off">
-            <div class="browse-actions">
-              <button id="browse-submit" data-testid="browse-subreddit" type="submit">Fetch posts</button>
-              <button id="browse-refresh" data-testid="refresh-subreddit" type="button" aria-label="Fetch this subreddit again" title="Fetch this subreddit again">↻</button>
+      <aside class="rail" aria-label="Communities and cache actions">
+        <section class="rail-section community-nav-section">
+          <div class="section-heading"><h1>Communities</h1><button id="favorite-current" class="link-button" type="button" aria-pressed="false">☆ Favorite current</button></div>
+          <nav id="subreddit-list" class="subreddit-list" aria-label="Favorite and recent subreddits"></nav>
+          <p id="subreddit-empty" class="muted empty">No communities yet. Fetch a subreddit below to get started.</p>
+        </section>
+        <details class="rail-section subreddit-tools" open>
+          <summary aria-label="Community tools">Tools</summary>
+          <details class="rail-section subreddit-view-options"><summary>Filter and sort</summary>
+            <label class="small muted" for="subreddit-group-filter">Group</label>
+            <select id="subreddit-group-filter" class="select-control"><option value="">All subreddits</option></select>
+            <label class="small muted" for="subreddit-order">Order</label>
+            <select id="subreddit-order" class="select-control"><option value="recent">Recent</option><option value="favorites">Favorites</option><option value="alphabetical">A–Z</option></select>
+          </details>
+          <section class="rail-section subreddit-fetch-section">
+            <label class="small muted" for="subreddit-input">Fetch posts from</label>
+            <form id="browse-form" class="browse-form" autocomplete="off">
+              <label class="sr-only" for="subreddit-input">Subreddit</label>
+              <input id="subreddit-input" name="subreddit" value="/r/soccer" placeholder="/r/soccer" aria-label="Subreddit, such as /r/soccer" spellcheck="false" autocapitalize="off" autocorrect="off">
+              <div class="browse-actions">
+                <button id="browse-submit" data-testid="browse-subreddit" type="submit">Fetch posts</button>
+                <button id="browse-refresh" data-testid="refresh-subreddit" type="button" aria-label="Fetch this subreddit again" title="Fetch this subreddit again">↻</button>
+              </div>
+            </form>
+          </section>
+          <details class="advanced rail-section">
+            <summary>Advanced · import and cache</summary>
+            <div class="tools-section">
+              <button id="demo-import" data-testid="import-fixture" class="button" type="button">Import synthetic example</button>
+              <button id="file-import" data-testid="import-json" class="button" type="button">Import JSON file…</button>
+              <input id="json-file" type="file" accept="application/json,.json" hidden>
+              <button id="clear-cache" data-testid="clear-cache" class="button danger" type="button">Clear cached posts…</button>
+              <p class="small muted">JSON import limit: 4 MiB. Synthetic example import uses a fixed 10 MiB cache budget.</p>
             </div>
-          </form>
-        </section>
-        <section class="rail-section">
-          <div class="section-heading"><h1>Subreddits</h1><button id="favorite-current" class="link-button" type="button" aria-pressed="false">☆ Favorite current</button></div>
-          <label class="small muted" for="subreddit-group-filter">Group</label>
-          <select id="subreddit-group-filter" class="select-control"><option value="">All subreddits</option></select>
-          <label class="small muted" for="subreddit-order">Order</label>
-          <select id="subreddit-order" class="select-control"><option value="recent">Recent</option><option value="favorites">Favorites</option><option value="alphabetical">A–Z</option></select>
-        </section>
-
-        <details class="advanced rail-section">
-          <summary>Advanced · import and cache</summary>
-          <div class="tools-section">
-            <button id="demo-import" data-testid="import-fixture" class="button" type="button">Import synthetic example</button>
-            <button id="file-import" data-testid="import-json" class="button" type="button">Import JSON file…</button>
-            <input id="json-file" type="file" accept="application/json,.json" hidden>
-            <button id="clear-cache" data-testid="clear-cache" class="button danger" type="button">Clear cached posts…</button>
-            <p class="small muted">JSON import limit: 4 MiB. Synthetic example import uses a fixed 10 MiB cache budget.</p>
-          </div>
-        </details>
+          </details>
         </details>
       </aside>
 
@@ -98,6 +109,11 @@
         <nav id="search-communities" class="search-communities" aria-label="Communities in search results" hidden></nav>
         <div id="thread-list" class="thread-list" aria-label="Fetched post list"></div>
         <p id="empty-state" class="muted empty">Fetch a subreddit above. Previously fetched posts remain available here.</p>
+        <section id="listing-pagination" class="listing-pagination" aria-label="More posts" hidden>
+          <p id="listing-pagination-status" class="small muted" role="status" aria-live="polite" tabindex="-1"></p>
+          <button id="listing-load-more" class="button secondary" type="button">Load more posts</button>
+          <div id="listing-sentinel" aria-hidden="true"></div>
+        </section>
       </section>
     </section>
 

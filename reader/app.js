@@ -6,11 +6,14 @@
   const $ = (selector) => document.querySelector(selector);
   const ui = {
     connection: $('#connection-status'), dot: $('.status-dot'), form: $('#browse-form'), input: $('#subreddit-input'),
-    cacheSearch: $('#cache-search-input'), cacheSearchForm: $('#header-search-form'), cacheSearchSubmit: $('#header-search-submit'), cacheSearchClear: $('#cache-search-clear'), cacheSearchResults: $('#cache-search-results'),
+    cacheSearch: $('#cache-search-input'), cacheSearchForm: $('#header-search-form'), cacheSearchSubmit: $('#header-search-submit'), cacheSearchClear: $('#cache-search-clear'),
+    cacheSearchResults: $('#cache-search-results'), cacheSearchStatus: $('#cache-search-status'), cacheSearchRetry: $('#cache-search-retry'), cacheSearchList: $('#cache-search-list'),
     browse: $('#browse-submit'), browseRefresh: $('#browse-refresh'),
     fetchAllMedia: $('#fetch-all-media'), fetchAllMediaStatus: $('#fetch-all-media-status'),
     newBrowseTab: $('#new-browse-tab'),
     list: $('#thread-list'), count: $('#thread-count'), empty: $('#empty-state'), state: $('#reader-state'),
+    listingPagination: $('#listing-pagination'), listingPaginationStatus: $('#listing-pagination-status'),
+    listingLoadMore: $('#listing-load-more'), listingSentinel: $('#listing-sentinel'),
     feedback: $('#reader-feedback'), view: $('#thread-view'), diagnostics: $('#diagnostics'), detail: $('#diagnostics-detail'),
     diagnosticsStatus: $('#diagnostics-status'), diagnosticsRefresh: $('#diagnostics-refresh'), diagnosticsCopy: $('#diagnostics-copy'), diagnosticsExport: $('#diagnostics-export'),
     supportExport: $('#support-export'), performanceSummary: $('#performance-summary'), theme: $('#theme-select'), accent: $('#accent-select'),
@@ -87,6 +90,8 @@
   const threadDownloadsInFlight = new Map();
   const postLoadsInFlight = new Map();
   const readerMediaStates = new Map();
+  const videoStreamCandidates = new Map();
+  const streamPlayersByThread = new Map();
   const viewScrollPositions = new Map();
   const collapsedCommentIds = new Set();
   let scrollView = null;
@@ -105,7 +110,13 @@
   const linkArticleStates = new Map();
   const linkPreviewRequests = new Set();
   const linkPreviewCompleted = new Set();
+  const discussionRefreshStates = new Map();
+  const discussionRefreshInFlight = new Map();
   const listingBySubreddit = new Map();
+  const listingPaginationBySubreddit = new Map();
+  const listingPageInFlight = new Map();
+  let listingPageRequestSequence = 0;
+  let listingSentinelObserver = null;
   const threadCache = new Map();
   const loadedThreadIds = new Set();
   const unavailableThreadIds = new Set();
@@ -159,7 +170,8 @@
     $('#post-tabs-layout').value = postLayout;
     $('#subreddit-tabs-layout').value = communityLayout;
     $('.reader-tabs').setAttribute('aria-orientation', postLayout);
-    $('.subreddit-tools').open = communityLayout === 'vertical';
+    const communityTools = $('.subreddit-tools');
+    if (communityTools) communityTools.open = communityLayout !== 'horizontal';
     document.documentElement.dataset.theme = preferences.theme;
     document.documentElement.dataset.accent = preferences.accent;
     document.documentElement.style.colorScheme = preferences.theme === 'system' ? 'light dark' : (preferences.theme === 'classified' ? 'dark' : 'light');
@@ -179,7 +191,7 @@
     ui.dot.className = `status-dot${kind ? ` ${kind}` : ''}`;
   }
 
-  function setFeedback(text = '', error = false, retry = null) {
+  function setFeedback(text = '', error = false, retry = null, action = null) {
     ui.feedback.replaceChildren();
     ui.feedback.hidden = !text;
     ui.feedback.classList.toggle('error', error);
@@ -192,6 +204,28 @@
       button.addEventListener('click', retry);
       ui.feedback.append(button);
     }
+    if (action) {
+      const button = element('button', 'button secondary feedback-action', action.label);
+      button.type = 'button';
+      button.addEventListener('click', action.onClick);
+      ui.feedback.append(button);
+    }
+  }
+
+  function setCacheSearchPanel(open) {
+    ui.cacheSearchResults.hidden = !open;
+    ui.cacheSearch.setAttribute('aria-expanded', String(open));
+  }
+
+  function resetCacheSearchPopover({ hide = true } = {}) {
+    ui.cacheSearchList.replaceChildren();
+    ui.cacheSearchList.setAttribute('aria-busy', 'false');
+    ui.cacheSearchStatus.textContent = '';
+    ui.cacheSearchStatus.hidden = true;
+    ui.cacheSearchStatus.classList.remove('error');
+    ui.cacheSearchRetry.hidden = true;
+    ui.cacheSearchRetry.disabled = false;
+    if (hide) setCacheSearchPanel(false);
   }
 
   function toast(message) {
@@ -435,6 +469,12 @@
 
   function releaseMediaWatchesWithin(container) {
     if (!container || typeof container.querySelectorAll !== 'function') return;
+    for (const [id, stream] of streamPlayersByThread) {
+      if (container.contains(stream.player)) {
+        stopStreamPlayer(stream);
+        streamPlayersByThread.delete(id);
+      }
+    }
     for (const player of container.querySelectorAll('video, audio')) {
       const state = mediaWatchPlayers.get(player);
       if (!state) continue;
@@ -746,6 +786,15 @@
     renderPostTabs();
     if (changed) window.scrollTo(0, viewScrollPositions.get(nextView) || 0);
     if (active === 'library' && invoke && !libraryLoaded) void loadLibraryState();
+    if (active === 'browse' && !redditSearch) {
+      const state = listingPaginationBySubreddit.get(activeSubreddit);
+      if (state?.unrenderedIds?.size) {
+        const pendingIds = state.unrenderedIds;
+        state.unrenderedIds = new Set();
+        renderList({ appendOnly: true, appendedIds: pendingIds });
+      }
+    }
+    updateListingPagination();
   }
 
   function renderSubreddits() {
@@ -780,8 +829,12 @@
     }
     const current = (() => { try { return normalizeSubreddit(ui.input.value); } catch (_) { return ''; } })();
     ui.favoriteCurrent.disabled = !current;
-    ui.favoriteCurrent.textContent = favorites.has(current) ? '★ Favorited' : '☆ Favorite current';
-    ui.favoriteCurrent.setAttribute('aria-pressed', String(favorites.has(current)));
+    const isCurrentFavorite = favorites.has(current);
+    ui.favoriteCurrent.textContent = isCurrentFavorite ? '★ Favorited' : '☆ Favorite';
+    const favoriteLabel = current ? `${isCurrentFavorite ? 'Remove' : 'Add'} r/${current} ${isCurrentFavorite ? 'from' : 'to'} favorites` : 'Favorite current subreddit';
+    ui.favoriteCurrent.setAttribute('aria-label', favoriteLabel);
+    ui.favoriteCurrent.title = favoriteLabel;
+    ui.favoriteCurrent.setAttribute('aria-pressed', String(isCurrentFavorite));
   }
 
   function normalizeLibraryState(state) {
@@ -1208,7 +1261,119 @@
     $('#top-period-wrap').hidden = redditSearch ? false : sort !== 'top';
   }
 
-  function renderList() {
+  function listingScopeUrl(subreddit, sort = preferences.postSort, period = preferences.topPeriod) {
+    const base = `https://www.reddit.com/r/${encodeURIComponent(subreddit)}`;
+    return sort === 'top'
+      ? `${base}/top/?t=${encodeURIComponent(period)}`
+      : `${base}/${encodeURIComponent(sort)}/`;
+  }
+
+  function isExpiredListingCursor(message) {
+    return /(?:listing )?cursor expired|expired listing cursor/i.test(String(message || ''));
+  }
+
+  function updateListingPagination() {
+    const state = redditSearch ? null : listingPaginationBySubreddit.get(activeSubreddit);
+    const canContinue = Boolean(state && typeof state.cursor === 'string' && state.cursor && !state.exhausted);
+    const supported = Boolean(state && (canContinue || state.exhausted || state.stopReason));
+    const feedLoading = listingPageInFlight.has(activeSubreddit);
+    ui.listingPagination.hidden = !supported || ui.browsePanel.hidden;
+    if (!supported) {
+      if (listingSentinelObserver) listingSentinelObserver.unobserve(ui.listingSentinel);
+      return;
+    }
+    ui.listingLoadMore.hidden = state.exhausted || Boolean(state.stopReason);
+    ui.listingLoadMore.setAttribute('aria-disabled', String(state.loading || feedLoading || ui.browse.disabled));
+    ui.listingLoadMore.textContent = state.error
+      ? (isExpiredListingCursor(state.error) ? 'Refresh listing' : 'Retry loading more posts')
+      : (state.loading || feedLoading ? 'Loading more posts…' : 'Load more posts');
+    ui.listingPaginationStatus.classList.toggle('error', Boolean(state.error));
+    const loaded = (listingBySubreddit.get(activeSubreddit) || []).length;
+    ui.listingPaginationStatus.textContent = state.error
+      ? `Could not load more posts. Your ${loaded} current posts remain available. ${state.error}`
+      : state.stopReason || (state.exhausted
+        ? `End of this listing · ${loaded} posts loaded.`
+        : state.loading || feedLoading ? `Loading more posts · ${loaded} loaded…` : `Scroll to load more · ${loaded} posts loaded.`);
+    const canObserve = canContinue && !state.loading && !feedLoading && !state.error && !ui.browse.disabled && !ui.browsePanel.hidden;
+    if (listingSentinelObserver) {
+      listingSentinelObserver.unobserve(ui.listingSentinel);
+      if (canObserve) listingSentinelObserver.observe(ui.listingSentinel);
+    }
+  }
+
+  async function loadNextListingPage() {
+    const subreddit = activeSubreddit;
+    const state = listingPaginationBySubreddit.get(subreddit);
+    if (!state || !state.cursor || state.loading || listingPageInFlight.has(subreddit) || state.exhausted || state.stopReason || ui.browse.disabled || redditSearch || ui.browsePanel.hidden) return;
+    const flight = {};
+    listingPageInFlight.set(subreddit, flight);
+    state.loading = true;
+    state.restoreLoadMoreFocus = document.activeElement === ui.listingLoadMore;
+    state.error = '';
+    const request = ++state.request;
+    const cursor = state.cursor;
+    updateListingPagination();
+    try {
+      const result = await invoke('fetch_listing_page', { scope: state.scope, cursor });
+      if (listingPaginationBySubreddit.get(subreddit) !== state || request !== state.request) return;
+      if (!result || !Array.isArray(result.posts) || !result.listing_page || typeof result.listing_page.exhausted !== 'boolean') {
+        throw new Error('The reader received an invalid continuation page.');
+      }
+      const returned = result.posts.filter((thread) => thread && typeof thread.id === 'string' && isSubredditListingThread(thread));
+      rememberSnapshotThreads({ threads: returned });
+      const current = listingBySubreddit.get(subreddit) || [];
+      const seen = new Set(current.map((thread) => thread.id));
+      const added = [];
+      for (const thread of returned) {
+        if (seen.has(thread.id)) updateThreadRowCommentCount(thread.id, threadCache.get(thread.id));
+        else {
+          seen.add(thread.id);
+          added.push(threadCache.get(thread.id));
+        }
+      }
+      const combined = current.concat(added);
+      listingBySubreddit.set(subreddit, combined);
+      const snapshotThreads = new Map((snapshot && Array.isArray(snapshot.threads) ? snapshot.threads : []).map((thread) => [thread.id, thread]));
+      for (const thread of returned) snapshotThreads.set(thread.id, threadCache.get(thread.id));
+      snapshot = mergeSnapshot({ diagnostics: snapshot?.diagnostics || {}, media_hints: result.media_hints || {}, link_previews: {} }, { threads: [...snapshotThreads.values()] });
+      persistListingIds();
+      const nextCursor = typeof result.listing_page.cursor === 'string' && result.listing_page.cursor ? result.listing_page.cursor : null;
+      if ((nextCursor && nextCursor === cursor) || added.length === 0) {
+        state.cursor = null;
+        state.exhausted = false;
+        state.stopReason = added.length === 0
+          ? 'No new posts were returned. Loading has stopped to avoid repeating this page.'
+          : 'This listing returned the same page again. Loading has stopped to avoid duplicates.';
+      } else {
+        state.cursor = nextCursor;
+        state.exhausted = result.listing_page.exhausted || !nextCursor;
+      }
+      state.error = '';
+      const currentBrowseView = activeSubreddit === subreddit && !redditSearch && !ui.browsePanel.hidden && scrollView === `browse:${subreddit}`;
+      if (currentBrowseView) {
+        const scrollBeforeAppend = window.scrollY;
+        renderList({ appendOnly: true, appendedIds: new Set(added.map((thread) => thread.id)) });
+        if (window.scrollY !== scrollBeforeAppend) window.scrollTo(0, scrollBeforeAppend);
+      }
+      else for (const thread of added) state.unrenderedIds.add(thread.id);
+      requestLinkPreviews(added);
+    } catch (error) {
+      if (listingPaginationBySubreddit.get(subreddit) === state && request === state.request) state.error = explainError(error);
+    } finally {
+      if (listingPageInFlight.get(subreddit) === flight) listingPageInFlight.delete(subreddit);
+      if (listingPaginationBySubreddit.get(subreddit) === state && request === state.request) {
+        const restoreFocus = state.restoreLoadMoreFocus;
+        state.loading = false;
+        state.restoreLoadMoreFocus = false;
+        updateListingPagination();
+        if (restoreFocus && [document.body, ui.listingLoadMore].includes(document.activeElement)) {
+          (ui.listingLoadMore.hidden ? ui.listingPaginationStatus : ui.listingLoadMore).focus({ preventScroll: true });
+        }
+      } else if (activeSubreddit === subreddit) updateListingPagination();
+    }
+  }
+
+  function renderList({ appendOnly = false, appendedIds = null } = {}) {
     renderSearchCommunities();
     document.querySelector('.listing-controls').hidden = Boolean(redditSearch?.cached);
     const focusedId = ui.list.contains(document.activeElement) ? document.activeElement.closest('[data-thread-id]')?.dataset.threadId : null;
@@ -1224,6 +1389,7 @@
       renderCacheSearchResults(redditSearch.hits, redditSearch.query, ui.list);
       updateFetchAllMediaControl();
       restoreListingFocus(focusedId);
+      updateListingPagination();
       return;
     }
     ui.postSort.disabled = !invoke || ui.list.inert;
@@ -1246,12 +1412,16 @@
     ui.currentSubreddit.textContent = redditSearch ? `${redditSearch.subreddit ? `r/${redditSearch.subreddit}` : 'Reddit'} results for “${redditSearch.query}”` : (current ? `Posts in r/${current}` : 'Choose a subreddit');
     ui.count.textContent = `${threads.length} ${threads.length === 1 ? 'post' : 'posts'}`;
     updateFetchAllMediaControl();
-    releaseMediaWatchesWithin(ui.list);
-    ui.list.replaceChildren();
+    if (!appendOnly) {
+      releaseMediaWatchesWithin(ui.list);
+      ui.list.replaceChildren();
+    }
     ui.empty.hidden = threads.length > 0;
     ui.empty.textContent = redditSearch ? `No Reddit posts found for “${redditSearch.query}”. Try another query or sort.` : 'Fetch a subreddit above. Previously fetched posts remain available here.';
     threads.forEach((thread, index) => {
+      if (appendOnly && (!appendedIds || !appendedIds.has(thread.id) || ui.list.querySelector(`[data-thread-id="${CSS.escape(thread.id)}"]`))) return;
       const card = element('article', 'thread-item');
+      if (appendOnly) card.classList.add('thread-item-appended');
       card.dataset.threadId = thread.id;
       card.dataset.threadIndex = String(index);
       card.setAttribute('aria-current', String(thread.id === activeId));
@@ -1275,6 +1445,18 @@
       const meta = element('span', 'thread-meta');
       if (thread.flair) meta.append(flairButton(thread.flair));
       meta.append(sub);
+      const commentCount = Number(thread.comment_count);
+      if (thread.comment_count !== null && thread.comment_count !== undefined && Number.isSafeInteger(commentCount) && commentCount >= 0) {
+        const label = `${commentCount} ${commentCount === 1 ? 'comment' : 'comments'}`;
+        const count = element('span', 'thread-comment-count', label);
+        count.title = 'Total comments reported by Reddit';
+        meta.append(count);
+      } else if (loadedThreadIds.has(thread.id) && Array.isArray(thread.comments)) {
+        const cachedCount = thread.comments.length;
+        const count = element('span', 'thread-comment-count cached', `${cachedCount} cached`);
+        count.title = `${cachedCount} comments stored locally; total Reddit comment count is unavailable.`;
+        meta.append(count);
+      }
       if (isExternalWebLink(thread.link_url)) meta.append(element('span', 'thread-domain', safeDomain(thread.link_url)));
       open.append(thumb, element('span', 'thread-open-copy'));
       open.lastChild.append(title);
@@ -1299,6 +1481,7 @@
       const hint = mediaHintsByThread.get(thread.id);
       const assets = mediaByThread.get(thread.id) || [];
       const cachedKinds = [...new Set(assets.map((asset) => asset && asset.kind).filter((kind) => ['image', 'video', 'audio'].includes(kind)))];
+      if (hint?.kind === 'video' && !cachedKinds.includes('video')) void prepareVideoStreamCandidate(thread.id);
       const kindLabel = (kind) => ({ image: 'image', video: 'video', audio: 'audio', media: 'media' })[kind] || 'media';
       const cachedLabel = cachedKinds.length ? `Cached ${cachedKinds.map(kindLabel).join(' + ')}` : '';
       const hintedLabel = hint && ['image', 'video', 'audio', 'media'].includes(hint.kind)
@@ -1316,9 +1499,10 @@
       if (cue) {
         actions.append(element('span', cachedLabel ? 'media-kind-cue cached' : 'media-kind-cue', cue));
         const expanded = inlineExpanded.has(thread.id);
-        const verb = expanded ? 'Hide' : (cachedLabel ? 'Show' : 'Load');
+        const streamReady = hint?.kind === 'video' && Boolean(videoStreamCandidates.get(thread.id)?.candidate) && supportsNativeHls() && !cachedKinds.includes('video');
+        const verb = expanded ? 'Hide' : (streamReady ? 'Play' : cachedLabel ? 'Show' : 'Load');
         const actionKind = cachedKinds.length > 1 ? 'media' : (cachedKinds[0] || (hint && hint.kind) || 'media');
-        const mediaButton = element('button', 'button secondary inline-media-toggle', `${verb} ${kindLabel(actionKind)}`);
+        const mediaButton = element('button', 'button secondary inline-media-toggle', streamReady && !expanded ? 'Play video' : `${verb} ${kindLabel(actionKind)}`);
         mediaButton.type = 'button';
         mediaButton.dataset.testid = 'inline-media-toggle';
         mediaButton.setAttribute('aria-expanded', String(expanded));
@@ -1332,7 +1516,8 @@
       card.append(main, actions, inline);
       ui.list.append(card);
     });
-    restoreListingFocus(focusedId);
+    if (!appendOnly) restoreListingFocus(focusedId);
+    updateListingPagination();
   }
 
   function subredditLink(name) {
@@ -1568,7 +1753,7 @@
     if (!background) { setTab('reader'); setReaderMessage('Opening linked post…'); }
     try {
       const result = await invoke('open_link_post', { url: value });
-      const thread = acceptThreadDownload(result, id, { allowNotLoaded: true });
+      const thread = acceptThreadDownload(result, id);
       mediaByThread.set(id, result.media);
       ensurePostTab(thread, id, { activate: !background });
       if (!background && transition === operationSequence) {
@@ -1851,23 +2036,7 @@
     const mediaSlot = element('div', 'reader-media-slot');
     ui.view.append(mediaSlot);
     refreshReaderMedia(thread.id);
-    const comments = thread.comments || [];
-    const isPartial = thread.comments_status === 'partial_browser' || thread.comments_status === 'partial_proxy';
-    const header = element('div', 'comments-header', thread.comments_status === 'not_loaded' ? 'Comments' : `${comments.length} ${comments.length === 1 ? 'comment' : 'comments'}`);
-    ui.view.append(header);
-    if (isPartial) {
-      header.title = 'Some additional replies may be unavailable.';
-    }
-    if (thread.comments_status === 'not_loaded') {
-      ui.view.append(element('p', 'muted comment-note cached-listing-note', postLoadsInFlight.has(thread.id) ? 'Loading comments…' : 'Open this post to load its discussion.'));
-    } else if (comments.length) {
-      const list = element('div', 'comment-list');
-      const byParent = makeCommentTree(thread);
-      for (const root of (byParent.get(thread.id) || [])) list.append(renderComment(thread, root, byParent, 0));
-      ui.view.append(list);
-    } else {
-      ui.view.append(element('p', 'muted comment-note', 'No comments yet.'));
-    }
+    ui.view.append(renderDiscussion(thread));
     if (focusedComment && !ui.readerPanel.hidden) {
       const target = [...ui.view.querySelectorAll('.comment')].find((item) => item.dataset.commentId === focusedComment);
       (target?.getClientRects().length ? target : ui.view).focus({ preventScroll: true });
@@ -2153,6 +2322,131 @@
     return Boolean(thread && !['linked', 'linked_bookmark'].includes(thread.source));
   }
 
+  function renderDiscussion(thread) {
+    const section = element('section', 'discussion-comments');
+    section.id = 'discussion-comments';
+    const comments = Array.isArray(thread.comments) ? thread.comments : [];
+    const isPartial = thread.comments_status === 'partial_browser' || thread.comments_status === 'partial_proxy';
+    const totalComments = thread.comment_count !== null && thread.comment_count !== undefined ? Number(thread.comment_count) : NaN;
+    const hasTotalComments = Number.isSafeInteger(totalComments) && totalComments >= 0;
+    const downloadedLabel = `${comments.length} downloaded`;
+    const totalLabel = hasTotalComments ? `${totalComments} ${totalComments === 1 ? 'comment' : 'comments'}` : '';
+    const headerText = hasTotalComments
+      ? `${totalLabel} · ${downloadedLabel}`
+      : (thread.comments_status === 'not_loaded' ? 'Comments' : downloadedLabel);
+    const header = element('div', 'comments-header', headerText);
+    const refreshState = discussionRefreshStates.get(thread.id) || {};
+    const heading = element('div', 'comments-heading');
+    heading.append(header);
+    if (['browser', 'proxy'].includes(thread.source)) {
+      const refresh = element('button', 'button secondary discussion-refresh', refreshState.error ? 'Retry refresh' : (refreshState.loading ? 'Refreshing…' : 'Refresh discussion'));
+      refresh.type = 'button';
+      refresh.setAttribute('aria-disabled', String(Boolean(refreshState.loading)));
+      refresh.setAttribute('aria-label', refreshState.error ? 'Retry refreshing this discussion' : 'Refresh discussion comments from Reddit');
+      refresh.addEventListener('click', () => void refreshDiscussion(thread.id));
+      heading.append(refresh);
+    }
+    section.append(heading);
+    const status = element('p', `small muted discussion-refresh-status${refreshState.error ? ' error' : ''}`, refreshState.message || '');
+    status.hidden = !refreshState.message;
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    section.append(status);
+    if (isPartial) {
+      header.title = 'Some additional replies may be unavailable.';
+      const partialNote = hasTotalComments
+        ? `Downloaded ${comments.length} of ${totalComments} comments reported by Reddit. This discussion is partial, so more replies may be unavailable.`
+        : `Downloaded ${comments.length} comments. This discussion is partial, so more replies may be unavailable.`;
+      section.append(element('p', 'muted comment-note partial-comments-note', partialNote));
+    }
+    if (thread.comments_status === 'not_loaded') {
+      const note = hasTotalComments && totalComments > 0
+        ? `No comments are downloaded yet. Reddit reports ${totalComments}.`
+        : 'Comments have not been downloaded yet.';
+      section.append(element('p', 'muted comment-note cached-listing-note', postLoadsInFlight.has(thread.id) ? 'Loading comments…' : note));
+    } else if (comments.length) {
+      const list = element('div', 'comment-list');
+      const byParent = makeCommentTree(thread);
+      for (const root of (byParent.get(thread.id) || [])) list.append(renderComment(thread, root, byParent, 0));
+      section.append(list);
+    } else {
+      const note = hasTotalComments && totalComments > 0
+        ? `No replies are available in the downloaded text. Reddit reports ${totalComments} comments.`
+        : hasTotalComments && totalComments === 0 && !isPartial
+          ? 'No comments yet.'
+          : 'No comments are available in the downloaded text.';
+      section.append(element('p', 'muted comment-note', note));
+    }
+    return section;
+  }
+
+  function updateThreadRowCommentCount(id, thread) {
+    const row = ui.list.querySelector(`[data-thread-id="${CSS.escape(id)}"]`);
+    const meta = row?.querySelector('.thread-meta');
+    if (!meta) return;
+    let count = meta.querySelector('.thread-comment-count');
+    const total = thread.comment_count !== null && thread.comment_count !== undefined ? Number(thread.comment_count) : NaN;
+    if (Number.isSafeInteger(total) && total >= 0) {
+      if (!count) { count = element('span', 'thread-comment-count'); meta.append(count); }
+      count.className = 'thread-comment-count';
+      count.textContent = `${total} ${total === 1 ? 'comment' : 'comments'}`;
+      count.title = 'Total comments reported by Reddit';
+    } else if (loadedThreadIds.has(id) && Array.isArray(thread.comments)) {
+      if (!count) { count = element('span', 'thread-comment-count cached'); meta.append(count); }
+      count.className = 'thread-comment-count cached';
+      count.textContent = `${thread.comments.length} cached`;
+      count.title = `${thread.comments.length} comments stored locally; total Reddit comment count is unavailable.`;
+    } else count?.remove();
+  }
+
+  async function refreshDiscussion(id) {
+    if (discussionRefreshInFlight.has(id)) return;
+    const flight = {};
+    discussionRefreshInFlight.set(id, flight);
+    discussionRefreshStates.set(id, { loading: true, message: 'Refreshing discussion from Reddit.', error: '' });
+    const section = ui.view.querySelector('#discussion-comments');
+    const refreshButton = section?.querySelector('.discussion-refresh');
+    const status = section?.querySelector('.discussion-refresh-status');
+    if (refreshButton) { refreshButton.setAttribute('aria-disabled', 'true'); refreshButton.textContent = 'Refreshing…'; }
+    if (status) { status.hidden = false; status.classList.remove('error'); status.textContent = 'Refreshing discussion from Reddit.'; }
+    try {
+      const result = await invoke('fetch_thread', { id, include_media: false, refresh: true });
+      const previousCandidateSource = videoCandidateSourceKey(id);
+      const thread = acceptThreadDownload(result, id);
+      if (mediaHintsByThread.get(id)?.kind === 'video' || previousCandidateSource !== videoCandidateSourceKey(id)) {
+        videoStreamCandidates.delete(id);
+        void prepareVideoStreamCandidate(id, true);
+      }
+      if (Array.isArray(result.media) && (result.media.length || !mediaByThread.has(id))) mediaByThread.set(id, result.media);
+      discussionRefreshStates.set(id, { loading: false, message: `Discussion updated · ${thread.comments.length} comments downloaded.`, error: '' });
+      updateThreadRowCommentCount(id, thread);
+      if (activeId !== id || ui.readerPanel.hidden) return;
+      const currentSection = ui.view.querySelector('#discussion-comments');
+      if (!currentSection) return;
+      const focusedComment = document.activeElement.closest?.('.comment')?.dataset.commentId || null;
+      const focusRefresh = document.activeElement.classList?.contains('discussion-refresh');
+      const scrollPosition = window.scrollY;
+      currentSection.replaceWith(renderDiscussion(thread));
+      if (focusedComment) {
+        const target = [...ui.view.querySelectorAll('.comment')].find((item) => item.dataset.commentId === focusedComment);
+        if (target) target.focus({ preventScroll: true });
+      } else if (focusRefresh) ui.view.querySelector('.discussion-refresh')?.focus({ preventScroll: true });
+      window.scrollTo(0, scrollPosition);
+    } catch (error) {
+      const message = `Could not refresh comments. Your downloaded discussion is still available. ${explainError(error)}`;
+      discussionRefreshStates.set(id, { loading: false, message, error: explainError(error) });
+      if (activeId === id && !ui.readerPanel.hidden) {
+        const currentSection = ui.view.querySelector('#discussion-comments');
+        const currentStatus = currentSection?.querySelector('.discussion-refresh-status');
+        const currentButton = currentSection?.querySelector('.discussion-refresh');
+        if (currentStatus) { currentStatus.hidden = false; currentStatus.classList.add('error'); currentStatus.textContent = message; }
+        if (currentButton) { currentButton.setAttribute('aria-disabled', 'false'); currentButton.textContent = 'Retry refresh'; }
+      }
+    } finally {
+      if (discussionRefreshInFlight.get(id) === flight) discussionRefreshInFlight.delete(id);
+    }
+  }
+
   function draw() {
     if (!snapshot || !Array.isArray(snapshot.threads)) {
       setReaderMessage('The native cache returned an invalid snapshot.', true);
@@ -2187,11 +2481,31 @@
 
   function rememberSnapshotThreads(result) {
     for (const thread of result.threads) {
-      if (!loadedThreadIds.has(thread.id)) threadCache.set(thread.id, thread);
+      threadCache.set(thread.id, mergeThreadListingData(threadCache.get(thread.id), thread));
     }
     for (const [subreddit, listing] of listingBySubreddit) {
       listingBySubreddit.set(subreddit, listing.map((thread) => threadCache.get(thread.id) || thread));
     }
+  }
+
+  function mergeThreadListingData(cached, incoming) {
+    if (!cached) return incoming;
+    const hasFullCachedThread = loadedThreadIds.has(incoming.id);
+    const hasSourceCount = incoming.comment_count !== null && incoming.comment_count !== undefined
+      && Number.isSafeInteger(Number(incoming.comment_count)) && Number(incoming.comment_count) >= 0;
+    return {
+      ...cached,
+      ...incoming,
+      title: incoming.title || cached.title,
+      body: hasFullCachedThread ? cached.body : (incoming.body || cached.body),
+      comments: hasFullCachedThread ? cached.comments : (Array.isArray(incoming.comments) && incoming.comments.length ? incoming.comments : (cached.comments || incoming.comments || [])),
+      comments_status: hasFullCachedThread ? cached.comments_status : (Array.isArray(incoming.comments) && incoming.comments.length) || !cached.comments_status
+        ? incoming.comments_status
+        : cached.comments_status,
+      missing: hasFullCachedThread ? cached.missing : (Array.isArray(incoming.missing) && incoming.missing.length ? incoming.missing : (cached.missing || incoming.missing || [])),
+      media_urls: hasFullCachedThread ? cached.media_urls : (Array.isArray(incoming.media_urls) && incoming.media_urls.length ? incoming.media_urls : (cached.media_urls || incoming.media_urls || [])),
+      comment_count: hasSourceCount ? Number(incoming.comment_count) : cached.comment_count,
+    };
   }
 
   function persistListingIds() {
@@ -2338,18 +2652,128 @@
     ui.fetchAllMedia.setAttribute('aria-label', bulkMediaRun ? 'Cancel fetching media for listed posts' : `Fetch media for ${candidates.length} listed posts`);
   }
 
+  function validVideoStreamCandidate(candidate) {
+    try {
+      const url = new URL(candidate);
+      return url.protocol === 'https:' && url.hostname === 'v.redd.it' && !url.username && !url.password && !url.port && !url.hash
+        && /^\/[A-Za-z0-9_-]+\/HLSPlaylist\.m3u8$/.test(url.pathname);
+    } catch (_) { return false; }
+  }
+
+  function supportsNativeHls() {
+    try { return Boolean(document.createElement('video').canPlayType('application/vnd.apple.mpegurl')); }
+    catch (_) { return false; }
+  }
+
+  function inlineVideoActionLabel(id) {
+    if ((mediaByThread.get(id) || []).some((asset) => asset?.kind === 'video')) return 'Show video';
+    return videoStreamCandidates.get(id)?.candidate && supportsNativeHls() ? 'Play video' : 'Load video';
+  }
+
+  function videoCandidateSourceKey(id) {
+    const thread = threadCache.get(id);
+    return thread ? [thread.source || '', thread.permalink || '', thread.link_url || '', ...(thread.media_urls || [])].join('|') : '';
+  }
+
+  function stopStreamPlayer(stream) {
+    try { stream.player.pause(); } catch (_) { /* detached player */ }
+    stream.player.removeAttribute('src');
+    try { stream.player.load(); } catch (_) { /* detached player */ }
+  }
+
+  function fallbackFromVideoStream(id, stream, message) {
+    if (streamPlayersByThread.get(id) !== stream) return;
+    stream.failed = true;
+    streamPlayersByThread.delete(id);
+    stopStreamPlayer(stream);
+    stream.status.textContent = message;
+    void loadInlineMedia(id);
+  }
+
+  function prepareVideoStreamCandidate(id, force = false) {
+    const sourceKey = videoCandidateSourceKey(id);
+    const existing = videoStreamCandidates.get(id);
+    if (existing?.sourceKey === sourceKey) {
+      if (existing.promise) return existing.promise;
+      if (existing.candidate && !force) return Promise.resolve(existing.candidate);
+      if (!force && existing.retryAt > Date.now()) return Promise.resolve(null);
+    }
+    const state = { candidate: null, ready: false, promise: null, sourceKey, retryAt: 0 };
+    state.promise = Promise.resolve().then(() => invoke('video_stream_candidate', { id })).then((candidate) => {
+      state.candidate = typeof candidate === 'string' && validVideoStreamCandidate(candidate) ? candidate : null;
+      return state.candidate;
+    }).catch(() => null).finally(() => {
+      state.ready = true;
+      if (!state.candidate) state.retryAt = Date.now() + 4000;
+      const button = ui.list.querySelector(`[data-thread-id="${CSS.escape(id)}"] .inline-media-toggle`);
+      const thread = threadCache.get(id);
+      const hint = mediaHintsByThread.get(id);
+      if (button && hint?.kind === 'video' && !inlineExpanded.has(id)) {
+        const label = inlineVideoActionLabel(id);
+        button.textContent = label;
+        button.setAttribute('aria-label', `${label.replace(/ video$/, '')} ${thread?.title || 'Reddit'} video`);
+      }
+    });
+    videoStreamCandidates.set(id, state);
+    return state.promise;
+  }
+
+  function startInlineVideoStream(id, region) {
+    const candidate = videoStreamCandidates.get(id)?.candidate;
+    if ((mediaByThread.get(id) || []).some((asset) => asset?.kind === 'video')) return false;
+    if (!candidate || !validVideoStreamCandidate(candidate) || !supportsNativeHls()) return false;
+    const probe = document.createElement('video');
+    probe.controls = true;
+    probe.preload = 'metadata';
+    probe.playsInline = true;
+    probe.setAttribute('aria-label', 'Reddit video stream player');
+    const panel = element('div', 'streaming-media-panel');
+    const status = element('p', 'small muted streaming-media-status', 'Streaming from Reddit · saving offline…');
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    panel.append(probe, status);
+    probe.src = candidate;
+    region.replaceChildren(panel);
+    const stream = { player: probe, panel, status, failed: false, playbackBlocked: false, offlineReady: false };
+    streamPlayersByThread.set(id, stream);
+    probe.addEventListener('error', () => {
+      if (streamPlayersByThread.get(id) !== stream) return;
+      fallbackFromVideoStream(id, stream, 'Reddit could not play this stream. Trying the offline video…');
+    });
+    const play = probe.play();
+    if (play && typeof play.catch === 'function') play.catch((error) => {
+      if (streamPlayersByThread.get(id) !== stream) return;
+      if (error?.name === 'NotAllowedError') {
+        stream.playbackBlocked = true;
+        status.textContent = `Streaming from Reddit · press Play in the player${stream.offlineReady ? ' · saved for offline.' : ' · saving offline…'}`;
+      } else fallbackFromVideoStream(id, stream, 'Reddit could not start this stream. Trying the offline video…');
+    });
+    void loadInlineMedia(id);
+    return true;
+  }
+
   async function loadInlineMedia(id) {
     const inline = ui.list.querySelector(`[data-inline-media-for="${CSS.escape(id)}"]`);
     if (!inline) return false;
     const existingMedia = inline.querySelector('.media-section');
-    const progress = element('p', 'muted small inline-media-progress', existingMedia ? 'Checking cached post and media…' : 'Opening post and media…');
-    if (existingMedia) inline.append(progress);
+    const streamed = streamPlayersByThread.get(id);
+    const progress = element('p', 'muted small inline-media-progress', existingMedia ? 'Checking cached post and media…' : 'Saving video for offline…');
+    if (existingMedia || streamed?.player.isConnected) inline.append(progress);
     else inline.replaceChildren(progress);
     const startedAt = performance.now();
     try {
       const download = await getThreadDownload(id);
       const current = ui.list.querySelector(`[data-inline-media-for="${CSS.escape(id)}"]`);
       if (!current || !inlineExpanded.has(id)) return true;
+      const liveStream = streamPlayersByThread.get(id);
+      if (liveStream?.player.isConnected && !liveStream.failed) {
+        progress.remove();
+        liveStream.offlineReady = download.media.some((asset) => asset?.kind === 'video');
+        liveStream.status.textContent = `Streaming from Reddit${liveStream.playbackBlocked ? ' · press Play in the player' : ''} · ${liveStream.offlineReady ? 'saved for offline.' : 'no offline video copy is available yet.'}`;
+        updateFetchAllMediaControl();
+        recordClientEvent('inline_media', performance.now() - startedAt, download.media.length);
+        return true;
+      }
       if (existingMedia && download.cached && existingMedia.isConnected) {
         progress.remove();
         updateFetchAllMediaControl();
@@ -2364,6 +2788,12 @@
       recordClientEvent('inline_media', performance.now() - startedAt, 0);
       const current = ui.list.querySelector(`[data-inline-media-for="${CSS.escape(id)}"]`);
       if (!current) return;
+      const liveStream = streamPlayersByThread.get(id);
+      if (liveStream?.player.isConnected && !liveStream.failed) {
+        progress.remove();
+        liveStream.status.textContent = `Streaming from Reddit · offline save failed: ${explainError(error)}`;
+        return;
+      }
       const message = element('p', 'small error-text', `Could not load local media. ${explainError(error)} `);
       const retry = element('button', 'link-button', 'Retry');
       retry.type = 'button';
@@ -2435,16 +2865,30 @@
       inlineExpanded.delete(id);
       const region = card.querySelector('.inline-media');
       if (region) region.hidden = true;
+      const stream = streamPlayersByThread.get(id);
+      if (stream) try { stream.player.pause(); } catch (_) { /* detached player */ }
       const button = card.querySelector('.inline-media-toggle');
-      if (button) { button.textContent = 'Expand media'; button.setAttribute('aria-expanded', 'false'); }
+      if (button) { button.textContent = mediaHintsByThread.get(id)?.kind === 'video' ? inlineVideoActionLabel(id) : 'Expand media'; button.setAttribute('aria-expanded', 'false'); }
       return;
     }
     inlineExpanded.add(id);
     const region = card.querySelector('.inline-media');
     const button = card.querySelector('.inline-media-toggle');
     if (region) region.hidden = false;
-    if (button) { button.textContent = 'Hide media'; button.setAttribute('aria-expanded', 'true'); }
-    await loadInlineMedia(id);
+    if (button) { button.textContent = mediaHintsByThread.get(id)?.kind === 'video' ? 'Hide video' : 'Hide media'; button.setAttribute('aria-expanded', 'true'); }
+    const stream = streamPlayersByThread.get(id);
+    if (stream?.player.isConnected && !(mediaByThread.get(id) || []).some((asset) => asset?.kind === 'video')) {
+      const play = stream.player.play();
+      if (play && typeof play.catch === 'function') play.catch((error) => {
+        if (error?.name === 'NotAllowedError') {
+          stream.playbackBlocked = true;
+          stream.status.textContent = `Streaming from Reddit · press Play in the player${stream.offlineReady ? ' · saved for offline.' : ' · saving offline…'}`;
+        } else fallbackFromVideoStream(id, stream, 'Reddit could not restart this stream. Trying the offline video…');
+      });
+      return;
+    }
+    if (stream) streamPlayersByThread.delete(id);
+    if (!region || !startInlineVideoStream(id, region)) await loadInlineMedia(id);
   }
 
   function normalizeSubreddit(value) {
@@ -2461,26 +2905,19 @@
     try { subreddit = normalizeSubreddit(rawValue); }
     catch (error) { setFeedback(explainError(error), true); ui.input.focus(); return; }
     const listingScroll = scrollView === `browse:${subreddit}` ? window.scrollY : (viewScrollPositions.get(`browse:${subreddit}`) || 0);
+    const viewAtStart = scrollView;
+    const searchDraftAtStart = ui.cacheSearch.value;
+    const restoreInputFocus = [ui.input, ui.browse, ui.browseRefresh].includes(document.activeElement);
+    const requestedSort = preferences.postSort;
+    const requestedPeriod = preferences.topPeriod;
     ui.input.value = `/r/${subreddit}`;
-    redditSearch = null;
     cancelRedditSearch();
-    ui.cacheSearchSubmit.disabled = false;
     window.clearTimeout(cacheSearchTimer);
     cacheSearchSequence++;
-    ui.cacheSearch.value = '';
-    ui.cacheSearchClear.disabled = true;
-    ui.cacheSearchResults.hidden = true;
-    updateSortNotice();
+    resetCacheSearchPopover();
     const transition = ++operationSequence;
     const request = ++subredditRequestSequence;
     const startedAt = performance.now();
-    pendingId = null;
-    activeSubreddit = subreddit;
-    preferences.lastSubreddit = subreddit;
-    setTab('browse');
-    renderList();
-    window.scrollTo(0, listingScroll);
-    const initialListingScroll = window.scrollY;
     ui.list.setAttribute('aria-busy', 'true');
     if (bulkMediaRun) bulkMediaRun.cancelled = true;
     updateFetchAllMediaControl();
@@ -2489,27 +2926,55 @@
     ui.input.disabled = true;
     ui.postSort.disabled = true;
     ui.topPeriod.disabled = true;
+    updateListingPagination();
     setFeedback(`Fetching posts from /r/${subreddit}…`);
     setStatus(`Fetching /r/${subreddit}…`);
     startOperationProgress('Fetching subreddit posts', transition);
+    let failedRequest = false;
     try {
-      const result = await invoke('fetch_subreddit', { subreddit, sort: preferences.postSort, top_period: preferences.topPeriod });
+      const result = await invoke('fetch_subreddit', { subreddit, sort: requestedSort, top_period: requestedPeriod });
       if (request !== subredditRequestSequence) return;
       if (!result || !Array.isArray(result.threads) || !result.diagnostics) throw new Error('Native command returned an invalid Snapshot.');
+      if (transition !== operationSequence || scrollView !== viewAtStart) {
+        // Keep the late response useful in cache, but don't let it change the
+        // selected community or pull the user away from a newer view.
+        snapshot = mergeSnapshot(result);
+        rememberSnapshotThreads(result);
+        listingBySubreddit.set(subreddit, result.threads.filter(isSubredditListingThread));
+        return;
+      }
       snapshot = mergeSnapshot(result);
       rememberSnapshotThreads(result);
+      redditSearch = null;
+      pendingId = null;
       activeSubreddit = subreddit;
       preferences.lastSubreddit = subreddit;
       installSourceListing(subreddit, result.threads);
+      const pageInfo = result.listing_page;
+      if (pageInfo && typeof pageInfo.exhausted === 'boolean') {
+        listingPaginationBySubreddit.set(subreddit, {
+          scope: listingScopeUrl(subreddit, requestedSort, requestedPeriod),
+          cursor: typeof pageInfo.cursor === 'string' && pageInfo.cursor ? pageInfo.cursor : null,
+          exhausted: pageInfo.exhausted,
+          stopReason: '', error: '', loading: false, request: 0, unrenderedIds: new Set(),
+        });
+      } else listingPaginationBySubreddit.delete(subreddit);
       recordRecent(subreddit);
-      if (transition === operationSequence) setTab('browse');
+      const shouldShowListing = scrollView === viewAtStart;
+      const targetScroll = scrollView === `browse:${subreddit}` ? window.scrollY : listingScroll;
+      if (shouldShowListing) setTab('browse');
+      if (ui.cacheSearch.value === searchDraftAtStart) {
+        ui.cacheSearch.value = '';
+        ui.cacheSearchClear.disabled = true;
+        ui.cacheSearchClear.hidden = true;
+      }
+      updateSortNotice();
       refreshDiagnostics(snapshot);
-      const restoreListing = scrollView === `browse:${subreddit}`;
-      const savedScroll = window.scrollY === initialListingScroll ? listingScroll : window.scrollY;
       renderList();
-      if (restoreListing) window.scrollTo(0, savedScroll);
+      if (shouldShowListing) window.scrollTo(0, targetScroll);
       renderPostTabs();
       requestLinkPreviews(result.threads);
+      if (ui.cacheSearch.value.trim()) scheduleCacheSearch(0);
       const elapsed = performance.now() - startedAt;
       recordClientEvent('source_fetch', elapsed, result.threads.length);
       if (transition === operationSequence) {
@@ -2518,9 +2983,23 @@
       }
     } catch (error) {
       if (request === subredditRequestSequence && transition === operationSequence) {
+        failedRequest = true;
         recordClientEvent('source_fetch', performance.now() - startedAt, 0);
-        setFeedback(`Could not fetch /r/${subreddit}. Your current reader content is unchanged. ${explainError(error)}${sourceTrustFailureHint()}`, true, () => void browseSubreddit(`/r/${subreddit}`));
-        setStatus(`Fetch failed · /r/${subreddit}`, 'error');
+        const details = explainError(error);
+        const unsupportedAllRedirect = subreddit === 'all' && /redirect/i.test(details);
+        const message = unsupportedAllRedirect
+          ? 'r/all redirects to a different feed. This reader does not follow that redirect. Choose a specific subreddit or use Reddit search.'
+          : `Could not fetch /r/${subreddit}. Your current listing and reader remain available. ${details}${sourceTrustFailureHint()}`;
+        const useSearch = unsupportedAllRedirect ? {
+          label: 'Use Reddit search',
+          onClick: () => {
+            $('#search-scope').value = 'all';
+            $('#search-smart').disabled = false;
+            ui.cacheSearch.focus();
+          },
+        } : null;
+        setFeedback(message, true, unsupportedAllRedirect ? null : () => void browseSubreddit(`/r/${subreddit}`), useSearch);
+        setStatus(unsupportedAllRedirect ? 'r/all listing unavailable' : `Fetch failed · /r/${subreddit}`, 'error');
       }
     } finally {
       stopOperationProgress(transition);
@@ -2528,11 +3007,22 @@
         ui.browse.disabled = false;
         ui.browseRefresh.disabled = false;
         ui.input.disabled = false;
-          ui.postSort.disabled = false;
-          ui.topPeriod.disabled = false;
+        if (transition === operationSequence) {
+          ui.postSort.disabled = !invoke || Boolean(redditSearch?.cached);
+          ui.topPeriod.disabled = !invoke || Boolean(redditSearch?.cached);
           ui.list.inert = false;
           ui.list.removeAttribute('aria-busy');
           updateFetchAllMediaControl();
+        } else if (!activeRedditSearchOperation && ui.list.getAttribute('aria-busy') === 'true') {
+          // A newer navigation (for example opening Library) can supersede this
+          // fetch without starting another list request. Release only this stale
+          // busy state; an in-flight Reddit search owns the list independently.
+          ui.list.inert = false;
+          ui.list.removeAttribute('aria-busy');
+        }
+        updateListingPagination();
+        if (failedRequest && transition === operationSequence && restoreInputFocus
+          && [document.body, ui.input, ui.browse, ui.browseRefresh].includes(document.activeElement)) ui.input.focus();
       }
     }
   }
@@ -2559,7 +3049,7 @@
       bulkMediaRun.cancelled = true;
       ui.fetchAllMediaStatus.textContent = 'Cancelling after current downloads…';
     }
-    ui.cacheSearchResults.hidden = true;
+    setCacheSearchPanel(false);
     ui.cacheSearchSubmit.disabled = true;
     ui.postSort.disabled = true;
     ui.topPeriod.disabled = true;
@@ -2644,14 +3134,30 @@
   }
 
   function renderCacheSearchResults(rows, query, results = ui.cacheSearchResults) {
-    results.replaceChildren();
+    const suggestions = results === ui.cacheSearchResults;
+    const target = suggestions ? ui.cacheSearchList : results;
+    target.replaceChildren();
+    if (suggestions) {
+      ui.cacheSearchList.setAttribute('aria-busy', 'false');
+      ui.cacheSearchStatus.textContent = '';
+      ui.cacheSearchStatus.hidden = true;
+      ui.cacheSearchStatus.classList.remove('error');
+      ui.cacheSearchRetry.hidden = true;
+      ui.cacheSearchRetry.disabled = false;
+    }
     if (!query) {
-      results.hidden = true;
+      if (suggestions) setCacheSearchPanel(false);
       return;
     }
     if (!rows.length) {
-      results.append(element('p', 'cache-search-empty muted', `No downloaded matches for “${query}”. Try fewer words or search All Reddit.`));
-      results.hidden = false;
+      const message = `No downloaded matches for “${query}”. Try fewer words or search All Reddit.`;
+      if (suggestions) {
+        ui.cacheSearchStatus.textContent = message;
+        ui.cacheSearchStatus.hidden = false;
+        setCacheSearchPanel(true);
+      } else {
+        target.append(element('p', 'cache-search-empty muted', message));
+      }
       return;
     }
     for (const row of rows.slice(0, results === ui.cacheSearchResults ? 50 : 100)) {
@@ -2660,7 +3166,7 @@
       hit.type = 'button';
       hit.dataset.threadId = row.id;
       if (typeof row.comment_id === 'string' && /^t1_[A-Za-z0-9_]+$/.test(row.comment_id)) hit.dataset.commentId = row.comment_id;
-      if (results === ui.cacheSearchResults) hit.setAttribute('role', 'option');
+      if (suggestions) hit.setAttribute('role', 'option');
       const title = element('span', 'cache-search-title', typeof row.title === 'string' ? row.title : row.id);
       const metadata = element('span', 'cache-search-meta');
       metadata.append(element('span', 'cache-search-subreddit', `r/${typeof row.subreddit === 'string' ? row.subreddit : 'unknown'}`));
@@ -2679,18 +3185,31 @@
         keyboardNavigationSequence++;
         void openKeyboardPost(hit);
       });
-      results.append(hit);
+      target.append(hit);
     }
-    if (!results.childElementCount) results.append(element('p', 'cache-search-empty muted', 'No downloaded matches.'));
-    results.hidden = false;
+    if (!target.childElementCount) {
+      const message = 'No downloaded matches.';
+      if (suggestions) {
+        ui.cacheSearchStatus.textContent = message;
+        ui.cacheSearchStatus.hidden = false;
+      } else {
+        target.append(element('p', 'cache-search-empty muted', message));
+      }
+    }
+    if (suggestions) {
+      if (target.childElementCount) {
+        ui.cacheSearchStatus.textContent = 'Downloaded matches on this device.';
+        ui.cacheSearchStatus.hidden = false;
+      }
+      setCacheSearchPanel(true);
+    }
   }
 
   function cancelCacheSearch({ hide = false } = {}) {
     window.clearTimeout(cacheSearchTimer);
     cacheSearchSequence++;
     if (hide) {
-      ui.cacheSearchResults.replaceChildren();
-      ui.cacheSearchResults.hidden = true;
+      resetCacheSearchPopover();
     }
   }
 
@@ -2698,6 +3217,7 @@
     cancelCacheSearch({ hide: true });
     ui.cacheSearch.value = '';
     ui.cacheSearchClear.disabled = true;
+    ui.cacheSearchClear.hidden = true;
     cancelRedditSearch();
     redditSearch = null;
     setFeedback('');
@@ -2708,26 +3228,47 @@
 
   function scheduleCacheSearch(delay = 150) {
     const query = ui.cacheSearch.value.trim();
+    const scope = $('#search-scope').value;
+    const subreddit = scope === 'subreddit' ? activeSubreddit : null;
     const request = ++cacheSearchSequence;
     window.clearTimeout(cacheSearchTimer);
     ui.cacheSearchClear.disabled = !ui.cacheSearch.value;
     if (!query) {
-      ui.cacheSearchResults.replaceChildren();
-      ui.cacheSearchResults.hidden = true;
+      resetCacheSearchPopover();
       return;
     }
     cacheSearchTimer = window.setTimeout(async () => {
-      ui.cacheSearchResults.replaceChildren(element('p', 'cache-search-empty muted', 'Searching this device’s cache…'));
-      ui.cacheSearchResults.hidden = false;
+      ui.cacheSearchList.replaceChildren();
+      ui.cacheSearchList.setAttribute('aria-busy', 'true');
+      ui.cacheSearchStatus.textContent = 'Searching downloaded posts…';
+      ui.cacheSearchStatus.hidden = false;
+      ui.cacheSearchStatus.classList.remove('error');
+      ui.cacheSearchRetry.hidden = true;
+      ui.cacheSearchRetry.disabled = true;
+      setCacheSearchPanel(true);
+      const isCurrent = () => request === cacheSearchSequence
+        && query === ui.cacheSearch.value.trim()
+        && scope === $('#search-scope').value
+        && (scope !== 'subreddit' || subreddit === activeSubreddit);
       try {
-        const rows = await invoke('search_cache', { query, subreddit: $('#search-scope').value === 'subreddit' ? activeSubreddit : null, limit: 50 });
-        if (request !== cacheSearchSequence || query !== ui.cacheSearch.value.trim()) return;
+        const rows = await invoke('search_cache', { query, subreddit, limit: 50 });
+        if (!isCurrent()) return;
         if (!Array.isArray(rows)) throw new Error('Native cache search returned an invalid result.');
         renderCacheSearchResults(rows.slice(0, 50), query);
       } catch (error) {
-        if (request !== cacheSearchSequence) return;
-        ui.cacheSearchResults.replaceChildren(element('p', 'cache-search-error', `Cached search failed. ${explainError(error)}`));
-        ui.cacheSearchResults.hidden = false;
+        if (!isCurrent()) return;
+        ui.cacheSearchList.setAttribute('aria-busy', 'false');
+        ui.cacheSearchStatus.textContent = `Downloaded search failed. ${explainError(error)}`;
+        ui.cacheSearchStatus.classList.add('error');
+        ui.cacheSearchStatus.hidden = false;
+        ui.cacheSearchRetry.hidden = false;
+        ui.cacheSearchRetry.disabled = false;
+        setCacheSearchPanel(true);
+      } finally {
+        if (request === cacheSearchSequence) {
+          ui.cacheSearchList.setAttribute('aria-busy', 'false');
+          ui.cacheSearchRetry.disabled = false;
+        }
       }
     }, delay);
   }
@@ -2910,7 +3451,7 @@
     cancelCacheSearch({ hide: true });
     const transition = ++operationSequence;
     const startedAt = performance.now();
-    ui.cacheSearchResults.hidden = true;
+    setCacheSearchPanel(false);
     setTab('reader');
     setReaderMessage('Opening cached post…');
     setFeedback('Opening the cached copy…');
@@ -3065,7 +3606,7 @@
       if (typeof dialog.close === 'function') dialog.close();
       else dialog.removeAttribute('open');
     }
-    ui.cacheSearchResults.hidden = true;
+    setCacheSearchPanel(false);
   }
 
   async function handleAppLink(rawLink) {
@@ -3303,7 +3844,7 @@
       return;
     }
     if (key === '/') { event.preventDefault(); focusSearch(); return; }
-    if (key === '?') { event.preventDefault(); $('#keyboard-help-dialog').showModal(); return; }
+    if (key === '?') { event.preventDefault(); closeHeaderTools(); $('#keyboard-help-dialog').showModal(); return; }
     if (!['h', 'j', 'k', 'l', 'Escape', 'Enter'].includes(key)) return;
     if (event.repeat && (key === 'l' || key === 'Enter')) { event.preventDefault(); return; }
     const community = target?.closest('.subreddit-visit');
@@ -3369,6 +3910,7 @@
   let updateInstalled = false;
 
   function openSettings() {
+    closeHeaderTools();
     if ($('#keyboard-help-dialog').open) $('#keyboard-help-dialog').close();
     if (ui.diagnosticsDialog.open) ui.diagnosticsDialog.close();
     if (!ui.settingsDialog.open) {
@@ -3377,6 +3919,20 @@
     }
     void loadPostCacheSettings();
     void loadLibraryState({ quiet: true });
+  }
+
+  function closeHeaderTools() {
+    const disclosure = $('.header-tools');
+    if (disclosure) disclosure.open = false;
+  }
+
+  function focusHeaderTools(event) {
+    const dialog = event?.currentTarget;
+    const active = document.activeElement;
+    const disclosure = $('.header-tools');
+    const focusReturnedToClosedOpener = disclosure && !disclosure.open && disclosure.contains(active);
+    if (active !== document.body && !focusReturnedToClosedOpener && !(dialog && (dialog === active || dialog.contains(active)))) return;
+    disclosure?.querySelector(':scope > summary')?.focus();
   }
 
   async function checkForUpdates(quiet = false) {
@@ -3427,9 +3983,31 @@
   }
 
   function configure() {
+    if ('IntersectionObserver' in window) {
+      listingSentinelObserver = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) void loadNextListingPage();
+      }, { root: null, rootMargin: '240px 0px', threshold: 0 });
+    }
+    ui.listingLoadMore.addEventListener('click', () => {
+      if (ui.browse.disabled || listingPageInFlight.has(activeSubreddit)) return;
+      const state = listingPaginationBySubreddit.get(activeSubreddit);
+      if (state?.error && isExpiredListingCursor(state.error)) void browseSubreddit(`/r/${activeSubreddit}`);
+      else void loadNextListingPage();
+    });
     document.addEventListener('keydown', (event) => {
       if (!(event.repeat && (event.key === 'l' || event.key === 'Enter'))) keyboardNavigationSequence++;
     }, { capture: true });
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || document.querySelector('dialog[open]')) return;
+      const options = document.querySelector('.search-options[open]');
+      const tools = document.querySelector('.header-tools[open]');
+      const disclosure = options || tools;
+      if (!disclosure) return;
+      disclosure.open = false;
+      disclosure.querySelector('summary')?.focus();
+      event.preventDefault();
+      event.stopPropagation();
+    });
     window.addEventListener('pagehide', releaseAllMediaWatches);
     window.addEventListener('keydown', (event) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
@@ -3515,12 +4093,12 @@
     ui.settingsClose.addEventListener('click', () => {
       if (typeof ui.settingsDialog.close === 'function') ui.settingsDialog.close();
       else ui.settingsDialog.removeAttribute('open');
-      ui.settingsOpen.focus();
+      focusHeaderTools();
     });
     ui.settingsDialog.addEventListener('click', (event) => {
       if (event.target === ui.settingsDialog && typeof ui.settingsDialog.close === 'function') ui.settingsDialog.close();
     });
-    ui.settingsDialog.addEventListener('close', () => ui.settingsOpen.focus());
+    ui.settingsDialog.addEventListener('close', focusHeaderTools);
     const nativeControls = [ui.input, ui.browse, ui.browseRefresh, ui.fetchAllMedia, ui.postSort, ui.topPeriod, ui.demo, ui.fileButton, ui.file, ui.clear, ui.diagnosticsRefresh, ui.supportExport, ui.cacheSearch, ui.cacheSearchSubmit, ui.cacheSearchClear, ui.postCacheHours, ui.postCacheApply, ui.subredditGroupFilter, ui.librarySearch, ui.libraryCollectionFilter, ui.libraryKindFilter, ui.libraryExport, ui.libraryImport, ui.saveLinkUrl, ui.saveLinkKind, ui.saveLinkCollection, ui.saveLinkForever, ui.saveLinkButton, ui.groupSelect, ui.groupName, ui.groupSubreddits, ui.groupPostHours, ui.groupPostForever, ui.groupMediaHours, ui.groupMediaForever, ui.groupSave, ui.groupDelete];
     if (!invoke) {
       setStatus('Native app required', 'error');
@@ -3546,10 +4124,12 @@
       cancelRedditSearch({ clearFeedback: true });
       cancelCacheSearch({ hide: true });
       if (redditSearch && ui.cacheSearch.value.trim()) void submitHeaderSearch();
+      else if (selector === '#search-scope' && ui.cacheSearch.value.trim()) scheduleCacheSearch(0);
     }));
     ui.cacheSearch.addEventListener('input', () => {
       document.querySelector('.search-options').open = false;
       ui.cacheSearchClear.disabled = !ui.cacheSearch.value;
+      ui.cacheSearchClear.hidden = !ui.cacheSearch.value;
       cancelRedditSearch({ clearFeedback: true });
       scheduleCacheSearch();
     });
@@ -3563,10 +4143,11 @@
         if (!ui.browsePanel.hidden) focusFirstListing();
         else ui.cacheSearch.blur();
       } else if (event.key === 'ArrowDown' && !ui.cacheSearchResults.hidden) {
-        const first = ui.cacheSearchResults.querySelector('.cache-search-hit');
+        const first = ui.cacheSearchList.querySelector('.cache-search-hit');
         if (first) { event.preventDefault(); first.focus(); }
       }
     });
+    ui.cacheSearchRetry.addEventListener('click', () => scheduleCacheSearch(0));
     ui.cacheSearchResults.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -3575,6 +4156,9 @@
     });
     document.addEventListener('pointerdown', (event) => {
       keyboardNavigationSequence++;
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target?.closest('.header-tools')) $('.header-tools').open = false;
+      if (!target?.closest('.search-options')) $('.search-options').open = false;
       if (!(event.target instanceof Element) || !event.target.closest('.header-search')) {
         cancelCacheSearch({ hide: true });
       }
@@ -3652,6 +4236,7 @@
       savePreferences();
     });
     ui.diagnosticsOpen.addEventListener('click', () => {
+      $('.header-tools').open = false;
       if (typeof ui.diagnosticsDialog.showModal === 'function') ui.diagnosticsDialog.showModal();
       else ui.diagnosticsDialog.setAttribute('open', '');
       void refreshAppDiagnostics();
@@ -3660,7 +4245,7 @@
       if (typeof ui.diagnosticsDialog.close === 'function') ui.diagnosticsDialog.close();
       else ui.diagnosticsDialog.removeAttribute('open');
     });
-    ui.diagnosticsDialog.addEventListener('close', () => ui.diagnosticsOpen.focus());
+    ui.diagnosticsDialog.addEventListener('close', focusHeaderTools);
     ui.demo.addEventListener('click', () => void runImport('import_fixture'));
     ui.fileButton.addEventListener('click', () => ui.file.click());
     ui.file.addEventListener('change', async () => {
@@ -3699,8 +4284,12 @@
     renderLibrary();
 
     document.addEventListener('keydown', handleNavigationKeyboard);
-    $('#keyboard-help-open').addEventListener('click', () => $('#keyboard-help-dialog').showModal());
+    $('#keyboard-help-open').addEventListener('click', () => {
+      closeHeaderTools();
+      $('#keyboard-help-dialog').showModal();
+    });
     $('#keyboard-help-close').addEventListener('click', () => $('#keyboard-help-dialog').close());
+    $('#keyboard-help-dialog').addEventListener('close', focusHeaderTools);
 
     void (async () => {
       try {
