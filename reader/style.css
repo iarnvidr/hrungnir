@@ -368,6 +368,7 @@ button:disabled { opacity: .55; cursor: wait; }
 .header-search > button { flex: 0 0 auto; }
 .header-search > input { width: 100%; min-width: 0; height: 32px; padding: 5px 9px; border: 1px solid var(--line2); border-radius: 3px; background: var(--bg); color: var(--text); font: calc(12px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)) var(--font); }
 .header-search > input:focus { outline: 2px solid var(--focus); outline-offset: 1px; }
+#cache-search-input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; display: none; }
 #cache-search-clear { flex: none; min-height: 28px; padding: 3px 7px; font-size: calc(11px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); }
 .cache-search-results { position: absolute; z-index: 30; top: calc(100% + 5px); left: 0; width: min(620px, 100%); max-height: min(62vh, 520px); overflow: auto; padding: 4px; border: 1px solid var(--line2); background: var(--panel); box-shadow: 0 9px 25px var(--shadow); }
 .cache-search-results[hidden] { display: none; }
@@ -690,7 +691,7 @@ body {
 :root[data-subreddit-tabs="horizontal"] .community-nav-section .section-heading h1 { margin: 0; }
 :root[data-subreddit-tabs="horizontal"] .community-nav-section .subreddit-list { flex: 1 1 auto; max-height: none; }
 :root[data-subreddit-tabs="horizontal"] .community-nav-section .empty { flex: none; margin: 0; }
-@media (max-width: 900px) {
+@media (max-width: 1200px) {
   .masthead { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; grid-template-areas: "brand tools . status" "search search search search"; align-items: center; gap: 6px 9px; }
   .wordmark { grid-area: brand; }
   .header-tools { grid-area: tools; }
