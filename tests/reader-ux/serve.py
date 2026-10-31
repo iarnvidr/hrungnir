@@ -1,9 +1,9 @@
 """Serve the real reader with deterministic native API fixtures for browser checks.
 
-Run python3 tests/reader-ux/serve.py, open http://localhost:18763 with
-playwright-cli, then run-code the async function in check.js. Requests are
-deliberately held open to verify loading, navigation and media independence.
-This exercises the UI contract; it does not test Reddit access or playback.
+The Python CDP runner starts this fixture on an isolated ephemeral port.
+Requests are deliberately held open to verify loading, navigation and media
+independence. This exercises the UI contract; it does not test Reddit access
+or playback.
 """
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,7 +17,10 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
-        if path in ("/", "/index.html"):
+        if path == "/__runner.html":
+            data = b"<!doctype html><html><head><meta charset='utf-8'><style>html,body{margin:0;width:100%;height:100%;overflow:hidden}#reader-fixture{display:block;width:100vw;height:100vh;border:0}</style></head><body><iframe id='reader-fixture' src='/'></iframe></body></html>"
+            kind = "text/html"
+        elif path in ("/", "/index.html"):
             data = (ROOT / "reader/index.html").read_text().replace(
                 '<script defer src="app.js">',
                 '<script src="/__fixture.js"></script><script defer src="app.js">',
