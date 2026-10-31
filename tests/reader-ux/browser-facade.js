@@ -166,6 +166,13 @@
     async waitForFunction(fn, ...args) {
       const deadline = Date.now() + 20000;
       while (Date.now() < deadline) { if (await this.evaluate(fn, args[0])) return; await new Promise(resolve => setTimeout(resolve, 20)); }
+      window.__readerUxDebug ||= [];
+      const state = await this.evaluate(() => ({
+        lastCalls: window.__ux?.calls?.slice(-6),
+        search: window.__ux?.search && {hold:window.__ux.search.hold, release:typeof window.__ux.search.release, error:window.__ux.search.error},
+        active:document.activeElement && {tag:document.activeElement.tagName,id:document.activeElement.id,value:document.activeElement.value},
+      }));
+      window.__readerUxDebug.push({op:'wait-timeout', predicate:fn.toString(), state});
       throw new Error('waitForFunction timed out');
     },
     async setViewportSize({width, height}) { return window.__readerUxHost('viewport', {width, height}); },

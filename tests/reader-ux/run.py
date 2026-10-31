@@ -221,8 +221,10 @@ def dispatch_key(cdp: Cdp, args: dict) -> None:
         for name in modifier_keys:
             mod_code, mod_vk = key_info(name)
             send("rawKeyDown", name, mod_code, mod_vk, bitmask)
-        printable = len(key) == 1 and not any(item in modifiers for item in ("control", "ctrl", "meta", "command", "alt"))
-        send("keyDown" if printable else "rawKeyDown", key, code, vk, bitmask, text=key if printable else None)
+        no_text_modifiers = not any(item in modifiers for item in ("control", "ctrl", "meta", "command", "alt"))
+        printable = (len(key) == 1 or key == "Enter") and no_text_modifiers
+        text = "\r" if key == "Enter" else key
+        send("keyDown" if printable else "rawKeyDown", key, code, vk, bitmask, text=text if printable else None)
         send("keyUp", key, code, vk, bitmask)
         for name in reversed(modifier_keys):
             mod_code, mod_vk = key_info(name)
