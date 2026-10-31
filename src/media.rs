@@ -616,6 +616,23 @@ pub fn cached_assets(root: &Path, thread: &Thread) -> Option<Vec<MediaAsset>> {
     result
 }
 
+/// Check for a valid completed local video without refreshing cache recency.
+/// The stream-candidate lookup uses this to keep offline media preferred after
+/// restart, when in-memory player state has not yet been populated.
+pub fn cached_video_available(root: &Path, thread: &Thread) -> bool {
+    if !thread.id.starts_with("t3_")
+        || thread.id.len() > 128
+        || !thread
+            .id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return false;
+    }
+    cached(&root.join(&thread.id), &sources(thread))
+        .is_some_and(|assets| assets.iter().any(|asset| asset.kind == "video"))
+}
+
 fn touch_access(directory: &Path) {
     // Directory recency controls budget LRU only. File/manifest timestamps are
     // acquisition fingerprints and must never be refreshed by playback/reuse.
@@ -1047,6 +1064,62 @@ mod reddit_hls_source_tests {
             comment_count: None,
             media_urls: vec![candidate.into()],
         }
+    }
+
+    #[test]
+    fn completed_local_video_suppresses_stream_candidate_without_touching_cache() {
+        let root = std::env::temp_dir().join(format!(
+            "reddit-offline-video-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let video = thread(
+            Some("browser"),
+            "https://v.redd.it/clip123/HLSPlaylist.m3u8?a=1234567890,AbC0123456789%2B%2F==&f=web,hls&v=1",
+        );
+        let directory = root.join(&video.id);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("clip.mp4"), b"valid cached video").unwrap();
+        let manifest = Manifest {
+            sources: sources(&video),
+            files: vec!["clip.mp4".into()],
+        };
+        std::fs::write(
+            directory.join("complete.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let modified = std::fs::metadata(&directory).unwrap().modified().unwrap();
+
+        assert!(cached_video_available(&root, &video));
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().modified().unwrap(),
+            modified,
+            "a candidate lookup must not update cache LRU timestamps"
+        );
+
+        let rotated_query = thread(
+            Some("browser"),
+            "https://v.redd.it/clip123/HLSPlaylist.m3u8?a=rotated-signature&f=web,hls&v=1",
+        );
+        assert!(cached_video_available(&root, &rotated_query));
+
+        let invalid = thread(Some("browser"), "https://v.redd.it/different/HLSPlaylist.m3u8");
+        assert!(!cached_video_available(&root, &invalid));
+
+        let incomplete = thread(Some("browser"), "https://v.redd.it/incomplete/HLSPlaylist.m3u8");
+        let incomplete_directory = root.join(&incomplete.id);
+        std::fs::write(incomplete_directory.join("complete.json"), b"not a valid manifest").unwrap();
+        assert!(!cached_video_available(&root, &incomplete));
+        assert!(!cached_video_available(
+            &root,
+            &thread(Some("browser"), "https://v.redd.it/missing/HLSPlaylist.m3u8")
+        ));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

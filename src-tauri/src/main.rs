@@ -968,6 +968,7 @@ async fn fetch_thread(
 #[tauri::command]
 fn video_stream_candidate(
     browser: State<'_, Arc<browser::Browser>>,
+    media: State<'_, MediaStore>,
     id: String,
 ) -> Result<Option<String>, String> {
     let Some(post_id) = id.strip_prefix("t3_") else {
@@ -981,7 +982,11 @@ fn video_stream_candidate(
     }
     let thread = browser.store.read(&id).map_err(|error| error.to_string())?;
     Ok(thread.and_then(|thread| {
-        reddit_offline::media::validated_reddit_hls_source(&thread).map(|url| url.to_string())
+        if reddit_offline::media::cached_video_available(&media.root, &thread) {
+            None
+        } else {
+            reddit_offline::media::validated_reddit_hls_source(&thread).map(|url| url.to_string())
+        }
     }))
 }
 
