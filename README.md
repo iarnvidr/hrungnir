@@ -55,16 +55,31 @@ library items you want protected. See [Library](docs/LIBRARY.md) for details.
 
 Data is stored in `~/Library/Application Support/io.github.iarnvidr.hrungnir/`.
 
+## Local development
+
+Install Rust 1.90+, the Tauri CLI (`cargo install tauri-cli --version 2.12.4 --locked`), Xcode Command
+Line Tools, and the helper build tools (`brew install meson ninja pkgconf`).
+Prepare the media helpers once with `python3 scripts/fetch-media-tools.py`, then
+start the desktop development build with:
+
+```sh
+sh scripts/dev.sh
+```
+
+This uses a separate app identity, `io.github.iarnvidr.hrungnir.dev`, so its
+database, browser data and settings stay separate from the installed app. It
+does not enable the updater or create a release bundle. This Rust-based
+development path does not require Node.js.
+
 ## Build from source
 
 On an Apple Silicon Mac, install the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/),
-Node.js 22, Python 3.12+, and Rust 1.90 or newer. Then:
+Python 3.12+, and Rust 1.90 or newer. Then:
 
 ```sh
 git clone https://github.com/iarnvidr/hrungnir.git
 cd hrungnir
 brew install meson ninja pkgconf
-npm ci
 python3 scripts/fetch-media-tools.py
 export MACOSX_DEPLOYMENT_TARGET=14.0
 cargo build --locked --manifest-path src-tauri/Cargo.toml \
@@ -85,7 +100,6 @@ cargo test --locked
 cargo clippy --locked --all-targets
 python3 scripts/test-macos-policy.py
 python3 scripts/test-ffmpeg-lgpl.py
-node --check reader/app.js
 ```
 
 ## Documentation and contributing

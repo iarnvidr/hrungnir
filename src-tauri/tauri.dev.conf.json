@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Hrungnir Dev",
+  "identifier": "io.github.iarnvidr.hrungnir.dev",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Hrungnir Dev",
+        "width": 1100,
+        "height": 780,
+        "minWidth": 720,
+        "minHeight": 480
+      }
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": []
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}
