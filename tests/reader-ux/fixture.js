@@ -25,12 +25,37 @@
     failCommunity: null, failAllRedirect: false, holdCommunityFor: null, completedCommunities: [],
     cacheError: false, holdCache: false, completedCacheQueries: [],
     enablePaging: false, pageError: false, holdPage: false, pageCalls: [], repeatCursor: false, pageThreads: [],
-     refreshError: false, refreshNotLoaded: false, refreshHold: false, refreshedComments: null, provideMedia: false,
+      refreshError: false, refreshNotLoaded: false, refreshHold: false, refreshedComments: null, refreshedMediaUrls: null, provideMedia: false,
+      streamCandidateCalls: [], streamPlayCalls: [], streamPlayRejectOnce: false,
   };
   const pagedThreads = threads.map(thread => ({ ...thread, subreddit: 'space' }));
   window.__ux = { calls, completed, posts, articles, threads, updates, search,
     emit: (name, payload) => listeners.get(name)?.({payload}),
     releasePost: id => posts.get(id)?.(), releaseArticle: id => articles.get(id)?.() };
+  const nativeCanPlayType = HTMLMediaElement.prototype.canPlayType;
+  HTMLMediaElement.prototype.canPlayType = function (type) {
+    return String(type).includes('mpegurl') ? 'maybe' : nativeCanPlayType.call(this, type);
+  };
+  HTMLMediaElement.prototype.play = function () {
+    search.streamPlayCalls.push(this);
+    if (search.streamPlayRejectOnce) {
+      search.streamPlayRejectOnce = false;
+      const error = new Error('Playback requires a direct gesture');
+      error.name = 'NotAllowedError';
+      return Promise.reject(error);
+    }
+    this.dispatchEvent(new Event('playing'));
+    return Promise.resolve();
+  };
+  const mediaSrc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+  Object.defineProperty(HTMLMediaElement.prototype, 'src', {
+    configurable: true,
+    get() { return this.dataset.uxStreamSrc || mediaSrc.get.call(this); },
+    set(value) {
+      if (this.getAttribute('aria-label') === 'Reddit video stream player') this.dataset.uxStreamSrc = String(value);
+      else mediaSrc.set.call(this, value);
+    },
+  });
   window.__TAURI__ = {
     event: { listen: async (name, callback) => { listeners.set(name, callback); return () => listeners.delete(name); } },
     core: { invoke: async (command, args = {}) => {
@@ -48,6 +73,10 @@
       }
       if (command === 'restart_updated_app') return null;
       if (command === 'snapshot') return snap();
+      if (command === 'video_stream_candidate') {
+        search.streamCandidateCalls.push({ ...args });
+        return 'https://v.redd.it/fixture/HLSPlaylist.m3u8';
+      }
       if (command === 'search_reddit') {
         if (search.hold) await new Promise(resolve => { search.release = resolve; });
         if (search.error) throw new Error('Search source unavailable');
@@ -111,7 +140,7 @@
             return { snapshot: snap([thread]), media: [], cache: { comments_hit: false, media_hit: false } };
           }
           if (search.refreshError) throw new Error('Reddit comments are unavailable');
-          const thread = { ...threads.find(t => t.id === args.id), comment_count: 8, comments_status: 'partial_proxy', comments: search.refreshedComments || [
+          const thread = { ...threads.find(t => t.id === args.id), media_urls: search.refreshedMediaUrls || threads.find(t => t.id === args.id).media_urls, comment_count: 8, comments_status: 'partial_proxy', comments: search.refreshedComments || [
             { id: 't1_parent', parent_id: args.id, body: 'Updated parent comment.' },
             { id: 't1_reply', parent_id: 't1_parent', body: 'A newly downloaded reply.' },
           ] };

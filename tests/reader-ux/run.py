@@ -325,6 +325,13 @@ def main() -> int:
                     result = cdp.evaluate(expression)
                 except Exception as exc:
                     try:
+                        screenshot = cdp.command("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": True})
+                        failure_path = HERE.parent.parent / "artifacts" / "reader-ux" / f"failure-{Path(filename).stem}.png"
+                        failure_path.parent.mkdir(parents=True, exist_ok=True)
+                        failure_path.write_bytes(base64.b64decode(screenshot["data"]))
+                    except Exception:
+                        pass  # Keep the original assertion failure even if capture fails.
+                    try:
                         debug = cdp.evaluate("(() => { const frame=document.querySelector('#reader-fixture'); const doc=frame?.contentDocument; return {inputTrace:(window.__readerUxDebug||[]).slice(-15), frameUrl:frame?.src||null, readyState:doc?.readyState||null, title:doc?.title||null, threadRows:doc?.querySelectorAll('.thread-item').length??null, status:doc?.querySelector('#connection-status')?.textContent||null, pageBody:doc?.body?.innerText?.slice(0,600)||null}; })()")
                     except Exception as diagnostic_error:
                         debug = {"diagnosticError": str(diagnostic_error)}

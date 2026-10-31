@@ -5,7 +5,7 @@
 //! to the probe report because Reddit HLS URLs may carry short-lived query
 //! parameters.
 
-use crate::{browser::Browser, fetch_subreddit_operation};
+use crate::{browser::Browser, fetch_subreddit_pages_operation};
 use reddit_offline::{media, Thread};
 use serde_json::{json, Value};
 use std::{
@@ -27,31 +27,14 @@ struct Playlist {
 }
 
 fn hls_candidate(thread: &Thread) -> Option<(Url, String)> {
-    for candidate in media::sources(thread) {
-        let Ok(url) = Url::parse(&candidate) else {
-            continue;
-        };
-        let segments: Vec<_> = url
-            .path()
-            .split('/')
-            .filter(|part| !part.is_empty())
-            .collect();
-        if url.scheme() != "https"
-            || url.host_str() != Some("v.redd.it")
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.port().is_some()
-            || segments.len() != 2
-            || segments[1] != "HLSPlaylist.m3u8"
-            || segments[0].is_empty()
-            || !segments[0].bytes().all(|byte| byte.is_ascii_alphanumeric())
-        {
-            continue;
-        }
-        let video_id = segments[0].to_owned();
-        return Some((url, video_id));
-    }
-    None
+    let url = media::validated_reddit_hls_source(thread)?;
+    let video_id = url
+        .path()
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .next()?
+        .to_owned();
+    Some((url, video_id))
 }
 
 fn safe_playlist_reference(base: &Url, reference: &str, video_id: &str) -> Option<Url> {
@@ -290,7 +273,7 @@ async fn webview_playback(app: &AppHandle, candidate: &Url) -> Value {
         return json!({"status":"source_encode_failed"});
     };
     let script = format!(
-        "(() => {{ const old=document.getElementById('hrungnir-hls-probe'); if(old) old.remove(); const v=document.createElement('video'); v.id='hrungnir-hls-probe'; v.controls=true; v.muted=true; v.playsInline=true; v.preload='auto'; v.style.cssText='position:fixed;left:-10000px;top:0;width:320px;height:180px'; const start=performance.now(); const emit=(name,extra={{}})=>{{ try {{ void window.__TAURI__.event.emit('{PROBE_EVENT}',{{event:name,elapsed_ms:Math.round(performance.now()-start),ready_state:v.readyState,network_state:v.networkState,width:v.videoWidth,height:v.videoHeight,...extra}}).catch(()=>{{}}); }} catch (_) {{}} }}; for(const name of ['loadedmetadata','loadeddata','canplay','playing','waiting','stalled','error']) v.addEventListener(name,()=>emit(name,name==='error'?{{media_error:v.error?.code??null}}:{{}})); if(typeof v.requestVideoFrameCallback==='function') v.requestVideoFrameCallback((now,metadata)=>emit('presented_frame',{{media_time:metadata.mediaTime??null}})); document.body.append(v); v.src={encoded_source}; v.load(); v.play().then(()=>emit('play_resolved')).catch(error=>emit('play_rejected',{{error_name:error?.name??'Error'}})); }})()"
+        "(() => {{ const old=document.getElementById('hrungnir-hls-probe'); if(old) old.remove(); const v=document.createElement('video'); v.id='hrungnir-hls-probe'; v.controls=true; v.muted=true; v.playsInline=true; v.preload='auto'; v.style.cssText='position:fixed;left:-10000px;top:0;width:320px;height:180px'; const start=performance.now(); const emit=(name,extra={{}})=>{{ try {{ void window.__TAURI__.event.emit('{PROBE_EVENT}',{{event:name,elapsed_ms:Math.round(performance.now()-start),ready_state:v.readyState,network_state:v.networkState,width:v.videoWidth,height:v.videoHeight,...extra}}).catch(()=>{{}}); }} catch (_) {{}} }}; for(const name of ['loadedmetadata','loadeddata','canplay','playing','waiting','stalled','error']) v.addEventListener(name,()=>emit(name,name==='error'?{{media_error:v.error?.code??null}}:{{}})); v.addEventListener('loadedmetadata',()=>v.play().then(()=>emit('play_resolved')).catch(error=>emit('play_rejected',{{error_name:error?.name??'Error'}})),{{once:true}}); if(typeof v.requestVideoFrameCallback==='function') v.requestVideoFrameCallback((now,metadata)=>emit('presented_frame',{{media_time:metadata.mediaTime??null}})); document.body.append(v); v.src={encoded_source}; }})()"
     );
     if let Err(error) = window.eval(&script) {
         app.unlisten(listener);
@@ -350,7 +333,7 @@ async fn webview_playback(app: &AppHandle, candidate: &Url) -> Value {
 
 pub async fn run(app: &AppHandle, browser: &Arc<Browser>, subreddit: &str) -> Value {
     let listing_started = Instant::now();
-    let listing = fetch_subreddit_operation(browser, None, subreddit, "hot", "day").await;
+    let listing = fetch_subreddit_pages_operation(browser, subreddit, "hot", "day", 3).await;
     let snapshot = match listing {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -358,6 +341,7 @@ pub async fn run(app: &AppHandle, browser: &Arc<Browser>, subreddit: &str) -> Va
                 "name":format!("video:{subreddit}"),
                 "status":"listing_failed",
                 "error":error,
+                "requested_pages":3,
                 "listing_elapsed_ms":listing_started.elapsed().as_millis() as u64,
             });
         }
@@ -374,6 +358,7 @@ pub async fn run(app: &AppHandle, browser: &Arc<Browser>, subreddit: &str) -> Va
             "name":format!("video:{subreddit}"),
             "status":"no_public_reddit_hls_candidate",
             "thread_count":snapshot.threads.len(),
+            "listing_page_counts":snapshot.diagnostics["listing_page_counts"],
             "listing_elapsed_ms":listing_started.elapsed().as_millis() as u64,
         });
     };
@@ -402,6 +387,7 @@ pub async fn run(app: &AppHandle, browser: &Arc<Browser>, subreddit: &str) -> Va
         "candidate_host":"v.redd.it",
         "candidate_path":candidate_path,
         "thread_count":snapshot.threads.len(),
+        "listing_page_counts":snapshot.diagnostics["listing_page_counts"],
         "listing_elapsed_ms":listing_elapsed_ms,
         "manifest":manifest,
         "native_wkwebview":playback,

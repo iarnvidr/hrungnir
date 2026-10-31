@@ -182,9 +182,24 @@ async (page) => {
   assert(!(await page.locator('#listing-load-more').isVisible()), 'end of listing left a load button enabled');
   assert(await page.locator('.thread-item[data-thread-id="t3_fixture27"] .inline-media-toggle').isVisible(), 'continued video post lost its media affordance');
   assert(!(await page.evaluate(() => window.__ux.calls.some(call => call.command === 'fetch_thread' && call.args.id === 't3_fixture27'))), 'continuation fetched video media before the user asked to play it');
-  await page.evaluate(() => { window.__ux.search.provideMedia = true; });
+  await page.waitForFunction(() => window.__ux.search.streamCandidateCalls.some(call => call.id === 't3_fixture27') && document.querySelector('.thread-item[data-thread-id="t3_fixture27"] .inline-media-toggle')?.textContent === 'Play video');
+  assert(await page.evaluate(() => window.__ux.search.streamPlayCalls.length === 0), 'video began playing before the user clicked Play');
+  await page.evaluate(() => { window.__ux.search.provideMedia = true; window.__ux.search.streamPlayRejectOnce = true; });
   await page.locator('.thread-item[data-thread-id="t3_fixture27"] .inline-media-toggle').click();
   await page.waitForFunction(() => window.__ux.calls.some(call => call.command === 'fetch_thread' && call.args.id === 't3_fixture27'));
+  await page.waitForFunction(() => document.querySelector('.thread-item[data-thread-id="t3_fixture27"] .streaming-media-status')?.textContent.includes('saved for offline'));
+  assert(await page.evaluate(() => {
+    const player = document.querySelector('.thread-item[data-thread-id="t3_fixture27"] .streaming-media-panel video');
+    window.__ux.streamPlayer = player;
+    return Boolean(player && player.src === 'https://v.redd.it/fixture/HLSPlaylist.m3u8' && window.__ux.search.streamPlayCalls.includes(player));
+  }), 'Play did not start the validated Reddit stream from the click gesture');
+  assert((await page.locator('.thread-item[data-thread-id="t3_fixture27"] .streaming-media-status').innerText()).includes('press Play in the player'), 'blocked automatic playback hid the controls player instead of inviting a direct Play');
+  assert(await page.evaluate(() => document.querySelector('.thread-item[data-thread-id="t3_fixture27"] .streaming-media-panel video') === window.__ux.streamPlayer), 'NotAllowedError removed the player before native controls could be used');
+  await page.evaluate(() => window.__ux.streamPlayer.play());
+  assert(await page.evaluate(() => document.querySelector('.thread-item[data-thread-id="t3_fixture27"] .streaming-media-panel video') === window.__ux.streamPlayer), 'offline media completion replaced the active stream player');
+  await page.evaluate(() => window.__ux.streamPlayer.dispatchEvent(new Event('error')));
+  await page.waitForFunction(() => document.querySelector('.thread-item[data-thread-id="t3_fixture27"] .media-section video'));
+  assert(await page.locator('.thread-item[data-thread-id="t3_fixture27"] .media-section video').getAttribute('src') !== 'https://v.redd.it/fixture/HLSPlaylist.m3u8', 'stream error did not fall back to the downloaded local video');
 
   // Refreshing comments updates cached text/counts without remounting the
   // current video player or discarding the prior discussion on failure.
@@ -212,9 +227,14 @@ async (page) => {
   assert(await page.evaluate(() => (document.querySelector('#thread-view video').currentSrc || document.querySelector('#thread-view video').src) === window.__ux.videoSourceBeforeRefresh), 'failed discussion refresh replaced the video source');
   assert((await page.locator('#discussion-comments').innerText()).includes(oldDiscussion.split('\n')[0]), 'failed discussion refresh removed the cached discussion');
   assert((await page.locator('#discussion-refresh-status').innerText()).includes('still available'), 'refresh failure did not explain that cached comments remain available');
-  await page.evaluate(() => { window.__ux.search.refreshError = false; });
+  await page.evaluate(() => {
+    window.__ux.search.candidateCallsBeforeRefresh = window.__ux.search.streamCandidateCalls.filter(call => call.id === 't3_video').length;
+    window.__ux.search.refreshError = false;
+    window.__ux.search.refreshedMediaUrls = ['https://v.redd.it/updated/clip.mp4'];
+  });
   await page.keyboard.press('Enter');
   await page.waitForFunction(() => document.querySelector('.comments-header')?.textContent === '8 comments · 2 downloaded');
+  await page.waitForFunction(() => window.__ux.search.streamCandidateCalls.filter(call => call.id === 't3_video').length > window.__ux.search.candidateCallsBeforeRefresh);
   assert((await page.locator('#thread-view').innerText()).includes('A newly downloaded reply.'), 'discussion refresh did not show new comments');
   assert(await page.evaluate(() => document.querySelector('#thread-view video') === window.__ux.videoBeforeRefresh), 'successful discussion refresh remounted the video player');
   assert(await page.locator('.discussion-refresh').evaluate(node => node === document.activeElement), 'successful keyboard refresh did not restore focus to the refresh control');
@@ -280,5 +300,5 @@ async (page) => {
   await page.locator('#listing-load-more').click();
   await page.waitForFunction(() => document.querySelector('#listing-pagination-status').textContent.includes('same page again'));
   assert(!(await page.locator('#listing-load-more').isVisible()), 'repeated continuation cursor did not stop pagination');
-  return {passed:['failed subreddit preserves listing and focus','retry commits requested community','r/all redirect explanation and explicit search action','stale subreddit response cannot replace newer search','stale community completion preserves Library and clears busy state','downloaded search retry and retained focus/query','stale suggestion response cannot cross search scopes','pagination failure preserves posts and retries same cursor','pagination deduplicates and auto loads to exhaustion without scroll jump','repeated continuation cursor stops safely','refresh failure retains comments and video player; refresh updates source total and new replies','More/search Options disclosures close with Escape and outside interaction','720px dark theme at enlarged text','1100px light theme']};
+  return {passed:['failed subreddit preserves listing and focus','retry commits requested community','r/all redirect explanation and explicit search action','stale subreddit response cannot replace newer search','stale community completion preserves Library and clears busy state','downloaded search retry and retained focus/query','stale suggestion response cannot cross search scopes','pagination failure preserves posts and retries same cursor','pagination deduplicates and auto loads to exhaustion without scroll jump','continued media hint streams only on explicit play, survives offline save, and falls back locally','repeated continuation cursor stops safely','refresh rejects listing-only responses and preserves keyboard focus, comments, and video; refresh updates source total and new replies','More/search Options disclosures close with Escape and outside interaction','720px dark theme at enlarged text','1100px light theme']};
 }

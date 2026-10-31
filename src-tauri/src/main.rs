@@ -966,6 +966,26 @@ async fn fetch_thread(
 }
 
 #[tauri::command]
+fn video_stream_candidate(
+    browser: State<'_, Arc<browser::Browser>>,
+    id: String,
+) -> Result<Option<String>, String> {
+    let Some(post_id) = id.strip_prefix("t3_") else {
+        return Err("Invalid Reddit post ID".into());
+    };
+    if post_id.is_empty()
+        || post_id.len() > 64
+        || !post_id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err("Invalid Reddit post ID".into());
+    }
+    let thread = browser.store.read(&id).map_err(|error| error.to_string())?;
+    Ok(thread.and_then(|thread| {
+        reddit_offline::media::validated_reddit_hls_source(&thread).map(|url| url.to_string())
+    }))
+}
+
+#[tauri::command]
 async fn app_diagnostics(
     browser: State<'_, Arc<browser::Browser>>,
     media: State<'_, MediaStore>,
@@ -996,7 +1016,7 @@ async fn app_diagnostics(
                 }
             }
         }
-        serde_json::json!({"bytes_on_disk":bytes,"files":files,"completed_posts":completed,"completed_budget_bytes":512*1024*1024,"max_file_bytes":128*1024*1024,"playback":"completed local files; byte-range server"})
+        serde_json::json!({"bytes_on_disk":bytes,"files":files,"completed_posts":completed,"completed_budget_bytes":512*1024*1024,"max_file_bytes":128*1024*1024,"playback":"validated v.redd.it HLS stream when available; otherwise complete local files via byte-range server"})
     }).await.map_err(|e| e.to_string())?;
     report["media"] = usage;
     report["media"]["download_busy"] = serde_json::json!(media.gate.try_lock().is_err());
@@ -1416,6 +1436,7 @@ fn main() {
             web_links::fetch_link_article,
             web_links::fetch_link_previews,
             fetch_thread,
+            video_stream_candidate,
             app_diagnostics,
             trust_source_certificate,
             export_support_bundle,

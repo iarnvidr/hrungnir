@@ -79,7 +79,11 @@ async (page) => {
     assert(community === 'vertical' ? c1.y > c0.y + 10 : Math.abs(c1.y - c0.y) < 2, `${post}/${community}: wrong community orientation`);
     for (const width of [1200, 1100, 720, 500]) {
       await page.setViewportSize({width, height: 760});
-      assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), `${post}/${community}: horizontal page overflow at ${width}`);
+      const overflow = await page.evaluate(() => [...document.querySelectorAll('body *')].map(node => {
+        const rect = node.getBoundingClientRect();
+        return {tag:node.tagName, id:node.id, className:String(node.className || '').slice(0,60), left:Math.round(rect.left), right:Math.round(rect.right), width:Math.round(rect.width)};
+      }).filter(item => item.width > 0 && (item.left < -1 || item.right > innerWidth + 1)).slice(0,6));
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), `${post}/${community}: horizontal page overflow at ${width}; elements=${JSON.stringify(overflow)}`);
     }
     await page.setViewportSize({width: 1200, height: 760});
     await page.evaluate(() => window.scrollTo(0, 500));

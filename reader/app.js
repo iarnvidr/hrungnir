@@ -90,6 +90,8 @@
   const threadDownloadsInFlight = new Map();
   const postLoadsInFlight = new Map();
   const readerMediaStates = new Map();
+  const videoStreamCandidates = new Map();
+  const streamPlayersByThread = new Map();
   const viewScrollPositions = new Map();
   const collapsedCommentIds = new Set();
   let scrollView = null;
@@ -467,6 +469,12 @@
 
   function releaseMediaWatchesWithin(container) {
     if (!container || typeof container.querySelectorAll !== 'function') return;
+    for (const [id, stream] of streamPlayersByThread) {
+      if (container.contains(stream.player)) {
+        stopStreamPlayer(stream);
+        streamPlayersByThread.delete(id);
+      }
+    }
     for (const player of container.querySelectorAll('video, audio')) {
       const state = mediaWatchPlayers.get(player);
       if (!state) continue;
@@ -1458,6 +1466,7 @@
       const hint = mediaHintsByThread.get(thread.id);
       const assets = mediaByThread.get(thread.id) || [];
       const cachedKinds = [...new Set(assets.map((asset) => asset && asset.kind).filter((kind) => ['image', 'video', 'audio'].includes(kind)))];
+      if (hint?.kind === 'video' && !cachedKinds.includes('video')) void prepareVideoStreamCandidate(thread.id);
       const kindLabel = (kind) => ({ image: 'image', video: 'video', audio: 'audio', media: 'media' })[kind] || 'media';
       const cachedLabel = cachedKinds.length ? `Cached ${cachedKinds.map(kindLabel).join(' + ')}` : '';
       const hintedLabel = hint && ['image', 'video', 'audio', 'media'].includes(hint.kind)
@@ -1475,9 +1484,10 @@
       if (cue) {
         actions.append(element('span', cachedLabel ? 'media-kind-cue cached' : 'media-kind-cue', cue));
         const expanded = inlineExpanded.has(thread.id);
-        const verb = expanded ? 'Hide' : (cachedLabel ? 'Show' : 'Load');
+        const streamReady = hint?.kind === 'video' && Boolean(videoStreamCandidates.get(thread.id)?.candidate) && supportsNativeHls() && !cachedKinds.includes('video');
+        const verb = expanded ? 'Hide' : (streamReady ? 'Play' : cachedLabel ? 'Show' : 'Load');
         const actionKind = cachedKinds.length > 1 ? 'media' : (cachedKinds[0] || (hint && hint.kind) || 'media');
-        const mediaButton = element('button', 'button secondary inline-media-toggle', `${verb} ${kindLabel(actionKind)}`);
+        const mediaButton = element('button', 'button secondary inline-media-toggle', streamReady && !expanded ? 'Play video' : `${verb} ${kindLabel(actionKind)}`);
         mediaButton.type = 'button';
         mediaButton.dataset.testid = 'inline-media-toggle';
         mediaButton.setAttribute('aria-expanded', String(expanded));
@@ -2313,7 +2323,7 @@
     const refreshState = discussionRefreshStates.get(thread.id) || {};
     const heading = element('div', 'comments-heading');
     heading.append(header);
-    if (isSubredditListingThread(thread)) {
+    if (['browser', 'proxy'].includes(thread.source)) {
       const refresh = element('button', 'button secondary discussion-refresh', refreshState.error ? 'Retry refresh' : (refreshState.loading ? 'Refreshing…' : 'Refresh discussion'));
       refresh.type = 'button';
       refresh.setAttribute('aria-disabled', String(Boolean(refreshState.loading)));
@@ -2386,7 +2396,12 @@
     if (status) { status.hidden = false; status.classList.remove('error'); status.textContent = 'Refreshing discussion from Reddit.'; }
     try {
       const result = await invoke('fetch_thread', { id, include_media: false, refresh: true });
+      const previousCandidateSource = videoCandidateSourceKey(id);
       const thread = acceptThreadDownload(result, id);
+      if (mediaHintsByThread.get(id)?.kind === 'video' || previousCandidateSource !== videoCandidateSourceKey(id)) {
+        videoStreamCandidates.delete(id);
+        void prepareVideoStreamCandidate(id, true);
+      }
       if (Array.isArray(result.media) && (result.media.length || !mediaByThread.has(id))) mediaByThread.set(id, result.media);
       discussionRefreshStates.set(id, { loading: false, message: `Discussion updated · ${thread.comments.length} comments downloaded.`, error: '' });
       updateThreadRowCommentCount(id, thread);
@@ -2622,18 +2637,128 @@
     ui.fetchAllMedia.setAttribute('aria-label', bulkMediaRun ? 'Cancel fetching media for listed posts' : `Fetch media for ${candidates.length} listed posts`);
   }
 
+  function validVideoStreamCandidate(candidate) {
+    try {
+      const url = new URL(candidate);
+      return url.protocol === 'https:' && url.hostname === 'v.redd.it' && !url.username && !url.password && !url.port && !url.hash
+        && /^\/[A-Za-z0-9_-]+\/HLSPlaylist\.m3u8$/.test(url.pathname);
+    } catch (_) { return false; }
+  }
+
+  function supportsNativeHls() {
+    try { return Boolean(document.createElement('video').canPlayType('application/vnd.apple.mpegurl')); }
+    catch (_) { return false; }
+  }
+
+  function inlineVideoActionLabel(id) {
+    if ((mediaByThread.get(id) || []).some((asset) => asset?.kind === 'video')) return 'Show video';
+    return videoStreamCandidates.get(id)?.candidate && supportsNativeHls() ? 'Play video' : 'Load video';
+  }
+
+  function videoCandidateSourceKey(id) {
+    const thread = threadCache.get(id);
+    return thread ? [thread.source || '', thread.permalink || '', thread.link_url || '', ...(thread.media_urls || [])].join('|') : '';
+  }
+
+  function stopStreamPlayer(stream) {
+    try { stream.player.pause(); } catch (_) { /* detached player */ }
+    stream.player.removeAttribute('src');
+    try { stream.player.load(); } catch (_) { /* detached player */ }
+  }
+
+  function fallbackFromVideoStream(id, stream, message) {
+    if (streamPlayersByThread.get(id) !== stream) return;
+    stream.failed = true;
+    streamPlayersByThread.delete(id);
+    stopStreamPlayer(stream);
+    stream.status.textContent = message;
+    void loadInlineMedia(id);
+  }
+
+  function prepareVideoStreamCandidate(id, force = false) {
+    const sourceKey = videoCandidateSourceKey(id);
+    const existing = videoStreamCandidates.get(id);
+    if (existing?.sourceKey === sourceKey) {
+      if (existing.promise) return existing.promise;
+      if (existing.candidate && !force) return Promise.resolve(existing.candidate);
+      if (!force && existing.retryAt > Date.now()) return Promise.resolve(null);
+    }
+    const state = { candidate: null, ready: false, promise: null, sourceKey, retryAt: 0 };
+    state.promise = Promise.resolve().then(() => invoke('video_stream_candidate', { id })).then((candidate) => {
+      state.candidate = typeof candidate === 'string' && validVideoStreamCandidate(candidate) ? candidate : null;
+      return state.candidate;
+    }).catch(() => null).finally(() => {
+      state.ready = true;
+      if (!state.candidate) state.retryAt = Date.now() + 4000;
+      const button = ui.list.querySelector(`[data-thread-id="${CSS.escape(id)}"] .inline-media-toggle`);
+      const thread = threadCache.get(id);
+      const hint = mediaHintsByThread.get(id);
+      if (button && hint?.kind === 'video' && !inlineExpanded.has(id)) {
+        const label = inlineVideoActionLabel(id);
+        button.textContent = label;
+        button.setAttribute('aria-label', `${label.replace(/ video$/, '')} ${thread?.title || 'Reddit'} video`);
+      }
+    });
+    videoStreamCandidates.set(id, state);
+    return state.promise;
+  }
+
+  function startInlineVideoStream(id, region) {
+    const candidate = videoStreamCandidates.get(id)?.candidate;
+    if ((mediaByThread.get(id) || []).some((asset) => asset?.kind === 'video')) return false;
+    if (!candidate || !validVideoStreamCandidate(candidate) || !supportsNativeHls()) return false;
+    const probe = document.createElement('video');
+    probe.controls = true;
+    probe.preload = 'metadata';
+    probe.playsInline = true;
+    probe.setAttribute('aria-label', 'Reddit video stream player');
+    const panel = element('div', 'streaming-media-panel');
+    const status = element('p', 'small muted streaming-media-status', 'Streaming from Reddit · saving offline…');
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    panel.append(probe, status);
+    probe.src = candidate;
+    region.replaceChildren(panel);
+    const stream = { player: probe, panel, status, failed: false, playbackBlocked: false, offlineReady: false };
+    streamPlayersByThread.set(id, stream);
+    probe.addEventListener('error', () => {
+      if (streamPlayersByThread.get(id) !== stream) return;
+      fallbackFromVideoStream(id, stream, 'Reddit could not play this stream. Trying the offline video…');
+    });
+    const play = probe.play();
+    if (play && typeof play.catch === 'function') play.catch((error) => {
+      if (streamPlayersByThread.get(id) !== stream) return;
+      if (error?.name === 'NotAllowedError') {
+        stream.playbackBlocked = true;
+        status.textContent = `Streaming from Reddit · press Play in the player${stream.offlineReady ? ' · saved for offline.' : ' · saving offline…'}`;
+      } else fallbackFromVideoStream(id, stream, 'Reddit could not start this stream. Trying the offline video…');
+    });
+    void loadInlineMedia(id);
+    return true;
+  }
+
   async function loadInlineMedia(id) {
     const inline = ui.list.querySelector(`[data-inline-media-for="${CSS.escape(id)}"]`);
     if (!inline) return false;
     const existingMedia = inline.querySelector('.media-section');
-    const progress = element('p', 'muted small inline-media-progress', existingMedia ? 'Checking cached post and media…' : 'Opening post and media…');
-    if (existingMedia) inline.append(progress);
+    const streamed = streamPlayersByThread.get(id);
+    const progress = element('p', 'muted small inline-media-progress', existingMedia ? 'Checking cached post and media…' : 'Saving video for offline…');
+    if (existingMedia || streamed?.player.isConnected) inline.append(progress);
     else inline.replaceChildren(progress);
     const startedAt = performance.now();
     try {
       const download = await getThreadDownload(id);
       const current = ui.list.querySelector(`[data-inline-media-for="${CSS.escape(id)}"]`);
       if (!current || !inlineExpanded.has(id)) return true;
+      const liveStream = streamPlayersByThread.get(id);
+      if (liveStream?.player.isConnected && !liveStream.failed) {
+        progress.remove();
+        liveStream.offlineReady = download.media.some((asset) => asset?.kind === 'video');
+        liveStream.status.textContent = `Streaming from Reddit${liveStream.playbackBlocked ? ' · press Play in the player' : ''} · ${liveStream.offlineReady ? 'saved for offline.' : 'no offline video copy is available yet.'}`;
+        updateFetchAllMediaControl();
+        recordClientEvent('inline_media', performance.now() - startedAt, download.media.length);
+        return true;
+      }
       if (existingMedia && download.cached && existingMedia.isConnected) {
         progress.remove();
         updateFetchAllMediaControl();
@@ -2648,6 +2773,12 @@
       recordClientEvent('inline_media', performance.now() - startedAt, 0);
       const current = ui.list.querySelector(`[data-inline-media-for="${CSS.escape(id)}"]`);
       if (!current) return;
+      const liveStream = streamPlayersByThread.get(id);
+      if (liveStream?.player.isConnected && !liveStream.failed) {
+        progress.remove();
+        liveStream.status.textContent = `Streaming from Reddit · offline save failed: ${explainError(error)}`;
+        return;
+      }
       const message = element('p', 'small error-text', `Could not load local media. ${explainError(error)} `);
       const retry = element('button', 'link-button', 'Retry');
       retry.type = 'button';
@@ -2719,16 +2850,30 @@
       inlineExpanded.delete(id);
       const region = card.querySelector('.inline-media');
       if (region) region.hidden = true;
+      const stream = streamPlayersByThread.get(id);
+      if (stream) try { stream.player.pause(); } catch (_) { /* detached player */ }
       const button = card.querySelector('.inline-media-toggle');
-      if (button) { button.textContent = 'Expand media'; button.setAttribute('aria-expanded', 'false'); }
+      if (button) { button.textContent = mediaHintsByThread.get(id)?.kind === 'video' ? inlineVideoActionLabel(id) : 'Expand media'; button.setAttribute('aria-expanded', 'false'); }
       return;
     }
     inlineExpanded.add(id);
     const region = card.querySelector('.inline-media');
     const button = card.querySelector('.inline-media-toggle');
     if (region) region.hidden = false;
-    if (button) { button.textContent = 'Hide media'; button.setAttribute('aria-expanded', 'true'); }
-    await loadInlineMedia(id);
+    if (button) { button.textContent = mediaHintsByThread.get(id)?.kind === 'video' ? 'Hide video' : 'Hide media'; button.setAttribute('aria-expanded', 'true'); }
+    const stream = streamPlayersByThread.get(id);
+    if (stream?.player.isConnected && !(mediaByThread.get(id) || []).some((asset) => asset?.kind === 'video')) {
+      const play = stream.player.play();
+      if (play && typeof play.catch === 'function') play.catch((error) => {
+        if (error?.name === 'NotAllowedError') {
+          stream.playbackBlocked = true;
+          stream.status.textContent = `Streaming from Reddit · press Play in the player${stream.offlineReady ? ' · saved for offline.' : ' · saving offline…'}`;
+        } else fallbackFromVideoStream(id, stream, 'Reddit could not restart this stream. Trying the offline video…');
+      });
+      return;
+    }
+    if (stream) streamPlayersByThread.delete(id);
+    if (!region || !startInlineVideoStream(id, region)) await loadInlineMedia(id);
   }
 
   function normalizeSubreddit(value) {

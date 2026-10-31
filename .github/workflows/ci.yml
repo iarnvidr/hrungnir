@@ -28,7 +28,10 @@ jobs:
           verb: call
           module: ./ci/dagger/check
           args: reader-report --source . export --path artifacts/reader-ux
+      - name: Enforce reader interaction results
+        run: python3 scripts/reader-ux-report.py --verify artifacts/reader-ux/result.json
       - name: Upload rendered reader review
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hrungnir-reader-ux-${{ github.run_id }}-${{ github.run_attempt }}
