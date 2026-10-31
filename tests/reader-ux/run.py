@@ -209,11 +209,11 @@ def dispatch_key(cdp: Cdp, args: dict) -> None:
             modifier_keys.append(name)
     code, vk = key_info(key)
     bitmask = modifier_mask(modifiers)
-    def send(event_type: str, event_key: str, event_code: str, virtual_key: int, flags: int, repeat: bool = False) -> None:
+    def send(event_type: str, event_key: str, event_code: str, virtual_key: int, flags: int, repeat: bool = False, text: str | None = None) -> None:
         payload = {"type": event_type, "key": event_key, "code": event_code, "windowsVirtualKeyCode": virtual_key, "nativeVirtualKeyCode": virtual_key, "modifiers": flags}
-        if event_type == "char":
-            payload["text"] = event_key
-            payload["unmodifiedText"] = event_key
+        if text is not None:
+            payload["text"] = text
+            payload["unmodifiedText"] = text.lower() if len(text) == 1 and text.isalpha() else text
         if repeat:
             payload["autoRepeat"] = True
         cdp.command("Input.dispatchKeyEvent", payload)
@@ -221,15 +221,14 @@ def dispatch_key(cdp: Cdp, args: dict) -> None:
         for name in modifier_keys:
             mod_code, mod_vk = key_info(name)
             send("rawKeyDown", name, mod_code, mod_vk, bitmask)
-        send("keyDown", key, code, vk, bitmask)
-        if len(key) == 1 and key not in (",", "."):
-            send("char", key, code, vk, bitmask)
+        printable = len(key) == 1 and not any(item in modifiers for item in ("control", "ctrl", "meta", "command", "alt"))
+        send("keyDown" if printable else "rawKeyDown", key, code, vk, bitmask, text=key if printable else None)
         send("keyUp", key, code, vk, bitmask)
         for name in reversed(modifier_keys):
             mod_code, mod_vk = key_info(name)
             send("keyUp", name, mod_code, mod_vk, bitmask)
     elif action == "down":
-        send("keyDown", key, code, vk, bitmask, repeat=key in cdp.pressed_keys)
+        send("rawKeyDown", key, code, vk, bitmask, repeat=key in cdp.pressed_keys)
         cdp.pressed_keys.add(key)
     elif action == "up":
         send("keyUp", key, code, vk, bitmask)
