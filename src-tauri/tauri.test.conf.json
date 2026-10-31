@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Hrungnir Test",
+  "identifier": "io.github.iarnvidr.hrungnir.dev.test",
+  "app": {
+    "windows": [{ "label": "main", "title": "Hrungnir Test", "width": 1100, "height": 780, "minWidth": 720, "minHeight": 480 }]
+  },
+  "bundle": { "active": false },
+  "plugins": { "updater": { "endpoints": [] } }
+}

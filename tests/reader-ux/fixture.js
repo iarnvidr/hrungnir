@@ -24,6 +24,7 @@
     rows: threads, hits: [], error: false, comments: null,
     failCommunity: null, failAllRedirect: false, holdCommunityFor: null, completedCommunities: [],
     cacheError: false, holdCache: false, completedCacheQueries: [],
+    enableSearchPaging: false, searchPageError: false, holdSearchPage: false, emptySearchTerminal: false, searchPageCalls: [],
       enablePaging: false, pageError: false, pageExpired: false, freshCursorNext: false, holdPage: false, pageCalls: [], repeatCursor: false, pageThreads: [],
       refreshError: false, refreshNotLoaded: false, refreshHold: false, refreshedComments: null, refreshedMediaUrls: null, provideMedia: false,
       streamCandidateCalls: [], streamPlayCalls: [], streamPlayRejectOnce: false,
@@ -80,7 +81,16 @@
       if (command === 'search_reddit') {
         if (search.hold) await new Promise(resolve => { search.release = resolve; });
         if (search.error) throw new Error('Search source unavailable');
-        return snap(args.subreddit ? search.rows.filter(thread => thread.subreddit === args.subreddit) : search.rows);
+        const rows = args.subreddit ? search.rows.filter(thread => thread.subreddit === args.subreddit) : search.rows;
+        if (args.cursor) {
+          search.searchPageCalls.push({ ...args });
+          if (search.holdSearchPage) await new Promise(resolve => { search.releaseSearchPage = resolve; });
+          if (search.searchPageError) throw new Error('Search continuation unavailable');
+          if (search.emptySearchTerminal) return { ...snap([]), search_page: { cursor: null, exhausted: true } };
+          return { ...snap(rows.slice(23, 28)), search_page: { cursor: null, exhausted: true } };
+        }
+        if (search.enableSearchPaging) return { ...snap(rows.slice(0, 25)), search_page: { cursor: 'search-page-1', exhausted: false } };
+        return snap(rows);
       }
       if (command === 'search_cache') {
         const rows = structuredClone(search.hits);

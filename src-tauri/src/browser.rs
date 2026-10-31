@@ -157,6 +157,38 @@ struct ListingCursor {
     created_at: Instant,
 }
 
+#[derive(Clone)]
+struct SearchContinuation {
+    search_url: String,
+    url: String,
+}
+
+#[derive(Clone)]
+struct SearchCursor {
+    scope: String,
+    continuations: VecDeque<SearchContinuation>,
+    pending_ids: VecDeque<String>,
+    seen_ids: BTreeSet<String>,
+    visited_urls: BTreeSet<String>,
+    created_at: Instant,
+}
+
+const SEARCH_CURSOR_TTL: Duration = Duration::from_secs(15 * 60);
+const SEARCH_CURSOR_LIMIT: usize = 128;
+const SEARCH_SEEN_LIMIT: usize = 5000;
+
+fn search_cursor_matches_scope(requested: &str, registered: &str) -> bool {
+    requested == registered
+}
+
+fn search_cursor_expired(cursor: &SearchCursor) -> bool {
+    cursor.created_at.elapsed() > SEARCH_CURSOR_TTL
+}
+
+fn invalidate_search_generation(cursors: &mut BTreeMap<String, SearchCursor>, scope: &str) {
+    cursors.retain(|_, cursor| cursor.scope != scope);
+}
+
 fn invalidate_listing_generation(cursors: &mut BTreeMap<String, ListingCursor>, scope: &str) {
     cursors.retain(|_, cursor| cursor.scope != scope);
 }
@@ -182,6 +214,57 @@ mod listing_generation_tests {
         assert!(cursors.contains_key("soccer"));
     }
 }
+
+#[cfg(test)]
+mod search_cursor_tests {
+    use super::*;
+
+    #[test]
+    fn search_cursor_scope_binds_query_community_sort_period_and_smart() {
+        let key = |query: &str, subreddit: Option<&str>, sort: &str, period: &str, smart: bool| {
+            format!(
+                "{}|smart={smart}",
+                reddit_offline::browsing::search_url(query, subreddit, sort, period).unwrap()
+            )
+        };
+        let expected = key("rust", None, "relevance", "week", true);
+        assert!(search_cursor_matches_scope(&expected, &expected));
+        for mismatch in [
+            key("rust", None, "new", "week", true),
+            key("rust", None, "relevance", "month", true),
+            key("rust", Some("rust"), "relevance", "week", true),
+            key("unsafe rust", None, "relevance", "week", true),
+            key("rust", None, "relevance", "week", false),
+        ] {
+            assert!(!search_cursor_matches_scope(&mismatch, &expected));
+        }
+    }
+
+    #[test]
+    fn refreshing_a_search_invalidates_only_its_cursor_and_old_cursors_expire() {
+        let scope = "https://www.reddit.com/search/?q=rust&sort=relevance&t=all|smart=true";
+        let other = "https://www.reddit.com/r/rust/search/?q=rust&restrict_sr=on&sort=relevance&t=all|smart=true";
+        let make = |scope: &str, age: Duration| SearchCursor {
+            scope: scope.into(),
+            continuations: VecDeque::new(),
+            pending_ids: VecDeque::new(),
+            seen_ids: BTreeSet::new(),
+            visited_urls: BTreeSet::new(),
+            created_at: Instant::now() - age,
+        };
+        let mut cursors = BTreeMap::from([
+            ("same".into(), make(scope, Duration::ZERO)),
+            ("other".into(), make(other, Duration::ZERO)),
+            ("expired".into(), make(scope, SEARCH_CURSOR_TTL + Duration::from_secs(1))),
+        ]);
+        assert!(search_cursor_expired(cursors.get("expired").unwrap()));
+        cursors.retain(|_, cursor| !search_cursor_expired(cursor));
+        invalidate_search_generation(&mut cursors, scope);
+        assert!(!cursors.contains_key("same"));
+        assert!(!cursors.contains_key("expired"));
+        assert!(cursors.contains_key("other"));
+    }
+}
 pub struct Browser {
     app: AppHandle,
     pub store: DesktopStore,
@@ -195,6 +278,7 @@ pub struct Browser {
     active: Mutex<BTreeMap<String, (u64, u64)>>,
     ready: tokio::sync::Notify,
     listing_cursors: Mutex<BTreeMap<String, ListingCursor>>,
+    search_cursors: Mutex<BTreeMap<String, SearchCursor>>,
 }
 
 impl Browser {
@@ -236,6 +320,7 @@ impl Browser {
             active: Mutex::new(BTreeMap::new()),
             ready: tokio::sync::Notify::new(),
             listing_cursors: Mutex::new(BTreeMap::new()),
+            search_cursors: Mutex::new(BTreeMap::new()),
         });
         if let Some(mut failures) = failures {
             let weak = Arc::downgrade(&browser);
@@ -273,6 +358,32 @@ impl Browser {
                             "proxy capture: generation={generation}, compressed_bytes={}",
                             response.bytes.len()
                         );
+                        if cfg!(debug_assertions)
+                            && std::env::var_os("HRUNGNIR_NATIVE_COMMENT_PROBE").is_some()
+                            && response.url.parse::<tauri::Url>().is_ok_and(|url| {
+                                let parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
+                                (4..=6).contains(&parts.len())
+                                    && parts.first() == Some(&"r")
+                                    && parts.get(2) == Some(&"comments")
+                            })
+                        {
+                            match reddit_offline::reddit_html::comment_response_structure(&response) {
+                                Ok(structure) => browser.record_detail(
+                                    "comment_structure",
+                                    "observed",
+                                    0,
+                                    None,
+                                    structure,
+                                ),
+                                Err(error) => browser.record_detail(
+                                    "comment_structure",
+                                    "failed",
+                                    0,
+                                    Some(error.to_string()),
+                                    serde_json::json!({"generation":generation}),
+                                ),
+                            }
+                        }
                         if cfg!(debug_assertions)
                             && std::env::var_os("HRUNGNIR_NATIVE_PROBE").is_some()
                         {
@@ -312,8 +423,12 @@ impl Browser {
                                 }
                             }
                         }
-                        let partial = reddit_offline::browsing::is_listing_partial_url(&response.url);
-                        let parsed = if partial {
+                        let listing_partial = reddit_offline::browsing::is_listing_partial_url(&response.url);
+                        let search_partial = response.url.parse::<tauri::Url>().is_ok_and(|url| {
+                            reddit_offline::browsing::search_partial_path(url.path(), url.query())
+                        });
+                        let partial = listing_partial || search_partial;
+                        let parsed = if listing_partial {
                             let (listing, taken) = {
                                 let progress = browser.progress.lock().unwrap_or_else(|e| e.into_inner());
                                 (progress.url.clone(), progress.ids.len())
@@ -322,6 +437,9 @@ impl Browser {
                             // returned; a 26th sentinel detects an oversized
                             // fragment instead of advancing past discarded posts.
                             reddit_offline::reddit_html::parse_listing_partial(response, &listing, 26usize.saturating_sub(taken))
+                        } else if search_partial {
+                            let search = browser.progress.lock().unwrap_or_else(|e| e.into_inner()).url.clone();
+                            reddit_offline::reddit_html::parse_search_partial(response, &search)
                         } else {
                             reddit_offline::reddit_html::parse(response)
                         };
@@ -735,10 +853,11 @@ impl Browser {
     /// scrolls into view, which a hidden window may never do. Ask for them
     /// from inside the page so the request, cookies and capture are the same.
     fn request_more(&self, generation: u64, path_and_query: &str) {
-        if !reddit_offline::browsing::listing_partial_path(
-            path_and_query.split('?').next().unwrap_or_default(),
-            path_and_query.split_once('?').map(|(_, query)| query),
-        ) {
+        let path = path_and_query.split('?').next().unwrap_or_default();
+        let query = path_and_query.split_once('?').map(|(_, query)| query);
+        if !reddit_offline::browsing::listing_partial_path(path, query)
+            && !reddit_offline::browsing::search_partial_path(path, query)
+        {
             return;
         }
         {
@@ -789,6 +908,41 @@ impl Browser {
 
     pub async fn acquire(self: &Arc<Self>, url: String, post: bool) -> Result<(), String> {
         self.acquire_page(url, post, None).await
+    }
+
+    async fn probe_one_more_replies_control(&self) -> Result<(), String> {
+        if !cfg!(debug_assertions)
+            || std::env::var_os("HRUNGNIR_NATIVE_COMMENT_PROBE").is_none()
+        {
+            return Ok(());
+        }
+        let app = self.app.clone();
+        super::on_main(app.clone(), move || {
+            let view = app
+                .get_webview_window(WORKER)
+                .ok_or("Native comment probe source page is not open")?;
+            view.eval(
+                r#"(()=>{
+                    const buttons=[...document.querySelectorAll('shreddit-comment button')];
+                    const button=buttons.find(b=>{
+                        const label=(b.getAttribute('aria-label')||b.textContent||'').trim();
+                        const style=getComputedStyle(b);
+                        return /more replies/i.test(label)
+                            && style.display!=='none'
+                            && style.visibility!=='hidden'
+                            && b.getClientRects().length>0;
+                    });
+                    if(button){window.__hrungnirCommentProbeClicked=true;button.click();}
+                })();"#,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .await?;
+        // The native proxy observer records only the denied service path and
+        // query-key names. This bounded pause lets the page issue its own GET;
+        // it does not retry, alter access controls, or fetch a guessed URL.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        Ok(())
     }
 
     async fn acquire_page(
@@ -860,6 +1014,21 @@ impl Browser {
                 );
             }
         };
+        if result.is_ok()
+            && url.contains("/comments/")
+            && cfg!(debug_assertions)
+            && std::env::var_os("HRUNGNIR_NATIVE_COMMENT_PROBE").is_some()
+        {
+            if let Err(error) = self.probe_one_more_replies_control().await {
+                self.record_detail(
+                    "comment_probe_click",
+                    "failed",
+                    0,
+                    Some(error),
+                    serde_json::json!({"post_page":true}),
+                );
+            }
+        }
         let cleanup = self.stop().await;
         let result = result.and(cleanup);
         eprintln!(
@@ -1031,6 +1200,179 @@ impl Browser {
     pub async fn search(self: &Arc<Self>, url: String) -> Result<Vec<String>, String> {
         self.acquire(url, false).await?;
         Ok(self.progress.lock().unwrap_or_else(|e|e.into_inner()).ids.clone())
+    }
+
+    pub async fn search_batch(
+        self: &Arc<Self>,
+        url: String,
+    ) -> Result<(Vec<String>, Option<String>), String> {
+        self.acquire(url, false).await?;
+        let progress = self.progress.lock().unwrap_or_else(|error| error.into_inner());
+        Ok((progress.ids.clone(), progress.more_url.clone()))
+    }
+
+    fn store_search_cursor(
+        &self,
+        scope: &str,
+        continuations: VecDeque<SearchContinuation>,
+        pending_ids: VecDeque<String>,
+        seen_ids: BTreeSet<String>,
+        visited_urls: BTreeSet<String>,
+        replace_scope: bool,
+    ) -> Result<reddit_offline::desktop::SearchPageState, String> {
+        let mut cursors = self.search_cursors.lock().unwrap_or_else(|error| error.into_inner());
+        cursors.retain(|_, cursor| cursor.created_at.elapsed() <= SEARCH_CURSOR_TTL);
+        if replace_scope {
+            invalidate_search_generation(&mut cursors, scope);
+        }
+        if continuations.is_empty() && pending_ids.is_empty() {
+            return Ok(reddit_offline::desktop::SearchPageState { cursor: None, exhausted: true });
+        }
+        if cursors.len() >= SEARCH_CURSOR_LIMIT {
+            cursors.pop_first();
+        }
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random).map_err(|error| format!("Could not create search paging token: {error}"))?;
+        let token: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        cursors.insert(token.clone(), SearchCursor {
+            scope: scope.to_owned(),
+            continuations,
+            pending_ids,
+            seen_ids,
+            visited_urls,
+            created_at: Instant::now(),
+        });
+        Ok(reddit_offline::desktop::SearchPageState { cursor: Some(token), exhausted: false })
+    }
+
+    pub fn search_page_state(
+        &self,
+        scope: &str,
+        continuation_urls: Vec<(String, String)>,
+        all_ids: &[String],
+        pending_ids: Vec<String>,
+        replace_scope: bool,
+    ) -> Result<reddit_offline::desktop::SearchPageState, String> {
+        if all_ids.len() > SEARCH_SEEN_LIMIT || pending_ids.len() > all_ids.len() {
+            return Err("Search paging state exceeded its bounded result limit".into());
+        }
+        let mut continuations = VecDeque::new();
+        let mut scheduled = BTreeSet::new();
+        for (search_url, url) in continuation_urls {
+            let search = tauri::Url::parse(&search_url).map_err(|_| "Invalid search scope")?;
+            let target = tauri::Url::parse(&format!("https://www.reddit.com{url}"))
+                .map_err(|_| "Invalid search continuation")?;
+            if !reddit_offline::browsing::search_partial_matches(&search, &target) {
+                return Err("Source returned a search continuation outside its query scope".into());
+            }
+            if scheduled.insert(url.clone()) {
+                continuations.push_back(SearchContinuation { search_url, url });
+            }
+        }
+        self.store_search_cursor(
+            scope,
+            continuations,
+            pending_ids.into(),
+            all_ids.iter().cloned().collect(),
+            BTreeSet::new(),
+            replace_scope,
+        )
+    }
+
+    pub async fn fetch_search_page(
+        self: &Arc<Self>,
+        scope: &str,
+        token: &str,
+    ) -> Result<(Vec<String>, reddit_offline::desktop::SearchPageState), String> {
+        let mut cursor = self
+            .search_cursors
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(token)
+            .cloned()
+            .ok_or("Search cursor expired; start the search again")?;
+        if search_cursor_expired(&cursor) {
+            self.search_cursors.lock().unwrap_or_else(|error| error.into_inner()).remove(token);
+            return Err("Search cursor expired; start the search again".into());
+        }
+        if !search_cursor_matches_scope(scope, &cursor.scope) {
+            return Err("Search cursor does not match this query and options".into());
+        }
+
+        let mut posts = Vec::with_capacity(25);
+        for _ in 0..25 {
+            if let Some(id) = cursor.pending_ids.pop_front() {
+                posts.push(id);
+            } else {
+                break;
+            }
+        }
+        let mut fetched = 0;
+        while posts.len() < 25 && fetched < 4 && !cursor.continuations.is_empty() {
+            let continuation = cursor.continuations.pop_front().unwrap();
+            if !cursor.visited_urls.insert(continuation.url.clone()) {
+                return Err("Search continuation repeated without advancing".into());
+            }
+            let search = tauri::Url::parse(&continuation.search_url).map_err(|_| "Invalid search scope")?;
+            let target = tauri::Url::parse(&format!("https://www.reddit.com{}", continuation.url))
+                .map_err(|_| "Invalid search continuation")?;
+            if !reddit_offline::browsing::search_partial_matches(&search, &target) {
+                return Err("Search cursor failed query/scope validation".into());
+            }
+            self.acquire_page(
+                continuation.search_url.clone(),
+                false,
+                Some(continuation.url.clone()),
+            )
+            .await?;
+            let (ids, next) = {
+                let progress = self.progress.lock().unwrap_or_else(|error| error.into_inner());
+                (progress.ids.clone(), progress.more_url.clone())
+            };
+            for id in ids {
+                if cursor.seen_ids.len() >= SEARCH_SEEN_LIMIT {
+                    cursor.continuations.clear();
+                    break;
+                }
+                if cursor.seen_ids.insert(id.clone()) {
+                    cursor.pending_ids.push_back(id);
+                }
+            }
+            if let Some(url) = next {
+                let next_target = tauri::Url::parse(&format!("https://www.reddit.com{url}"))
+                    .map_err(|_| "Invalid next search continuation")?;
+                if !reddit_offline::browsing::search_partial_matches(&search, &next_target) {
+                    return Err("Source returned a search continuation outside its query scope".into());
+                }
+                if cursor.visited_urls.contains(&url)
+                    || cursor.continuations.iter().any(|entry| entry.url == url)
+                {
+                    return Err("Search continuation repeated without advancing".into());
+                } else {
+                    cursor.continuations.push_back(SearchContinuation {
+                        search_url: continuation.search_url,
+                        url,
+                    });
+                }
+            }
+            fetched += 1;
+            while posts.len() < 25 {
+                let Some(id) = cursor.pending_ids.pop_front() else { break };
+                posts.push(id);
+            }
+            if cursor.seen_ids.len() >= SEARCH_SEEN_LIMIT {
+                cursor.continuations.clear();
+            }
+        }
+        let state = self.store_search_cursor(
+            scope,
+            cursor.continuations,
+            cursor.pending_ids,
+            cursor.seen_ids,
+            cursor.visited_urls,
+            false,
+        )?;
+        Ok((posts, state))
     }
 
     pub fn record(&self, stage: &str, status: &str, elapsed_ms: u64, error: Option<String>) {

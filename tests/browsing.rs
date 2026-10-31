@@ -1,12 +1,13 @@
 use reddit_offline::{
     browsing::{
-        classic_url, is_listing_partial_url, listing_partial_path, listing_url,
+        classic_url, is_listing_partial_url, listing_partial_path, listing_url, search_partial_matches, search_partial_path, search_url,
         public_content_path, reddit_url, select_listing_threads, subreddit_url,
         without_challenge_params,
     },
     desktop::DesktopStore,
     proxy::allowed_host,
 };
+use url::Url;
 
 #[test]
 fn listing_sort_is_requested_from_reddit_not_guessed_from_cache_age() {
@@ -240,5 +241,39 @@ fn only_the_listing_continuation_is_allowed_beyond_public_pages() {
     )));
     assert!(!is_listing_partial_url(
         "https://example.com/svc/shreddit/community-more-posts/hot/?name=soccer"
+    ));
+}
+
+#[test]
+fn search_continuations_are_exact_and_bound_to_query_scope_sort_and_period() {
+    let global = Url::parse(&search_url("rust", None, "relevance", "all").unwrap()).unwrap();
+    let global_next = Url::parse(
+        "https://www.reddit.com/svc/shreddit/search/?cursor=opaque1&q=rust&sort=relevance&t=all",
+    )
+    .unwrap();
+    assert!(search_partial_path(global_next.path(), global_next.query()));
+    assert!(search_partial_matches(&global, &global_next));
+
+    let scoped = Url::parse(&search_url("borrow checker", Some("rust"), "new", "week").unwrap()).unwrap();
+    let scoped_next = Url::parse(
+        "https://www.reddit.com/svc/shreddit/r/rust/search/?cursor=opaque2&q=borrow+checker&sort=new&t=week",
+    )
+    .unwrap();
+    assert!(search_partial_matches(&scoped, &scoped_next));
+    for invalid in [
+        "https://www.reddit.com/svc/shreddit/search/?cursor=x&q=rust&sort=new&t=all",
+        "https://www.reddit.com/svc/shreddit/r/soccer/search/?cursor=x&q=borrow+checker&sort=new&t=week",
+        "https://www.reddit.com/svc/shreddit/r/rust/search/?cursor=x&q=borrow+checker&sort=new&t=month",
+        "https://www.reddit.com/svc/shreddit/r/rust/search/?cursor=x&cursor=y&q=borrow+checker&sort=new&t=week",
+        "https://www.reddit.com/svc/shreddit/graphql/?cursor=x&q=borrow+checker&sort=new&t=week",
+        "https://example.com/svc/shreddit/search/?cursor=x&q=rust&sort=relevance&t=all",
+    ] {
+        let url = Url::parse(invalid).unwrap();
+        assert!(!search_partial_matches(&scoped, &url), "{invalid}");
+    }
+    assert!(!search_partial_path("/svc/shreddit/search/", Some("q=rust&sort=relevance&t=all")));
+    assert!(!search_partial_path(
+        "/svc/shreddit/search/",
+        Some("cursor=x&q=rust&sort=relevance&t=all&extra=1")
     ));
 }

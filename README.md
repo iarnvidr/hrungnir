@@ -71,6 +71,10 @@ database, browser data and settings stay separate from the installed app. It
 does not enable the updater or create a release bundle. This Rust-based
 development path does not require Node.js.
 
+Automated native checks use `src-tauri/tauri.test.conf.json` and a fresh explicit
+data directory. This third app identity also isolates test-window preferences
+and local storage from your normal development session.
+
 ## Build from source
 
 On an Apple Silicon Mac, install the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/),

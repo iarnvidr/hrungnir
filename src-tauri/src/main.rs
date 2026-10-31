@@ -12,6 +12,10 @@ mod native_cli;
 #[cfg(debug_assertions)]
 mod native_probe;
 #[cfg(debug_assertions)]
+mod comment_probe;
+#[cfg(debug_assertions)]
+mod native_ui_probe;
+#[cfg(debug_assertions)]
 mod video_probe;
 mod updates;
 #[cfg(target_os = "macos")]
@@ -297,8 +301,22 @@ async fn search_reddit_operation(
     period: &str,
     smart: bool,
 ) -> Result<Snapshot, String> {
+    search_reddit_page_operation(browser, links, query, subreddit, sort, period, smart, None).await
+}
+
+async fn search_reddit_page_operation(
+    browser: &Arc<browser::Browser>,
+    links: Option<&web_links::LinkStore>,
+    query: &str,
+    subreddit: Option<&str>,
+    sort: &str,
+    period: &str,
+    smart: bool,
+    cursor: Option<&str>,
+) -> Result<Snapshot, String> {
     let url = reddit_offline::browsing::search_url(query, subreddit, sort, period)
         .map_err(|e| e.to_string())?;
+    let cursor_scope = format!("{url}|smart={smart}");
     let discovery = if smart && sort == "relevance" {
         reddit_offline::search_query::discovery_query(query)
     } else { None };
@@ -308,19 +326,62 @@ async fn search_reddit_operation(
     browser.record("search_queue", "complete", started.elapsed().as_millis() as u64, None);
     browser.record("search", "running", 0, None);
     let result = async {
-        let mut ids = browser.search(url).await?;
-        if let Some(discovery) = discovery.as_ref() {
-            let url = reddit_offline::browsing::search_url(discovery, subreddit, "relevance", period).map_err(|e|e.to_string())?;
-            match browser.search(url).await {
-                Ok(extra) => for id in extra { if !ids.contains(&id) { ids.push(id); } },
-                Err(error) => browser.record("search_discovery", "failed", 0, Some(error)),
+        let (mut ids, page_state) = if let Some(token) = cursor {
+            let (ids, state) = browser.fetch_search_page(&cursor_scope, token).await?;
+            (ids, state)
+        } else {
+            let (mut ids, primary_more) = browser.search_batch(url.clone()).await?;
+            let mut continuations = primary_more
+                .into_iter()
+                .map(|next| (url.clone(), next))
+                .collect::<Vec<_>>();
+            if let Some(discovery) = discovery.as_ref() {
+                let discovery_url = reddit_offline::browsing::search_url(
+                    discovery,
+                    subreddit,
+                    "relevance",
+                    period,
+                )
+                .map_err(|error| error.to_string())?;
+                match browser.search_batch(discovery_url.clone()).await {
+                    Ok((extra, next)) => {
+                        for id in extra {
+                            if !ids.contains(&id) {
+                                ids.push(id);
+                            }
+                        }
+                        if let Some(next) = next {
+                            continuations.push((discovery_url, next));
+                        }
+                    }
+                    Err(error) => browser.record("search_discovery", "failed", 0, Some(error)),
+                }
             }
-        }
+            if discovery.is_some() {
+                let snapshot = browser.store.snapshot_for_ids(Some(&ids)).map_err(|error| error.to_string())?;
+                let mut ranked = snapshot.threads;
+                ranked.sort_by_key(|thread| {
+                    std::cmp::Reverse(reddit_offline::search_query::discovery_score(query, &thread.title))
+                });
+                ids = ranked.into_iter().map(|thread| thread.id).collect();
+            }
+            let pending = ids.iter().skip(25).cloned().collect::<Vec<_>>();
+            let state = browser.search_page_state(
+                &cursor_scope,
+                continuations,
+                &ids,
+                pending,
+                true,
+            )?;
+            ids.truncate(25);
+            (ids, state)
+        };
         let mut snapshot = browser.store.snapshot_for_ids(Some(&ids)).map_err(|e|e.to_string())?;
-        snapshot.threads.sort_by_key(|thread|ids.iter().position(|id|id==&thread.id));
+        snapshot.threads.sort_by_key(|thread| ids.iter().position(|id|id==&thread.id));
         if discovery.is_some() {
             snapshot.threads.sort_by_key(|thread| std::cmp::Reverse(reddit_offline::search_query::discovery_score(query, &thread.title)));
         }
+        snapshot.search_page = Some(page_state);
         if let Some(links) = links {
             links.enrich(&mut snapshot);
         }
@@ -339,8 +400,9 @@ async fn search_reddit(
     sort: Option<String>,
     period: Option<String>,
     smart: Option<bool>,
+    cursor: Option<String>,
 ) -> Result<Snapshot, String> {
-    search_reddit_operation(
+    search_reddit_page_operation(
         browser.inner(),
         Some(links.inner()),
         &query,
@@ -348,6 +410,7 @@ async fn search_reddit(
         sort.as_deref().unwrap_or("relevance"),
         period.as_deref().unwrap_or("all"),
         smart.unwrap_or(true),
+        cursor.as_deref(),
     )
     .await
 }

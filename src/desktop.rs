@@ -15,6 +15,12 @@ pub struct ListingPageState {
 }
 
 #[derive(Serialize)]
+pub struct SearchPageState {
+    pub cursor: Option<String>,
+    pub exhausted: bool,
+}
+
+#[derive(Serialize)]
 pub struct ListingPageResponse {
     pub posts: Vec<Thread>,
     pub listing_page: ListingPageState,
@@ -30,6 +36,8 @@ pub struct Snapshot {
     pub diagnostics: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub listing_page: Option<ListingPageState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_page: Option<SearchPageState>,
 }
 
 /// A path owned by the native application, never supplied by web content.
@@ -125,6 +133,7 @@ impl DesktopStore {
             position: cache.position()?,
             diagnostics: cache.summary()?,
             listing_page: None,
+            search_page: None,
         })
     }
 

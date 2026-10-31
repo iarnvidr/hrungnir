@@ -184,11 +184,96 @@ impl CaptureForwarder {
         self.stats.requests.fetch_add(1, Ordering::Relaxed);
         let (mut parts, body) = request.into_parts();
         let path = parts.uri.path();
+        if cfg!(debug_assertions)
+            && std::env::var_os("HRUNGNIR_NATIVE_COMMENT_PROBE").is_some()
+            && parts.method == Method::POST
+            && path.starts_with("/svc/shreddit/more-comments/")
+        {
+            let content_type = parts
+                .headers
+                .get(hyper::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("unknown")
+                .to_owned();
+            let declared_length = parts
+                .headers
+                .get(hyper::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<usize>().ok());
+            let mut request_body = body;
+            let mut bytes = Vec::new();
+            let mut truncated = false;
+            while let Some(frame) = request_body.frame().await {
+                let Ok(frame) = frame else { break };
+                if let Ok(data) = frame.into_data() {
+                    if bytes.len().saturating_add(data.len()) > 32 * 1024 {
+                        truncated = true;
+                        break;
+                    }
+                    bytes.extend_from_slice(&data);
+                }
+            }
+            let mut json_keys: Vec<String> = serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .map(|object| object.keys().cloned().collect())
+                .unwrap_or_default();
+            let mut form_keys: Vec<String> = url::form_urlencoded::parse(&bytes)
+                .map(|(key, _)| key.into_owned())
+                .collect();
+            json_keys.sort();
+            form_keys.sort();
+            form_keys.dedup();
+            eprintln!(
+                "native comment probe POST body: path={}, content_type={}, declared_length={:?}, observed_length={}, truncated={}, json_keys={:?}, form_keys={:?}",
+                path,
+                content_type,
+                declared_length,
+                bytes.len(),
+                truncated,
+                json_keys,
+                form_keys
+            );
+            return Ok(error_response(
+                StatusCode::FORBIDDEN,
+                "Only public community reads are enabled",
+            ));
+        }
+        if cfg!(debug_assertions)
+            && std::env::var_os("HRUNGNIR_NATIVE_COMMENT_PROBE").is_some()
+            && path.starts_with("/svc/shreddit/more-comments/")
+        {
+            let mut query_keys: Vec<_> = parts
+                .uri
+                .query()
+                .into_iter()
+                .flat_map(|query| url::form_urlencoded::parse(query.as_bytes()))
+                .map(|(key, _)| key.into_owned())
+                .collect();
+            query_keys.sort();
+            query_keys.dedup();
+            eprintln!(
+                "native comment probe request: method={}, path={}, query_keys={:?}",
+                parts.method,
+                path,
+                query_keys
+            );
+            crate::diagnostics::event(
+                "comment.request_observed",
+                serde_json::json!({
+                    "path":path,
+                    "query_keys":query_keys,
+                    "method":parts.method.as_str(),
+                    "authority_matches":parts.uri.authority().is_none_or(|a| a.as_str()=="www.reddit.com"),
+                }),
+            );
+        }
         // An acquisition worker has no reason to sign in, post, or fetch private
         // endpoints. A request's inner authority cannot change its CONNECT host.
         if !matches!(parts.method, Method::GET | Method::HEAD)
             || !(crate::browsing::public_content_path(path)
-                || crate::browsing::listing_partial_path(path, parts.uri.query()))
+                || crate::browsing::listing_partial_path(path, parts.uri.query())
+                || crate::browsing::search_partial_path(path, parts.uri.query()))
             || parts
                 .uri
                 .authority()

@@ -14,6 +14,8 @@
     list: $('#thread-list'), count: $('#thread-count'), empty: $('#empty-state'), state: $('#reader-state'),
     listingPagination: $('#listing-pagination'), listingPaginationStatus: $('#listing-pagination-status'),
     listingLoadMore: $('#listing-load-more'), listingSentinel: $('#listing-sentinel'),
+    searchPagination: $('#search-pagination'), searchPaginationStatus: $('#search-pagination-status'),
+    searchLoadMore: $('#search-load-more'), searchSentinel: $('#search-sentinel'),
     feedback: $('#reader-feedback'), view: $('#thread-view'), diagnostics: $('#diagnostics'), detail: $('#diagnostics-detail'),
     diagnosticsStatus: $('#diagnostics-status'), diagnosticsRefresh: $('#diagnostics-refresh'), diagnosticsCopy: $('#diagnostics-copy'), diagnosticsExport: $('#diagnostics-export'),
     supportExport: $('#support-export'), performanceSummary: $('#performance-summary'), theme: $('#theme-select'), accent: $('#accent-select'),
@@ -795,6 +797,7 @@
       }
     }
     updateListingPagination();
+    updateSearchPagination();
   }
 
   function renderSubreddits() {
@@ -1301,6 +1304,114 @@
     }
   }
 
+  function updateSearchPagination(search = redditSearch) {
+    const scope = $('#search-scope').value;
+    const scopeMatches = search && (scope === 'cache'
+      ? search.cached
+      : !search.cached && (scope === 'subreddit' ? search.subreddit === activeSubreddit : search.subreddit === null));
+    const controlsMatch = search && search.query === ui.cacheSearch.value.trim() && scopeMatches &&
+      (search.cached || (search.sort === ui.postSort.value && search.period === ui.topPeriod.value && search.smart === $('#search-smart').checked));
+    const supported = Boolean(controlsMatch && (search.pageCursor || search.pageExhausted || search.pageStopReason));
+    const viewKey = search ? `browse:search:${search.cached ? 'cache' : search.subreddit || 'all'}:${search.query}` : '';
+    if (supported && search.unrenderedIds?.size && !ui.browse.disabled && !ui.cacheSearchSubmit.disabled && !ui.browsePanel.hidden && scrollView === viewKey) {
+      const pendingIds = new Set(search.unrenderedIds);
+      search.unrenderedIds.clear();
+      requestLinkPreviews(search.threads.filter((thread) => pendingIds.has(thread.id)));
+      renderList({ appendOnly: true, appendedIds: pendingIds });
+      return;
+    }
+    ui.searchPagination.hidden = !supported || ui.browsePanel.hidden;
+    if (!supported) {
+      if (listingSentinelObserver) listingSentinelObserver.unobserve(ui.searchSentinel);
+      return;
+    }
+    const canContinue = Boolean(search.pageCursor && !search.pageExhausted && !search.pageStopReason);
+    const loading = Boolean(search.pageLoading);
+    ui.searchLoadMore.hidden = search.pageExhausted || Boolean(search.pageStopReason);
+    ui.searchLoadMore.setAttribute('aria-disabled', String(loading));
+    ui.searchLoadMore.textContent = search.pageError ? 'Retry search results' : loading ? 'Loading results…' : 'Load more results';
+    ui.searchPaginationStatus.classList.toggle('error', Boolean(search.pageError));
+    const loaded = search.threads.length;
+    ui.searchPaginationStatus.textContent = search.pageError
+      ? `Could not load more results. Your ${loaded} current results remain available. ${search.pageError}`
+      : search.pageStopReason || (search.pageExhausted
+        ? `End of Reddit search · ${loaded} results loaded.`
+        : loading ? `Loading more results · ${loaded} loaded…` : `Scroll to load more results · ${loaded} loaded.`);
+    if (listingSentinelObserver) {
+      listingSentinelObserver.unobserve(ui.searchSentinel);
+      if (canContinue && !loading && !search.pageError && !ui.browsePanel.hidden) listingSentinelObserver.observe(ui.searchSentinel);
+    }
+  }
+
+  async function loadNextRedditSearchPage(search = redditSearch) {
+    if (!search || search !== redditSearch || search.cached || !search.pageCursor || search.pageLoading || search.pageExhausted || search.pageStopReason || ui.browse.disabled || ui.cacheSearchSubmit.disabled || ui.browsePanel.hidden || search.query !== ui.cacheSearch.value.trim() || search.smart !== $('#search-smart').checked || search.sort !== ui.postSort.value || search.period !== ui.topPeriod.value || (search.subreddit === null ? $('#search-scope').value !== 'all' : $('#search-scope').value !== 'subreddit' || search.subreddit !== activeSubreddit)) return;
+    const request = ++search.pageRequest;
+    const cursor = search.pageCursor;
+    search.pageLoading = true;
+    search.pageError = '';
+    search.restorePageFocus = document.activeElement === ui.searchLoadMore;
+    updateSearchPagination(search);
+    try {
+      const result = await invoke('search_reddit', { ...search.args, cursor });
+      if (redditSearch !== search || request !== search.pageRequest) return;
+      if (!result || !Array.isArray(result.threads) || !result.threads.every((thread) => thread && typeof thread.id === 'string') || !result.diagnostics || !result.search_page || !(result.search_page.cursor === null || typeof result.search_page.cursor === 'string') || typeof result.search_page.exhausted !== 'boolean' || (result.search_page.cursor === null && !result.search_page.exhausted)) {
+        throw new Error('Reddit returned an invalid search continuation page.');
+      }
+      snapshot = mergeSnapshot(result);
+      for (const thread of result.threads) unavailableThreadIds.delete(thread.id);
+      rememberSnapshotThreads(result);
+      const seen = new Set(search.threads.map((thread) => thread.id));
+      const addedIds = new Set();
+      for (const thread of result.threads) {
+        if (thread && typeof thread.id === 'string' && !seen.has(thread.id)) {
+          seen.add(thread.id);
+          addedIds.add(thread.id);
+        }
+      }
+      const ordered = [...search.threads, ...result.threads.filter((thread) => addedIds.has(thread.id)).map((thread) => threadCache.get(thread.id) || thread)];
+      search.threads = ordered.map((thread) => threadCache.get(thread.id) || thread);
+      const nextCursor = typeof result.search_page.cursor === 'string' && result.search_page.cursor ? result.search_page.cursor : null;
+      if (result.search_page.exhausted || !nextCursor) {
+        search.pageCursor = null;
+        search.pageExhausted = true;
+        search.pageStopReason = '';
+      } else if (nextCursor === cursor || addedIds.size === 0) {
+        search.pageCursor = null;
+        search.pageExhausted = false;
+        search.pageStopReason = addedIds.size === 0
+          ? 'No new results were returned. Loading stopped to avoid repeating this page.'
+          : 'Reddit returned the same results again. Loading stopped to avoid duplicates.';
+      } else {
+        search.pageCursor = nextCursor;
+        search.pageExhausted = false;
+      }
+      const currentViewKey = `browse:search:${search.cached ? 'cache' : search.subreddit || 'all'}:${search.query}`;
+      const scopeMatches = search.subreddit === null ? $('#search-scope').value === 'all' : $('#search-scope').value === 'subreddit' && search.subreddit === activeSubreddit;
+      const currentSearchView = redditSearch === search && !ui.browse.disabled && !ui.cacheSearchSubmit.disabled && !ui.browsePanel.hidden && scrollView === currentViewKey && search.query === ui.cacheSearch.value.trim() && scopeMatches && search.sort === ui.postSort.value && search.period === ui.topPeriod.value && search.smart === $('#search-smart').checked;
+      if (currentSearchView) {
+        const renderIds = new Set([...search.unrenderedIds, ...addedIds]);
+        search.unrenderedIds.clear();
+        requestLinkPreviews(search.threads.filter((thread) => renderIds.has(thread.id)));
+        if (renderIds.size) {
+          const scrollBeforeAppend = window.scrollY;
+          renderList({ appendOnly: true, appendedIds: renderIds });
+          if (window.scrollY !== scrollBeforeAppend) window.scrollTo(0, scrollBeforeAppend);
+        } else updateSearchPagination(search);
+      } else for (const id of addedIds) search.unrenderedIds.add(id);
+    } catch (error) {
+      if (redditSearch === search && request === search.pageRequest) search.pageError = explainError(error);
+    } finally {
+      if (redditSearch === search && request === search.pageRequest) {
+        search.pageLoading = false;
+        updateSearchPagination(search);
+        if (search.restorePageFocus && [document.body, ui.searchLoadMore].includes(document.activeElement)) {
+          (ui.searchLoadMore.hidden ? ui.searchPaginationStatus : ui.searchLoadMore).focus({ preventScroll: true });
+        }
+        search.restorePageFocus = false;
+      }
+    }
+  }
+
   async function loadNextListingPage() {
     const subreddit = activeSubreddit;
     const state = listingPaginationBySubreddit.get(subreddit);
@@ -1390,6 +1501,7 @@
       updateFetchAllMediaControl();
       restoreListingFocus(focusedId);
       updateListingPagination();
+      updateSearchPagination();
       return;
     }
     ui.postSort.disabled = !invoke || ui.list.inert;
@@ -1518,6 +1630,7 @@
     });
     if (!appendOnly) restoreListingFocus(focusedId);
     updateListingPagination();
+    updateSearchPagination();
   }
 
   function subredditLink(name) {
@@ -3034,10 +3147,13 @@
       ui.cacheSearch.focus();
       return;
     }
+    updateSearchPagination();
     const validSort = ['relevance', 'new', 'top', 'comments'].includes(sort) ? sort : 'relevance';
     const validPeriod = ['hour', 'day', 'week', 'month', 'year', 'all'].includes(period) ? period : 'all';
     const subreddit = $('#search-scope').value === 'subreddit' ? activeSubreddit : null;
     const cached = $('#search-scope').value === 'cache';
+    const smart = $('#search-smart').checked;
+    const searchArgs = { query: normalizedQuery, subreddit, sort: validSort, period: validPeriod, smart };
     const sourceLabel = cached ? 'downloaded posts' : 'Reddit';
     cancelCacheSearch({ hide: true });
     const transition = ++operationSequence;
@@ -3060,23 +3176,23 @@
     setStatus(`Searching ${sourceLabel} · ${normalizedQuery}`);
     startOperationProgress('Searching Reddit', transition);
     try {
-      const result = cached ? await invoke('search_cache', { query: normalizedQuery, subreddit: null, limit: 100 }) : await invoke('search_reddit', {
-        query: normalizedQuery,
-        subreddit,
-        sort: validSort,
-        period: validPeriod,
-        smart: $('#search-smart').checked,
-      });
+      const result = cached ? await invoke('search_cache', { query: normalizedQuery, subreddit: null, limit: 100 }) : await invoke('search_reddit', searchArgs);
       if (request !== redditSearchSequence || transition !== operationSequence) return;
       if (cached) {
         if (!Array.isArray(result)) throw new Error('Native downloaded search returned an invalid result.');
         redditSearch = { query: normalizedQuery, cached: true, hits: result, threads: [], sort: 'relevance', period: 'all' };
       } else {
         if (!result || !Array.isArray(result.threads) || !result.diagnostics) throw new Error('Native Reddit search returned an invalid Snapshot.');
+        if (result.search_page && (!(result.search_page.cursor === null || typeof result.search_page.cursor === 'string') || typeof result.search_page.exhausted !== 'boolean' || (result.search_page.cursor === null && !result.search_page.exhausted))) throw new Error('Native Reddit search returned invalid pagination metadata.');
         snapshot = mergeSnapshot(result);
         for (const thread of result.threads) unavailableThreadIds.delete(thread.id);
         rememberSnapshotThreads(result);
-        redditSearch = { query: normalizedQuery, subreddit, sort: validSort, period: validPeriod, threads: result.threads.slice() };
+        const page = result.search_page && typeof result.search_page.exhausted === 'boolean' ? result.search_page : null;
+        redditSearch = {
+          query: normalizedQuery, subreddit, sort: validSort, period: validPeriod, smart, args: searchArgs,
+          threads: result.threads.slice(), pageCursor: page && typeof page.cursor === 'string' && page.cursor ? page.cursor : null,
+          pageExhausted: Boolean(page && page.exhausted), pageStopReason: '', pageError: '', pageLoading: false, pageRequest: 0, unrenderedIds: new Set(),
+        };
       }
       pendingId = null;
       setTab('browse');
@@ -3091,6 +3207,7 @@
       setFeedback('');
       if (!bulkMediaRun || bulkMediaRun.cancelled) ui.fetchAllMediaStatus.textContent = '';
       setStatus(`${sourceLabel} · ${count} posts · ${formatElapsed(elapsed)}`, 'ready');
+      updateSearchPagination();
     } catch (error) {
       if (request === redditSearchSequence && transition === operationSequence) {
         recordClientEvent('source_fetch', performance.now() - startedAt, 0);
@@ -3108,6 +3225,7 @@
           ui.list.inert = false;
           ui.list.removeAttribute('aria-busy');
           updateFetchAllMediaControl();
+          updateSearchPagination();
         }
       }
     }
@@ -3985,9 +4103,14 @@
   function configure() {
     if ('IntersectionObserver' in window) {
       listingSentinelObserver = new IntersectionObserver((entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) void loadNextListingPage();
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          if (entry.target === ui.searchSentinel) void loadNextRedditSearchPage();
+          else if (entry.target === ui.listingSentinel) void loadNextListingPage();
+        }
       }, { root: null, rootMargin: '240px 0px', threshold: 0 });
     }
+    ui.searchLoadMore.addEventListener('click', () => void loadNextRedditSearchPage());
     ui.listingLoadMore.addEventListener('click', () => {
       if (ui.browse.disabled || listingPageInFlight.has(activeSubreddit)) return;
       const state = listingPaginationBySubreddit.get(activeSubreddit);
@@ -4131,6 +4254,7 @@
       ui.cacheSearchClear.disabled = !ui.cacheSearch.value;
       ui.cacheSearchClear.hidden = !ui.cacheSearch.value;
       cancelRedditSearch({ clearFeedback: true });
+      updateSearchPagination();
       scheduleCacheSearch();
     });
     ui.cacheSearchClear.addEventListener('click', () => clearSearch({ focus: true }));

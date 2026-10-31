@@ -71,6 +71,20 @@ fn accepts(subreddit: &str, actual: &str) -> bool {
     subreddit.is_empty() || crate::browsing::listing_scope_matches(subreddit, actual)
 }
 
+/// Extract only Reddit's validated search cursor endpoint associated with the
+/// active search. The cursor value itself stays opaque and is never interpreted.
+pub fn search_more_url(document: &Html, search: &Url) -> Option<String> {
+    document
+        .select(&selector("faceplate-partial[src]"))
+        .filter_map(|partial| {
+            let url = search.join(partial.value().attr("src")?).ok()?;
+            crate::browsing::search_partial_matches(search, &url).then(|| {
+                format!("{}?{}", url.path(), url.query().unwrap_or_default())
+            })
+        })
+        .next()
+}
+
 fn nearest<'a>(node: ElementRef<'a>, tag: &str) -> Option<ElementRef<'a>> {
     node.ancestors()
         .filter_map(ElementRef::wrap)
@@ -259,7 +273,7 @@ fn collect_comments(document: &Html, thread: &mut Thread) {
     }
 }
 
-fn search_threads(document: &Html, base: &Url) -> Vec<Thread> {
+fn search_threads(document: &Html, base: &Url, limit: usize) -> Vec<Thread> {
     let scope = listing_subreddit(base);
     let mut threads: Vec<Thread> = Vec::new();
     // Reddit currently renders one full SDUI result plus additional lightweight
@@ -268,7 +282,7 @@ fn search_threads(document: &Html, base: &Url) -> Vec<Thread> {
     for result in document.select(&selector(
         "[data-testid=\"search-sdui-post\"], [data-testid=\"search-post-with-content-preview\"]",
     )) {
-        if threads.len() >= MAX_THREADS {
+        if threads.len() >= limit {
             break;
         }
         let Some(link) = result
@@ -353,7 +367,11 @@ pub fn parse(
         more_url: None,
     };
     if searching {
-        page.threads = search_threads(document, base);
+        page.threads = search_threads(document, base, MAX_THREADS + 1);
+        if page.threads.len() > MAX_THREADS {
+            return Err("Search page exceeded the 25-post result limit".into());
+        }
+        page.more_url = search_more_url(document, base);
         // A search that matches nothing is still a recognizable results page.
         if page.threads.is_empty()
             && document
@@ -392,6 +410,29 @@ pub fn parse(
         if page.threads.is_empty() {
             return Err("Response did not contain public posts".into());
         }
+    }
+    page.validate()?;
+    Ok(page)
+}
+
+/// Parse a bounded search continuation fragment, attributing its rows to the
+/// validated active search URL rather than to the service endpoint.
+pub fn parse_search_partial(document: &Html, search: &Url) -> Result<PageCapture> {
+    crate::browsing::validate_search_url(search)?;
+    let mut page = PageCapture {
+        url: search.to_string(),
+        scroll_y: 0.0,
+        threads: search_threads(document, search, MAX_THREADS + 1),
+        layout: Some("modern".into()),
+        layout_preference: None,
+        more_url: None,
+    };
+    if page.threads.len() > MAX_THREADS {
+        return Err("Search continuation exceeded the 25-post page limit".into());
+    }
+    page.more_url = search_more_url(document, search);
+    if serde_json::to_vec(&page)?.len() > 500000 {
+        return Err("Search continuation is too large".into());
     }
     page.validate()?;
     Ok(page)
@@ -450,4 +491,43 @@ pub fn parse_partial(document: &Html, listing: &Url, limit: usize) -> Result<Pag
     }
     page.validate()?;
     Ok(page)
+}
+
+#[cfg(test)]
+mod search_paging_tests {
+    use super::*;
+
+    #[test]
+    fn search_cursor_comes_from_reddit_partial_and_rows_keep_active_scope() {
+        let search = Url::parse("https://www.reddit.com/search/?q=rust&sort=relevance&t=all").unwrap();
+        let document = Html::parse_document(
+            r#"
+            <faceplate-partial src="/svc/shreddit/search/?cursor=opaque1&amp;q=rust&amp;sort=relevance&amp;t=all"></faceplate-partial>
+            <div data-testid="search-post-with-content-preview" data-thingid="t3_abc123">
+              <a data-testid="post-title-text" href="/r/rust/comments/abc123/a_post/">A post</a>
+            </div>
+            <faceplate-partial src="/svc/shreddit/partial/login?query=ignored"></faceplate-partial>
+            "#,
+        );
+        let page = parse_search_partial(&document, &search).unwrap();
+        assert_eq!(page.threads.len(), 1);
+        assert_eq!(page.threads[0].id, "t3_abc123");
+        assert_eq!(page.url, search.as_str());
+        assert_eq!(
+            page.more_url.as_deref(),
+            Some("/svc/shreddit/search/?cursor=opaque1&q=rust&sort=relevance&t=all")
+        );
+    }
+
+    #[test]
+    fn scoped_search_continuation_does_not_capture_other_communities() {
+        let search = Url::parse(
+            "https://www.reddit.com/r/rust/search/?q=borrow&restrict_sr=on&sort=new&t=week",
+        )
+        .unwrap();
+        let document = Html::parse_document(
+            r#"<faceplate-partial src="/svc/shreddit/r/soccer/search/?cursor=x&amp;q=borrow&amp;sort=new&amp;t=week"></faceplate-partial>"#,
+        );
+        assert!(search_more_url(&document, &search).is_none());
+    }
 }

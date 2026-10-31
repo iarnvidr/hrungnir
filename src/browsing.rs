@@ -140,6 +140,73 @@ pub fn validate_search_url(url: &Url) -> Result<()> {
     Ok(())
 }
 
+/// Reddit's rendered search page names this read-only continuation for the
+/// exact active query, sort, and period. Accept only the two observed routes
+/// and their bounded search cursor grammar; never accept an arbitrary URL.
+pub fn search_partial_path(path: &str, query: Option<&str>) -> bool {
+    let parts: Vec<_> = path.trim_matches('/').split('/').collect();
+    let route_ok = parts == ["svc", "shreddit", "search"]
+        || (parts.len() == 5
+            && parts[0] == "svc"
+            && parts[1] == "shreddit"
+            && parts[2] == "r"
+            && subreddit_url(parts[3]).is_ok()
+            && parts[4] == "search");
+    let Some(query) = query.filter(|query| !query.is_empty() && query.len() <= 2048) else {
+        return false;
+    };
+    if !route_ok {
+        return false;
+    }
+    let mut fields = std::collections::HashMap::new();
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if !matches!(key.as_ref(), "cursor" | "q" | "sort" | "t")
+            || value.is_empty()
+            || value.len() > 1024
+            || value.chars().any(char::is_control)
+            || fields.insert(key.into_owned(), value.into_owned()).is_some()
+        {
+            return false;
+        }
+    }
+    fields.len() == 4
+        && fields.get("cursor").is_some_and(|value| !value.is_empty())
+        && fields.get("q").is_some_and(|value| {
+            !value.trim().is_empty() && value.chars().count() <= 256
+        })
+        && fields.get("sort").is_some_and(|value| {
+            matches!(value.as_str(), "relevance" | "new" | "top" | "comments")
+        })
+        && fields.get("t").is_some_and(|value| {
+            matches!(value.as_str(), "hour" | "day" | "week" | "month" | "year" | "all")
+        })
+}
+
+pub fn search_partial_matches(scope: &Url, continuation: &Url) -> bool {
+    if !reddit_url(continuation.as_str())
+        || !search_partial_path(continuation.path(), continuation.query())
+        || validate_search_url(scope).is_err()
+    {
+        return false;
+    }
+    let scope_parts: Vec<_> = scope.path().trim_matches('/').split('/').collect();
+    let expected_path = if scope_parts.len() == 1 {
+        "/svc/shreddit/search/".to_owned()
+    } else {
+        format!("/svc/shreddit/r/{}/search/", scope_parts[1])
+    };
+    if continuation.path() != expected_path {
+        return false;
+    }
+    let fields: std::collections::HashMap<_, _> = continuation.query_pairs().collect();
+    let requested: std::collections::HashMap<_, _> = scope.query_pairs().collect();
+    ["q", "sort", "t"].into_iter().all(|key| {
+        fields.get(key).is_some_and(|value| {
+            requested.get(key).is_some_and(|requested| requested == value)
+        })
+    })
+}
+
 pub fn public_content_path(path: &str) -> bool {
     if search_path(path) {
         return true;

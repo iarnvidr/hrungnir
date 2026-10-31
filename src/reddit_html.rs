@@ -120,6 +120,141 @@ fn decode(response: &crate::response_capture::CapturedResponse) -> Result<String
     Ok(String::from_utf8(decoded).map_err(|error| error.utf8_error())?)
 }
 
+/// Debug-only native probe summary for comment continuation markup. The summary
+/// deliberately records route paths and query-key names only, never cursor or
+/// session values from Reddit's rendered HTML.
+pub fn comment_response_structure(
+    response: &crate::response_capture::CapturedResponse,
+) -> Result<serde_json::Value> {
+    let html = decode(response)?;
+    let document = Html::parse_document(&html);
+    let route_summary = |raw: &str| {
+        let parsed = url::Url::parse("https://www.reddit.com")
+            .ok()
+            .and_then(|base| base.join(raw).ok());
+        parsed.map(|url| {
+            let query_shapes: Vec<_> = url
+                .query_pairs()
+                .map(|(key, value)| {
+                    let value = value.as_ref();
+                    let shape = if value.is_empty() {
+                        "empty"
+                    } else if value.bytes().all(|byte| byte.is_ascii_digit()) {
+                        "digits"
+                    } else if matches!(value, "true" | "false") {
+                        "boolean"
+                    } else {
+                        "opaque"
+                    };
+                    if key == "sort" {
+                        serde_json::json!({"key":key,"shape":shape,"length":value.len(),"enum":value})
+                    } else {
+                        serde_json::json!({"key":key,"shape":shape,"length":value.len()})
+                    }
+                })
+                .collect();
+            serde_json::json!({"path":url.path(),"query_shapes":query_shapes})
+        })
+    };
+    let partials = document
+        .select(&selector("faceplate-partial[src]"))
+        .map(|element| {
+            let value = element.value();
+            let src = value.attr("src").unwrap_or_default();
+            let route = route_summary(src);
+            let parent_comment = element
+                .ancestors()
+                .filter_map(ElementRef::wrap)
+                .find(|ancestor| ancestor.value().name() == "shreddit-comment");
+            serde_json::json!({
+                "slot":value.attr("slot"),
+                "element":value.name(),
+                "route":route,
+                "name":value.attr("name"),
+                "parent_comment_id":parent_comment.and_then(|comment| comment.value().attr("thingid")),
+                "attribute_names":value.attrs().map(|(name, _)| name).take(24).collect::<Vec<_>>(),
+            })
+        })
+        .filter(|partial| {
+            let path = partial["route"]["path"].as_str().unwrap_or_default();
+            let slot = partial["slot"].as_str().unwrap_or_default();
+            let name = partial["name"].as_str().unwrap_or_default();
+            slot == "load-after" || path.contains("comment") || name.contains("comment")
+        })
+        .take(40)
+        .collect::<Vec<_>>();
+    let controls = document
+        .select(&selector("button, a[href]"))
+        .filter_map(|element| {
+            let value = element.value();
+            let label = value
+                .attr("aria-label")
+                .or_else(|| value.attr("slot"))
+                .map(str::to_owned)
+                .unwrap_or_else(|| text(element, 120));
+            if !label.to_ascii_lowercase().contains("more")
+                && !label.to_ascii_lowercase().contains("continue")
+                && !label.to_ascii_lowercase().contains("repl")
+            {
+                return None;
+            }
+            let route = value.attr("href").and_then(|href| {
+                route_summary(href).map(|summary| summary["path"].clone())
+            });
+            let parent = element
+                .ancestors()
+                .filter_map(ElementRef::wrap)
+                .find(|ancestor| ancestor.value().name() == "shreddit-comment");
+            Some(serde_json::json!({
+                "element":value.name(),
+                "label":label.chars().take(120).collect::<String>(),
+                "route_path":route,
+                "comment_id":parent.and_then(|comment| comment.value().attr("thingid")),
+                "attribute_names":value.attrs().map(|(name, _)| name).take(24).collect::<Vec<_>>(),
+            }))
+        })
+        .take(40)
+        .collect::<Vec<_>>();
+    let reply_controls = document
+        .select(&selector("button"))
+        .filter_map(|button| {
+            let value = button.value();
+            let label = value
+                .attr("aria-label")
+                .map(str::to_owned)
+                .unwrap_or_else(|| text(button, 80));
+            if !label.to_ascii_lowercase().contains("more replies")
+                && !label.to_ascii_lowercase().contains("continue")
+            {
+                return None;
+            }
+            let parent = button
+                .ancestors()
+                .filter_map(ElementRef::wrap)
+                .find(|ancestor| ancestor.value().name() == "shreddit-comment");
+            let reload_route = parent
+                .and_then(|comment| comment.value().attr("reload-url"))
+                .and_then(route_summary);
+            Some(serde_json::json!({
+                "label":label.chars().take(80).collect::<String>(),
+                "class":value.attr("class").map(|class| class.chars().take(160).collect::<String>()),
+                "comment_id":parent.and_then(|comment| comment.value().attr("thingid")),
+                "reload_route":reload_route,
+                "comment_attribute_names":parent.map(|comment| comment.value().attrs().map(|(name, _)| name).take(32).collect::<Vec<_>>()),
+            }))
+        })
+        .take(40)
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "comment_tree_count":document.select(&selector("shreddit-comment-tree")).count(),
+        "rendered_comment_count":document.select(&selector("shreddit-comment[thingid]")).count(),
+        "partial_count":document.select(&selector("faceplate-partial[src]")).count(),
+        "partials":partials,
+        "more_controls":controls,
+        "reply_controls":reply_controls,
+    }))
+}
+
 fn interim_page(document: &Html, post: bool) -> Option<&'static str> {
     if document
         .select(&selector("form input[name=\"js_challenge\"]"))
@@ -160,6 +295,21 @@ pub fn parse_listing_partial(
     crate::reddit_modern::parse_partial(&Html::parse_document(&html), &listing, limit)
 }
 
+/// Parse Reddit's observed search-results cursor endpoint for the active,
+/// validated search URL. The service URL is never accepted from UI input.
+pub fn parse_search_partial(
+    response: crate::response_capture::CapturedResponse,
+    search_url: &str,
+) -> Result<PageCapture> {
+    let search = Url::parse(search_url)?;
+    let continuation = Url::parse(&response.url)?;
+    if !crate::browsing::search_partial_matches(&search, &continuation) {
+        return Err("Response was not the active public search continuation".into());
+    }
+    let html = decode(&response)?;
+    crate::reddit_modern::parse_search_partial(&Html::parse_document(&html), &search)
+}
+
 #[cfg(test)]
 mod classic_comment_count_tests {
     use super::*;
@@ -184,8 +334,36 @@ pub fn search_response_structure(
 ) -> Result<serde_json::Value> {
     let html = decode(response)?;
     let document = Html::parse_document(&html);
+    let response_base = Url::parse(&response.url)?;
     let count = |css: &str| document.select(&selector(css)).take(5000).count();
     let mut testids = std::collections::BTreeMap::<String, usize>::new();
+    let search_navigation: Vec<_> = document
+        .select(&selector(
+            "faceplate-partial[src], a[rel~='next'][href], button[rel~='next']",
+        ))
+        .take(40)
+        .filter_map(|node| {
+            let target = node
+                .value()
+                .attr("src")
+                .or_else(|| node.value().attr("href"))?;
+            let url = response_base.join(target).ok()?;
+            let mut query_keys: Vec<_> = url
+                .query_pairs()
+                .map(|(key, _)| key.into_owned())
+                .collect();
+            query_keys.sort();
+            query_keys.dedup();
+            Some(serde_json::json!({
+                "tag": node.value().name(),
+                "path": url.path(),
+                "query_keys": query_keys,
+                "slot": node.value().attr("slot"),
+                "rel": node.value().attr("rel"),
+                "testid": node.value().attr("data-testid"),
+            }))
+        })
+        .collect();
     let cards: Vec<_> = document
         .select(&selector("[data-testid=\"search-sdui-post\"]"))
         .take(100)
@@ -207,7 +385,6 @@ pub fn search_response_structure(
             }
         }
     }
-    let response_base = Url::parse(&response.url)?;
     let preview_card_paths: Vec<Vec<String>> = preview_cards
         .iter()
         .map(|card| {
@@ -243,6 +420,7 @@ pub fn search_response_structure(
         "sort_dropdowns":count("search-sort-dropdown-menu"),
         "next_links_or_buttons":count("a[rel=\"next\"], button[aria-label*=\"Next\"], button[aria-label*=\"next\"]"),
         "listing_continuations":count("faceplate-partial[slot=\"load-after\"][src]"),
+        "search_navigation":search_navigation,
         "search_testids":testids,
     }))
 }

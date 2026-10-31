@@ -60,6 +60,29 @@ fn listing_does_not_claim_comments_and_gzip_is_decoded() {
 }
 
 #[test]
+fn native_comment_structure_keeps_only_route_paths_and_query_key_names() {
+    let html = r#"<html><body>
+        <shreddit-comment-tree post-id="t3_post"></shreddit-comment-tree>
+        <shreddit-comment thingid="t1_a"></shreddit-comment>
+        <faceplate-partial slot="load-after" src="/svc/shreddit/more-comments/soccer/t3_post?cursor=private-token&amp;sort=top"></faceplate-partial>
+        <button aria-label="Continue this thread" data-token="private-token">Continue</button>
+    </body></html>"#;
+    let structure = reddit_html::comment_response_structure(&response(
+        "/r/soccer/comments/post/title/",
+        html,
+    ))
+    .unwrap();
+    assert_eq!(structure["comment_tree_count"], 1);
+    assert_eq!(structure["rendered_comment_count"], 1);
+    assert_eq!(structure["partials"][0]["route"]["path"], "/svc/shreddit/more-comments/soccer/t3_post");
+    assert_eq!(structure["partials"][0]["route"]["query_shapes"][0]["key"], "cursor");
+    assert_eq!(structure["partials"][0]["route"]["query_shapes"][1]["key"], "sort");
+    assert_eq!(structure["more_controls"][0]["label"], "Continue this thread");
+    let serialized = serde_json::to_string(&structure).unwrap();
+    assert!(!serialized.contains("private-token"));
+}
+
+#[test]
 fn comment_authors_and_club_flair_belong_to_their_own_comment() {
     let html = HTML.replace(
         "<div class=\"entry\"><div class=\"usertext-body\"><div class=\"md\">Reply",

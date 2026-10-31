@@ -133,11 +133,19 @@ async fn search_case(
 pub async fn run(app: AppHandle, browser: Arc<Browser>, output: PathBuf, data_dir: PathBuf) {
     let verify_offline_video = std::env::var("HRUNGNIR_NATIVE_PROBE_OFFLINE_VIDEO")
         .is_ok_and(|value| value == "1");
-    // Target the unresolved aggregate continuation question only.
-    let cases = vec![
+    let mode = std::env::var("HRUNGNIR_NATIVE_PROBE_MODE").unwrap_or_default();
+    let cases = if mode == "ui" {
+        vec![crate::native_ui_probe::run(&app).await]
+    } else if mode == "comments" {
+        vec![crate::comment_probe::run(&browser).await]
+    } else {
+        vec![
         listing_case(&browser, "popular").await,
+        search_case(&browser, "search:global:rust", "rust", None).await,
+        search_case(&browser, "search:subreddit:rust", "borrow checker", Some("rust")).await,
         crate::video_probe::run(&app, &browser, "soccer", verify_offline_video).await,
-    ];
+        ]
+    };
 
     let diagnostics = browser.diagnostics();
     let failures = cases.iter().filter(|case| case["status"] != "ok").count();
