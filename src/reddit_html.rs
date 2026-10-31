@@ -22,6 +22,29 @@ pub(crate) fn text(node: ElementRef<'_>, limit: usize) -> String {
         .take(limit)
         .collect()
 }
+
+fn classic_comment_count(link: ElementRef<'_>) -> Option<u64> {
+    let label = text(link, 100).trim().to_ascii_lowercase();
+    if link.value().classes().any(|class| class == "empty") && label.is_empty() {
+        return Some(0);
+    }
+    let number = label
+        .strip_suffix(" comments")
+        .or_else(|| label.strip_suffix(" comment"))?;
+    let groups: Vec<_> = number.split(',').collect();
+    if groups.is_empty()
+        || groups[0].is_empty()
+        || groups[0].len() > 3
+        || !groups[0].bytes().all(|byte| byte.is_ascii_digit())
+        || groups
+            .iter()
+            .skip(1)
+            .any(|group| group.len() != 3 || !group.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    number.replace(',', "").parse().ok()
+}
 pub(crate) fn resolve(base: &Url, input: &str) -> Option<String> {
     let mut url = base.join(input).ok()?;
     if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
@@ -135,6 +158,23 @@ pub fn parse_listing_partial(
     }
     let html = decode(&response)?;
     crate::reddit_modern::parse_partial(&Html::parse_document(&html), &listing, limit)
+}
+
+#[cfg(test)]
+mod classic_comment_count_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_exact_classic_counts_and_rejects_compact_labels() {
+        let document = Html::parse_fragment(
+            "<a>1,234 comments</a><a>1.2k comments</a><a>0 comments</a><a class=\"empty\"></a>",
+        );
+        let links: Vec<_> = document.select(&selector("a")).collect();
+        assert_eq!(classic_comment_count(links[0]), Some(1234));
+        assert_eq!(classic_comment_count(links[1]), None);
+        assert_eq!(classic_comment_count(links[2]), Some(0));
+        assert_eq!(classic_comment_count(links[3]), Some(0));
+    }
 }
 
 /// Bounded structural evidence for a native search response; it stores no HTML,
@@ -419,6 +459,7 @@ pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<Page
             link.value().classes().any(|class| class == "empty")
                 || text(link, 100).trim_start().starts_with("0 comment")
         });
+        let comment_count = comments_link.and_then(classic_comment_count);
         let mut media_urls = Vec::new();
         let mut collect_media = |media: ElementRef<'_>| {
             if let Some(url) = media
@@ -485,6 +526,7 @@ pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<Page
                 }
                 .into(),
             ),
+            comment_count,
             media_urls,
         };
         if post_id.as_deref() == Some(id.as_str()) {

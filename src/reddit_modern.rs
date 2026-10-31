@@ -193,6 +193,7 @@ fn thread_from_post(
             }
             .into(),
         ),
+        comment_count,
         media_urls: media_urls(post, base),
     })
 }
@@ -330,6 +331,7 @@ fn search_threads(document: &Html, base: &Url) -> Vec<Thread> {
             flair: None,
             source: Some("proxy".into()),
             comments_status: Some("not_loaded".into()),
+            comment_count: None,
             media_urls: Vec::new(),
         });
     }
@@ -395,6 +397,24 @@ pub fn parse(
     Ok(page)
 }
 
+#[cfg(test)]
+mod comment_count_tests {
+    use super::*;
+
+    #[test]
+    fn reads_source_reported_total_without_treating_it_as_loaded_comments() {
+        let document = Html::parse_document(
+            r#"<shreddit-post id="t3_abc123" post-title="A post" permalink="/r/rust/comments/abc123/a_post/" comment-count="987"></shreddit-post>"#,
+        );
+        let base = Url::parse("https://www.reddit.com/r/rust/").unwrap();
+        let post = document.select(&selector("shreddit-post")).next().unwrap();
+        let thread = thread_from_post(post, &base, "rust", false).unwrap();
+        assert_eq!(thread.comment_count, Some(987));
+        assert!(thread.comments.is_empty());
+        assert_eq!(thread.comments_status.as_deref(), Some("not_loaded"));
+    }
+}
+
 /// Posts from the listing's follow-up fragment, attributed to the listing the
 /// worker is acquiring. At most `limit` posts are returned.
 pub fn parse_partial(document: &Html, listing: &Url, limit: usize) -> Result<PageCapture> {
@@ -408,7 +428,7 @@ pub fn parse_partial(document: &Html, listing: &Url, limit: usize) -> Result<Pag
         more_url: None,
     };
     for post in document.select(&selector("shreddit-post")) {
-        if page.threads.len() >= limit.min(MAX_THREADS) {
+        if page.threads.len() >= limit.min(MAX_THREADS + 1) {
             break;
         }
         let Some(thread) = thread_from_post(post, listing, &subreddit, false) else {
@@ -417,6 +437,10 @@ pub fn parse_partial(document: &Html, listing: &Url, limit: usize) -> Result<Pag
         if page.threads.iter().all(|existing| existing.id != thread.id) {
             page.threads.push(thread);
         }
+    }
+    page.more_url = more_posts_url(document, listing);
+    if page.threads.len() > MAX_THREADS {
+        return Err("Listing continuation exceeded the 25-post page limit".into());
     }
     if page.threads.is_empty() {
         return Err("Listing continuation had no posts".into());

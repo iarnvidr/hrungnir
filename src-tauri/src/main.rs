@@ -11,6 +11,8 @@ mod connection_test;
 mod native_cli;
 #[cfg(debug_assertions)]
 mod native_probe;
+#[cfg(debug_assertions)]
+mod video_probe;
 mod updates;
 #[cfg(target_os = "macos")]
 mod trust_mac;
@@ -167,7 +169,7 @@ async fn open_link_post(
             browser.acquire(target.url, true).await?;
         }
     }
-    fetch_thread(browser, media, id, Some(false)).await
+    fetch_thread(browser, media, id, Some(false), None).await
 }
 
 async fn on_main<T: Send + 'static>(
@@ -203,12 +205,15 @@ async fn fetch_subreddit_operation(
         let ids = browser
             .subreddit(subreddit, sort, top_period)
             .await?;
+        let scope = reddit_offline::browsing::listing_url(subreddit, sort, top_period)
+            .map_err(|error| error.to_string())?;
         let mut snapshot = browser
             .store
             .snapshot_for_ids(Some(&ids))
             .map_err(|e| e.to_string())?;
         snapshot.threads =
             reddit_offline::browsing::select_listing_threads(snapshot.threads, subreddit, &ids);
+        snapshot.listing_page = Some(browser.listing_page_state(&scope, &ids)?);
         if let Some(links) = links {
             links.enrich(&mut snapshot);
         }
@@ -222,6 +227,47 @@ async fn fetch_subreddit_operation(
         result.as_ref().err().cloned(),
     );
     result
+}
+
+pub(crate) async fn fetch_subreddit_pages_operation(
+    browser: &Arc<browser::Browser>,
+    subreddit: &str,
+    sort: &str,
+    top_period: &str,
+    pages: usize,
+) -> Result<Snapshot, String> {
+    let mut snapshot = fetch_subreddit_operation(browser, None, subreddit, sort, top_period).await?;
+    let mut page_counts = vec![snapshot.threads.len()];
+    for _ in 1..pages.min(20) {
+        let Some(cursor) = snapshot.listing_page.as_ref().and_then(|page| page.cursor.clone()) else { break };
+        let scope = reddit_offline::browsing::listing_url(subreddit, sort, top_period).map_err(|e| e.to_string())?;
+        let next = fetch_listing_page_operation(browser, &scope, &cursor).await?;
+        page_counts.push(next.posts.len());
+        snapshot.threads.extend(next.posts);
+        snapshot.media_hints.extend(next.media_hints);
+        snapshot.listing_page = Some(next.listing_page);
+        if snapshot.listing_page.as_ref().is_some_and(|page| page.exhausted) { break; }
+    }
+    snapshot.diagnostics["listing_page_counts"] = serde_json::json!(page_counts);
+    Ok(snapshot)
+}
+
+async fn fetch_listing_page_operation(
+    browser: &Arc<browser::Browser>,
+    scope: &str,
+    cursor: &str,
+) -> Result<reddit_offline::desktop::ListingPageResponse, String> {
+    let _guard = browser.gate.lock().await;
+    browser.fetch_listing_page(scope, cursor).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn fetch_listing_page(
+    browser: State<'_, Arc<browser::Browser>>,
+    scope: String,
+    cursor: String,
+) -> Result<reddit_offline::desktop::ListingPageResponse, String> {
+    fetch_listing_page_operation(browser.inner(), &scope, &cursor).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -321,6 +367,25 @@ fn completed_assets(
         reddit_offline::linked_content::cached_assets(root, thread)
     } else {
         reddit_offline::media::cached_assets(root, thread)
+    }
+}
+
+fn should_fetch_post_comments(source: Option<&str>, comments_hit: bool, refresh: bool) -> bool {
+    matches!(source, Some("browser" | "proxy")) && (!comments_hit || refresh)
+}
+
+#[cfg(test)]
+mod fetch_thread_refresh_tests {
+    use super::should_fetch_post_comments;
+
+    #[test]
+    fn refresh_forces_comment_fetch_only_for_reddit_acquisition_sources() {
+        assert!(should_fetch_post_comments(Some("browser"), true, true));
+        assert!(should_fetch_post_comments(Some("proxy"), true, true));
+        assert!(should_fetch_post_comments(Some("browser"), false, false));
+        assert!(!should_fetch_post_comments(Some("browser"), true, false));
+        assert!(!should_fetch_post_comments(Some("linked"), true, true));
+        assert!(!should_fetch_post_comments(None, false, true));
     }
 }
 
@@ -436,7 +501,7 @@ async fn save_library_post(
     keep_forever: bool,
 ) -> Result<serde_json::Value, String> {
     // Saving is the explicit offline-download action. Opening a post is not.
-    fetch_thread(browser, media.clone(), id.clone(), Some(true)).await?;
+    fetch_thread(browser, media.clone(), id.clone(), Some(true), None).await?;
     let _guard = media.gate.lock().await;
     let root = media
         .root
@@ -786,7 +851,9 @@ async fn fetch_thread(
     media: State<'_, MediaStore>,
     id: String,
     include_media: Option<bool>,
+    refresh: Option<bool>,
 ) -> Result<ThreadDownload, String> {
+    let force_refresh = refresh.unwrap_or(false);
     let started = std::time::Instant::now();
     browser.record_detail(
         "post",
@@ -803,13 +870,13 @@ async fn fetch_thread(
             .ok_or("Post is no longer cached; refresh the subreddit")?;
         let comments_hit = reddit_offline::browsing::comments_ready(&thread)
             && !(thread.body.is_empty() && thread.link_url.as_ref().is_some_and(|url| url.contains(&format!("/comments/{}/", id.trim_start_matches("t3_")))));
-        let mut comments_reused = comments_hit;
+        let mut comments_reused = comments_hit && !force_refresh;
         let media_hit = completed_assets(&media.root, &thread).is_some();
         event(
             "post.cache",
             serde_json::json!({"thread_id":id,"comments_hit":comments_hit,"media_hit":media_hit,"media_reason":if thread.source.as_deref()==Some("linked") { if media_hit {"hit"} else {"linked_files_missing"} } else { reddit_offline::media::cache_reason(&media.root,&thread) }}),
         );
-        if matches!(thread.source.as_deref(), Some("browser" | "proxy")) && !comments_hit {
+        if should_fetch_post_comments(thread.source.as_deref(), comments_hit, force_refresh) {
             let queue = std::time::Instant::now();
             browser.record("post_source_queue", "running", 0, None);
             let _guard = browser.gate.lock().await;
@@ -825,7 +892,8 @@ async fn fetch_thread(
                 .read(&id)
                 .map_err(|e| e.to_string())?
                 .ok_or("Post was evicted")?;
-            if !reddit_offline::browsing::comments_ready(&current)
+            if force_refresh
+                || !reddit_offline::browsing::comments_ready(&current)
                 || (current.body.is_empty() && current.link_url.as_ref().is_some_and(|url| url.contains(&format!("/comments/{}/", id.trim_start_matches("t3_"))))) {
                 browser
                     .acquire(current.permalink.ok_or("Missing post URL")?, true)
@@ -1162,6 +1230,18 @@ fn main() {
         .manage(updates::UpdateState::default())
         .setup(move |app| {
             let mut live_cli_request = live_cli_request;
+            #[cfg(debug_assertions)]
+            let native_probe_output =
+                std::env::var_os("HRUNGNIR_NATIVE_PROBE").map(std::path::PathBuf::from);
+            #[cfg(not(debug_assertions))]
+            let native_probe_output: Option<std::path::PathBuf> = None;
+            #[cfg(debug_assertions)]
+            let probe_data_dir = native_probe_output
+                .as_ref()
+                .and_then(|_| std::env::var_os("HRUNGNIR_DATA_DIR"))
+                .map(std::path::PathBuf::from);
+            #[cfg(not(debug_assertions))]
+            let probe_data_dir: Option<std::path::PathBuf> = None;
             let directory = live_cli_request
                 .as_ref()
                 .and_then(|request| {
@@ -1169,6 +1249,7 @@ fn main() {
                         std::env::var_os("HRUNGNIR_DATA_DIR").map(std::path::PathBuf::from)
                     })
                 })
+                .or_else(|| probe_data_dir.clone())
                 .unwrap_or(app.path().app_data_dir()?);
             std::fs::create_dir_all(&directory)?;
             let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -1186,11 +1267,6 @@ fn main() {
             } else {
                 None
             };
-            #[cfg(debug_assertions)]
-            let native_probe_output =
-                std::env::var_os("HRUNGNIR_NATIVE_PROBE").map(std::path::PathBuf::from);
-            #[cfg(not(debug_assertions))]
-            let native_probe_output: Option<std::path::PathBuf> = None;
             if connection_output.is_none()
                 && native_probe_output.is_none()
                 && live_cli_request.is_none()
@@ -1224,7 +1300,7 @@ fn main() {
             app.manage(tauri::async_runtime::block_on(web_links::LinkStore::new(directory.clone()))?);
             let store_identifier = browser::webview_store_identifier(
                 &directory,
-                live_cli_request.is_some(),
+                live_cli_request.is_some() || probe_data_dir.is_some(),
             )
             .map_err(|error| format!("Could not select isolated WebKit data store: {error}"))?;
             let browser = browser::Browser::new(
@@ -1334,6 +1410,7 @@ fn main() {
             save_position,
             prune_cache,
             fetch_subreddit,
+            fetch_listing_page,
             search_reddit,
             web_links::open_web_link,
             web_links::fetch_link_article,

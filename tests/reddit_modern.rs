@@ -282,7 +282,7 @@ fn search_without_results_is_valid_only_on_a_results_page() {
 #[test]
 fn listing_continuation_adds_posts_to_the_active_listing() {
     let html = format!(
-        "{}{}{}<shreddit-ad-post id=\"t3_ad\"></shreddit-ad-post>",
+        "{}{}{}<shreddit-ad-post id=\"t3_ad\"></shreddit-ad-post><faceplate-partial slot=\"load-after\" src=\"/svc/shreddit/community-more-posts/best/?after=next%3D&amp;name=soccer\"></faceplate-partial>",
         post("b1", "soccer", "text", "", ""),
         post("b2", "soccer", "text", "", ""),
         post("x1", "tennis", "text", "", ""),
@@ -292,6 +292,7 @@ fn listing_continuation_adds_posts_to_the_active_listing() {
     assert_eq!(page.url, "https://www.reddit.com/r/soccer/");
     let ids: Vec<_> = page.threads.iter().map(|t| t.id.as_str()).collect();
     assert_eq!(ids, ["t3_b1", "t3_b2"]);
+    assert_eq!(page.more_url.as_deref(), Some("/svc/shreddit/community-more-posts/best/?after=next%3D&name=soccer"));
 
     let limited = reddit_html::parse_listing_partial(
         response("/svc/shreddit/community-more-posts/best/?name=soccer", &html),
@@ -307,6 +308,22 @@ fn listing_continuation_adds_posts_to_the_active_listing() {
         5,
     );
     assert!(none.is_err());
+}
+
+#[test]
+fn listing_continuation_rejects_overflow_without_silently_advancing() {
+    let html = (0..26)
+        .map(|index| post(&format!("overflow{index}"), "soccer", "text", "", ""))
+        .collect::<String>();
+    let result = reddit_html::parse_listing_partial(
+        response("/svc/shreddit/community-more-posts/best/?name=soccer&after=cursor", &html),
+        "https://www.reddit.com/r/soccer/hot/",
+        26,
+    );
+    match result {
+        Err(error) => assert!(error.to_string().contains("25-post page limit")),
+        Ok(_) => panic!("overflow fragment should be rejected without advancing"),
+    }
 }
 
 #[test]

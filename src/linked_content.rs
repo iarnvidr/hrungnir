@@ -456,6 +456,7 @@ pub async fn save(
         permalink: None,
         source: Some("linked".into()),
         comments_status: Some("empty_confirmed".into()),
+        comment_count: None,
     };
     let manifest = serde_json::json!({"sources":[url.as_str()],"files":files});
     if !keep {

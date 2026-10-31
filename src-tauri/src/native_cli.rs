@@ -10,6 +10,7 @@ pub enum Command {
         subreddit: String,
         sort: String,
         period: String,
+        pages: usize,
     },
     Search {
         query: String,
@@ -86,11 +87,16 @@ pub fn parse(args: &[String]) -> Result<Option<Request>, String> {
     };
     let mut subreddit = None;
     let mut smart = true;
+    let mut pages = 1usize;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
             "--sort" => sort = take_value(&args, &mut index, "--sort")?,
             "--period" => period = take_value(&args, &mut index, "--period")?,
+            "--pages" if verb == "fetch-reddit" => {
+                pages = take_value(&args, &mut index, "--pages")?.parse().map_err(|_| "--pages must be between 1 and 20")?;
+                if !(1..=20).contains(&pages) { return Err("--pages must be between 1 and 20".into()); }
+            }
             "--subreddit" if verb == "search-reddit" => {
                 subreddit = Some(take_value(&args, &mut index, "--subreddit")?);
             }
@@ -119,6 +125,7 @@ pub fn parse(args: &[String]) -> Result<Option<Request>, String> {
             subreddit: positional,
             sort,
             period,
+            pages,
         }
     } else {
         if !matches!(sort.as_str(), "relevance" | "new" | "top" | "comments") {
@@ -141,12 +148,12 @@ pub async fn run(app: AppHandle, browser: Arc<Browser>, request: Request) {
             subreddit,
             sort,
             period,
+            pages,
         } => {
-            let result =
-                crate::fetch_subreddit_operation(&browser, None, &subreddit, &sort, &period).await;
+            let result = crate::fetch_subreddit_pages_operation(&browser, &subreddit, &sort, &period, pages).await;
             (
                 "fetch-reddit",
-                json!({"subreddit":subreddit,"sort":sort,"period":period}),
+                json!({"subreddit":subreddit,"sort":sort,"period":period,"pages":pages}),
                 result,
             )
         }
@@ -210,7 +217,7 @@ mod tests {
             std::path::Path::new("/tmp/hrungnir-cli")
         );
         assert!(
-            matches!(request.command, Command::Listing { subreddit, sort, period } if subreddit == "soccer" && sort == "hot" && period == "day")
+            matches!(request.command, Command::Listing { subreddit, sort, period, pages } if subreddit == "soccer" && sort == "hot" && period == "day" && pages == 1)
         );
     }
 
@@ -232,8 +239,19 @@ mod tests {
             std::path::Path::new("/tmp/hrungnir-cli")
         );
         assert!(
-            matches!(request.command, Command::Listing { subreddit, sort, period } if subreddit == "all" && sort == "top" && period == "week")
+            matches!(request.command, Command::Listing { subreddit, sort, period, pages } if subreddit == "all" && sort == "top" && period == "week" && pages == 1)
         );
+    }
+
+    #[test]
+    fn live_listing_cli_page_count_is_bounded_for_paging_checks() {
+        let args = ["fetch-reddit".into(), "soccer".into(), "--pages".into(), "2".into()];
+        let request = parse(&args).unwrap().unwrap();
+        assert!(matches!(request.command, Command::Listing { pages: 2, .. }));
+        for count in ["0", "21", "many"] {
+            let args = ["fetch-reddit".into(), "soccer".into(), "--pages".into(), count.into()];
+            assert!(parse(&args).is_err());
+        }
     }
 
     #[test]

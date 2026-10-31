@@ -132,7 +132,10 @@ async fn search_case(
 
 pub async fn run(app: AppHandle, browser: Arc<Browser>, output: PathBuf, data_dir: PathBuf) {
     // Target the unresolved aggregate continuation question only.
-    let cases = vec![listing_case(&browser, "popular").await];
+    let cases = vec![
+        listing_case(&browser, "popular").await,
+        crate::video_probe::run(&app, &browser, "soccer").await,
+    ];
 
     let diagnostics = browser.diagnostics();
     let failures = cases.iter().filter(|case| case["status"] != "ok").count();
@@ -164,7 +167,7 @@ pub async fn run(app: AppHandle, browser: Arc<Browser>, output: PathBuf, data_di
                 "{}",
                 json!({"report":output,"bytes":bytes,"failed_or_empty_cases":failures})
             );
-            app.exit(0);
+            app.exit(if failures == 0 { 0 } else { 1 });
         }
         Err(error) => {
             eprintln!("native probe report write failed: {error}");
