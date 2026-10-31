@@ -29,6 +29,7 @@ CHECKS = (
     "settings-update-check.js",
     "search-keyboard-check.js",
     "search-layout-check.js",
+    "search-recovery-check.js",
 )
 
 
@@ -114,7 +115,9 @@ class Cdp:
                 })
             elif method == "screenshot":
                 result = self.command("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": True})
-                Path(args["path"]).write_bytes(base64.b64decode(result["data"]))
+                screenshot_path = Path(args["path"])
+                screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+                screenshot_path.write_bytes(base64.b64decode(result["data"]))
                 value = True
             else:
                 raise ValueError(f"unknown browser operation: {method}")

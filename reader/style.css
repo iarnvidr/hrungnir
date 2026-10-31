@@ -335,6 +335,8 @@ button:disabled { opacity: .55; cursor: wait; }
 .thread-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .thread-title { display: -webkit-box; overflow: hidden; font-size: calc(12px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); line-height: 1.25; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .thread-meta { flex-wrap: wrap; gap: 4px 7px; }
+.thread-comment-count { color: var(--muted); font-size: calc(10px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.thread-comment-count.cached { color: var(--warn); }
 .thread-card-actions { align-self: center; justify-content: end; flex-wrap: nowrap; gap: 6px; padding: 2px 7px 2px 0; }
 .thread-card-actions .button { min-height: 25px; padding: 3px 6px; font-size: calc(10px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); white-space: nowrap; }
 .open-web-link { min-height: 25px; padding: 2px 4px; font-size: calc(10px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); white-space: nowrap; }
@@ -355,6 +357,9 @@ button:disabled { opacity: .55; cursor: wait; }
 .cache-search-results[hidden] { display: none; }
 .cache-search-hit { display: grid; width: 100%; gap: 2px; padding: 7px 9px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); text-align: left; font: inherit; cursor: pointer; }
 .cache-search-hit:hover, .cache-search-hit:focus-visible { background: var(--accent-soft); }
+.cache-search-status { margin: 0; padding: 10px; color: var(--muted); font-size: calc(12px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); }
+.cache-search-status.error { color: var(--red); }
+.cache-search-retry { margin: 0 0 7px 9px; min-height: 29px; padding: 4px 8px; font-size: calc(11px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); }
 .cache-search-title { overflow: hidden; font-size: calc(12px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .cache-search-meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: calc(10px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); }
 .cache-search-comment-hit { color: var(--accent); }
@@ -366,6 +371,39 @@ button:disabled { opacity: .55; cursor: wait; }
 .browse-form input { width: 100%; }
 .browse-actions { display: flex; gap: 5px; }
 .browse-actions #browse-submit { flex: 1; }
+.header-tools { position: relative; z-index: 6; align-self: center; }
+.header-tools > summary {
+  display: block; min-height: 31px; padding: 5px 9px; border: 1px solid var(--line2);
+  border-radius: 2px; background: var(--raised); color: var(--text); cursor: pointer;
+  font-size: calc(12px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1));
+}
+.header-tools > summary:hover { border-color: var(--accent); background: var(--accent-soft); }
+.header-tools > summary:focus-visible, .search-options > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.header-tools-menu {
+  position: absolute; top: calc(100% + 5px); right: 0; z-index: 20; display: grid; gap: 5px;
+  min-width: 185px; padding: 8px; border: 1px solid var(--line2); background: var(--panel); box-shadow: 0 8px 22px var(--shadow);
+}
+.header-tools-menu .button { width: 100%; text-align: left; }
+.community-nav-section { margin-bottom: 8px; padding-bottom: 9px; }
+.community-nav-section .section-heading { align-items: baseline; flex-wrap: wrap; }
+.community-nav-section .subreddit-list { max-height: min(38dvh, 390px); overflow-y: auto; overscroll-behavior: contain; }
+.subreddit-view-options { padding: 8px 0; }
+.subreddit-view-options > summary { color: var(--muted); cursor: pointer; font-size: calc(11px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); }
+.subreddit-view-options[open] > summary { margin-bottom: 7px; }
+.subreddit-view-options > label { display: block; margin-top: 5px; }
+.subreddit-view-options .select-control { width: 100%; }
+.subreddit-fetch-section { padding-top: 8px; }
+.subreddit-fetch-section > label { display: block; margin-bottom: 4px; }
+.subreddit-fetch-section .browse-form input { min-height: 33px; }
+.browse-feedback .feedback-action { flex: none; white-space: nowrap; }
+.button, .thread-item, .subreddit-visit, .header-tools > summary, .search-options > summary {
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+.thread-item[aria-busy="true"] .thread-title { color: var(--muted); }
+.subreddit-fetch-section [aria-busy="true"] { cursor: progress; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
 .settings-actions { grid-column: 1 / -1; display: flex; justify-content: end; }
 .settings-group [aria-invalid="true"] { border-color: var(--red); outline-color: var(--red); }
 .post-tab-open.unavailable { color: var(--warn); }
@@ -625,4 +663,17 @@ body {
   .subreddit-visit { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   :root[data-post-tabs="vertical"] .workspace-tabs { padding-inline: 3px; }
   :root[data-post-tabs="vertical"] .workspace-tabs .new-browse-tab { white-space: normal; }
+}
+
+/* Compact search gets its own full row once the reader column narrows. */
+@media (max-width: 900px) {
+  .masthead { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; grid-template-areas: "brand tools . status" "search search search search"; align-items: center; gap: 6px 9px; }
+  .wordmark { grid-area: brand; }
+  .header-tools { grid-area: tools; }
+  .masthead-status { grid-area: status; max-width: 175px; min-width: 0; margin: 0; }
+  .header-search { grid-area: search; width: 100%; min-width: 0; max-width: none; flex-wrap: nowrap; }
+  .header-search > input { flex: 1 1 120px; width: auto; }
+  #search-scope { flex: 0 1 145px; max-width: 160px; }
+  .search-options { flex: none; }
+  .search-options > div { left: auto; right: 0; }
 }

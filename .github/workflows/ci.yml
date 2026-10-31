@@ -27,7 +27,14 @@ jobs:
           version: 0.21.11
           verb: call
           module: ./ci/dagger/check
-          args: reader-ux --source .
+          args: reader-ux-report --source . export --path artifacts/reader-ux
+      - name: Upload rendered reader review
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hrungnir-reader-ux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/reader-ux
+          if-no-files-found: error
+          retention-days: 14
 
   build-lint-test:
     runs-on: ubuntu-24.04

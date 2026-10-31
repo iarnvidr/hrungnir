@@ -19,7 +19,11 @@
   const wait = (map, id) => new Promise(resolve => map.set(id, resolve));
   const listeners = new Map();
   const updates = { available: null, failCheck: false, failInstall: false };
-  const search = { rows: threads, hits: [], error: false, comments: null };
+  const search = {
+    rows: threads, hits: [], error: false, comments: null,
+    failCommunity: null, failAllRedirect: false, holdCommunityFor: null, completedCommunities: [],
+    cacheError: false, holdCache: false, completedCacheQueries: [],
+  };
   window.__ux = { calls, completed, posts, articles, threads, updates, search,
     emit: (name, payload) => listeners.get(name)?.({payload}),
     releasePost: id => posts.get(id)?.(), releaseArticle: id => articles.get(id)?.() };
@@ -45,7 +49,13 @@
         if (search.error) throw new Error('Search source unavailable');
         return snap(args.subreddit ? search.rows.filter(thread => thread.subreddit === args.subreddit) : search.rows);
       }
-      if (command === 'search_cache') return structuredClone(search.hits);
+      if (command === 'search_cache') {
+        const rows = structuredClone(search.hits);
+        if (search.holdCache) await new Promise(resolve => { search.releaseCache = resolve; });
+        if (search.cacheError) throw new Error('Downloaded cache is unavailable');
+        search.completedCacheQueries.push({query: args.query, subreddit: args.subreddit});
+        return rows;
+      }
       if (command === 'open_cached_thread') {
         const thread = { ...threads.find(thread => thread.id === args.id), comments_status: 'partial_proxy', comments: [{id: 't1_parent', parent_id: args.id, body: 'A cached comment match.'}] };
         return {snapshot: snap([thread]), media: [], cache: {comments_hit: true, media_hit: true}};
@@ -56,7 +66,10 @@
       if (command === 'app_diagnostics') return { report: {} };
       if (command === 'fetch_link_previews') return Object.fromEntries(args.ids.map(id => [id, { kind: id === 't3_video' ? 'video' : 'article', domain: 'example.org', thumbnail: `${location.origin}/${'a'.repeat(64)}/${id}/thumb.png` }]));
       if (command === 'fetch_subreddit') {
-        if (search.holdCommunity) await new Promise(resolve => { search.releaseCommunity = resolve; });
+        if (args.subreddit === 'all' && search.failAllRedirect) throw new Error('Request to /r/all redirected to a different feed');
+        if (search.failCommunity === args.subreddit) throw new Error('Community source unavailable');
+        if (search.holdCommunity || search.holdCommunityFor === args.subreddit) await new Promise(resolve => { search.releaseCommunity = resolve; });
+        search.completedCommunities.push(args.subreddit);
         return snap();
       }
       if (command === 'fetch_thread') {
