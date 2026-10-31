@@ -160,7 +160,6 @@
     $('#post-tabs-layout').value = postLayout;
     $('#subreddit-tabs-layout').value = communityLayout;
     $('.reader-tabs').setAttribute('aria-orientation', postLayout);
-    $('.subreddit-tools').open = communityLayout === 'vertical';
     document.documentElement.dataset.theme = preferences.theme;
     document.documentElement.dataset.accent = preferences.accent;
     document.documentElement.style.colorScheme = preferences.theme === 'system' ? 'light dark' : (preferences.theme === 'classified' ? 'dark' : 'light');

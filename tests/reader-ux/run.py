@@ -313,6 +313,9 @@ def main() -> int:
             cdp.command("Page.navigate", {"url": url + "__runner.html"})
             cdp.wait_ready()
             cdp.wait_fixture_ready()
+            startup_errors = list(cdp.page_errors)
+            if startup_errors:
+                raise RuntimeError("browser exceptions during fixture startup: " + "\n".join(startup_errors))
 
             for filename in CHECKS:
                 source = (HERE / filename).read_text()
@@ -321,8 +324,12 @@ def main() -> int:
                 try:
                     result = cdp.evaluate(expression)
                 except Exception as exc:
-                    debug = cdp.evaluate("window.__readerUxDebug || []")
-                    raise RuntimeError(f"{filename}: {exc}; input trace={json.dumps(debug)}") from exc
+                    try:
+                        debug = cdp.evaluate("(() => { const frame=document.querySelector('#reader-fixture'); const doc=frame?.contentDocument; return {inputTrace:window.__readerUxDebug||[], frameUrl:frame?.src||null, readyState:doc?.readyState||null, title:doc?.title||null, threadRows:doc?.querySelectorAll('.thread-item').length??null, status:doc?.querySelector('#connection-status')?.textContent||null, pageBody:doc?.body?.innerText?.slice(0,700)||null}; })()")
+                    except Exception as diagnostic_error:
+                        debug = {"diagnosticError": str(diagnostic_error)}
+                    errors = "\n".join(cdp.page_errors) or "none captured"
+                    raise RuntimeError(f"{filename}: {exc}; page exceptions={errors}; fixture diagnostics={json.dumps(debug)}") from exc
                 if cdp.page_errors:
                     raise RuntimeError(f"{filename}: page errors: " + "\n".join(cdp.page_errors))
                 passed = result.get("passed", []) if isinstance(result, dict) else []
