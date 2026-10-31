@@ -11,7 +11,7 @@ build_container="reddit-offline-macos-$$"
 trap 'docker rm -f "$build_container" >/dev/null 2>&1 || true' EXIT
 docker run -d --name "$build_container" --entrypoint sleep "$build_image" infinity >/dev/null
 docker exec "$build_container" mkdir -p /work
-tar --exclude=target --exclude=node_modules --exclude=var --exclude=artifacts --exclude=output -cf - . |
+tar --exclude=target --exclude=var --exclude=artifacts --exclude=output -cf - . |
   docker exec -i "$build_container" tar -xf - -C /work
 # FFmpeg is built from source on a Mac (scripts/ffmpeg_lgpl.py), not in this container.
 # Build it there, then pass the binary here: FFMPEG_LGPL_BINARY=/path/to/ffmpeg.

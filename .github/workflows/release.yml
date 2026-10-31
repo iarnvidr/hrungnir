@@ -52,18 +52,15 @@ jobs:
             args+=(--trusted-main-run-id "$TRUSTED_MAIN_RUN_ID")
           fi
           python3 policy/scripts/release-artifact.py "${args[@]}"
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
-      - name: Install trusted signing tools without source lifecycle scripts
+      - name: Install pinned Rust Tauri CLI
+        run: cargo install tauri-cli --version 2.12.4 --locked
+      - name: Install independent signature verifier
         working-directory: policy
         run: |
-          npm ci --ignore-scripts
           brew install minisign
       - name: Unpack verified input for signing
         run: |
           ditto -x -k candidate/artifacts/Hrungnir-*.zip candidate/artifacts
-          ln -s "$GITHUB_WORKSPACE/policy/node_modules" candidate/node_modules
       - name: Sign updater transformation using trusted policy
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
