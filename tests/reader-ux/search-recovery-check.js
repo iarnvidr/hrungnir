@@ -161,7 +161,7 @@ async (page) => {
   await page.evaluate(() => window.__ux.search.releasePage());
   await page.waitForFunction(() => document.querySelector('#thread-view')?.textContent.includes('A readable article about the next space mission'));
   assert(await page.locator('#thread-view').isVisible(), 'page completion pulled the reader away from the selected post');
-  assert((await page.locator('#discussion-comments').innerText()).includes('A cached comment match.'), 'page summary replaced downloaded comments while the reader was open');
+  assert((await page.locator('#discussion-comments').innerText()).includes('A useful discussion, available before the video finishes.'), 'page summary replaced downloaded comments while the reader was open');
   await page.locator('#tab-browse').click();
   await page.waitForFunction(() => document.querySelectorAll('.thread-item').length === 27);
   assert(await page.evaluate(() => document.querySelector('.thread-item[data-thread-id="t3_article"]') === window.__ux.firstListingRow), 'returning from the reader remounted existing feed rows after append');
@@ -169,7 +169,7 @@ async (page) => {
   assert(await page.evaluate(() => window.scrollY) === 0, 'appending a page moved the current scroll position');
   await page.locator('.thread-item[data-thread-id="t3_article"] .thread-open').click();
   await page.waitForFunction(() => document.querySelector('.comments-header')?.textContent === '30 comments · 1 downloaded');
-  assert((await page.locator('#discussion-comments').innerText()).includes('A cached comment match.'), 'summary update discarded the previously downloaded comment body');
+  assert((await page.locator('#discussion-comments').innerText()).includes('A useful discussion, available before the video finishes.'), 'summary update discarded the previously downloaded comment body');
   await page.locator('#tab-browse').click();
   assert((await page.locator('#listing-pagination-status').innerText()).includes('Scroll to load more'), 'continuation state is not announced');
   await page.evaluate(() => document.querySelector('#listing-sentinel').scrollIntoView({block:'center'}));
