@@ -218,6 +218,16 @@ fn search_result(id: &str, sub: &str, comments: u32) -> String {
     )
 }
 
+fn search_preview_result(id: &str, sub: &str) -> String {
+    format!(
+        r#"<faceplate-search-result data-testid="search-post-with-content-preview">
+        <div data-testid="search-counter-row">
+        <a data-testid="post-title-text" href="/r/{sub}/comments/{id}/story/">Preview {id}</a>
+        <a data-testid="post-title" href="/r/{sub}/comments/{id}/story/">Preview {id}</a>
+        </div></faceplate-search-result>"#
+    )
+}
+
 #[test]
 fn search_results_and_challenge_resubmission_are_recognized() {
     let html = format!(
@@ -235,6 +245,30 @@ fn search_results_and_challenge_resubmission_are_recognized() {
 
     let scoped = reddit_html::parse(response("/r/rust/search/?q=async&restrict_sr=on&sort=new&t=week", &html)).unwrap();
     assert_eq!(scoped.threads.len(), 1, "results from other communities are not accepted");
+}
+
+#[test]
+fn global_search_includes_preview_cards_and_keeps_scope_and_deduplication() {
+    let html = format!(
+        "<html><body><search-results-page-tabs></search-results-page-tabs>{}{}{}{}{}{}</body></html>",
+        search_result("sdui", "rust", 3),
+        search_preview_result("p1", "rust"),
+        search_preview_result("p2", "golang"),
+        search_preview_result("p3", "rust"),
+        search_preview_result("p4", "programmingcirclejerk"),
+        search_preview_result("p1", "rust"),
+    );
+    let page = reddit_html::parse(response("/search/?q=rust", &html)).unwrap();
+    let ids: Vec<_> = page.threads.iter().map(|thread| thread.id.as_str()).collect();
+    assert_eq!(ids, ["t3_sdui", "t3_p1", "t3_p2", "t3_p3", "t3_p4"]);
+
+    let scoped = reddit_html::parse(response(
+        "/r/rust/search/?q=rust&restrict_sr=on",
+        &html,
+    ))
+    .unwrap();
+    let scoped_ids: Vec<_> = scoped.threads.iter().map(|thread| thread.id.as_str()).collect();
+    assert_eq!(scoped_ids, ["t3_sdui", "t3_p1", "t3_p3"]);
 }
 
 #[test]
@@ -273,4 +307,61 @@ fn listing_continuation_adds_posts_to_the_active_listing() {
         5,
     );
     assert!(none.is_err());
+}
+
+#[test]
+fn popular_feed_continuation_is_bound_to_the_active_aggregate_listing() {
+    let html = format!(
+        "{}{}",
+        post("p1", "soccer", "text", "", ""),
+        post("p2", "technology", "text", "", ""),
+    );
+    let route = "/svc/shreddit/feeds/popular-feed?after=t3_a&cursor=next-page&navigationSessionId=abc123&sort=hot";
+    let page = reddit_html::parse_listing_partial(
+        response(route, &html),
+        "https://www.reddit.com/r/popular/hot/",
+        25,
+    )
+    .unwrap();
+    assert_eq!(
+        page.threads
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect::<Vec<_>>(),
+        ["t3_p1", "t3_p2"]
+    );
+    assert!(reddit_html::parse_listing_partial(
+        response(route, &html),
+        "https://www.reddit.com/r/soccer/hot/",
+        25,
+    )
+    .is_err());
+}
+
+#[test]
+fn only_popular_listing_follows_the_observed_feed_continuation() {
+    let path = "/svc/shreddit/feeds/popular-feed?after=t3_a&cursor=next-page&navigationSessionId=abc123&sort=hot";
+    let html = format!(
+        "<faceplate-partial slot=\"load-after\" src=\"{path}\"></faceplate-partial>{}",
+        post("p1", "soccer", "text", "", "")
+    );
+    let popular =
+        reddit_html::parse(response("/r/popular/hot/", &html)).unwrap();
+    assert_eq!(popular.more_url.as_deref(), Some(path));
+
+    let soccer = reddit_html::parse(response("/r/soccer/hot/", &html)).unwrap();
+    assert!(soccer.more_url.is_none());
+    assert!(reddit_html::parse(response("/r/popular/top/", &html)).is_err());
+
+    let unsupported = format!(
+        "<faceplate-partial slot=\"load-after\" src=\"/svc/shreddit/feeds/home-feed?cursor=x\"></faceplate-partial>{}",
+        post("p2", "soccer", "text", "", "")
+    );
+    let error = match reddit_html::parse(response("/r/popular/hot/", &unsupported)) {
+        Ok(_) => panic!("unsupported popular continuation should fail explicitly"),
+        Err(error) => error,
+    };
+    assert!(error
+        .to_string()
+        .contains("Popular listing exposed an unsupported continuation"));
 }

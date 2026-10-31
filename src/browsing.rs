@@ -19,6 +19,38 @@ pub fn subreddit_url(input: &str) -> Result<String> {
     Ok(format!("https://www.reddit.com/r/{name}/"))
 }
 
+/// Whether a captured thread belongs to the requested listing scope.
+/// Reddit's `all` and `popular` listings contain posts from many communities.
+pub fn listing_scope_matches(requested: &str, actual: &str) -> bool {
+    let requested = requested.trim().trim_matches('/');
+    let requested = requested.strip_prefix("r/").unwrap_or(requested);
+    requested.eq_ignore_ascii_case("all")
+        || requested.eq_ignore_ascii_case("popular")
+        || actual.eq_ignore_ascii_case(requested)
+}
+
+/// Select and order a listing response by the IDs returned for that request.
+pub fn select_listing_threads(
+    threads: Vec<Thread>,
+    requested: &str,
+    ids: &[String],
+) -> Vec<Thread> {
+    let ranks: std::collections::HashMap<_, _> = ids
+        .iter()
+        .enumerate()
+        .map(|(rank, id)| (id.as_str(), rank))
+        .collect();
+    let mut threads: Vec<_> = threads
+        .into_iter()
+        .filter(|thread| {
+            ranks.contains_key(thread.id.as_str())
+                && listing_scope_matches(requested, &thread.subreddit)
+        })
+        .collect();
+    threads.sort_by_key(|thread| ranks.get(thread.id.as_str()).copied());
+    threads
+}
+
 pub fn listing_url(input: &str, sort: &str, period: &str) -> Result<String> {
     if !matches!(sort, "hot" | "new" | "top" | "rising")
         || !matches!(period, "hour" | "day" | "week" | "month" | "year" | "all")
@@ -164,7 +196,7 @@ pub fn without_challenge_params(input: &str) -> String {
 /// page's own script requests the rest from this read-only fragment endpoint.
 pub fn listing_partial_path(path: &str, query: Option<&str>) -> bool {
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
-    parts.len() == 4
+    let community_partial = parts.len() == 4
         && parts[..3] == ["svc", "shreddit", "community-more-posts"]
         && matches!(parts[3], "hot" | "best" | "new" | "top" | "rising")
         && query
@@ -173,7 +205,50 @@ pub fn listing_partial_path(path: &str, query: Option<&str>) -> bool {
                     .find(|(key, _)| key == "name")
                     .map(|(_, name)| subreddit_url(&name).is_ok())
             })
-            .unwrap_or(false)
+            .unwrap_or(false);
+    community_partial || popular_feed_partial_path(path, query)
+}
+
+/// Reddit's rendered /r/popular page currently names this read-only feed
+/// continuation. Keep the endpoint and its query grammar exact and bounded.
+pub fn popular_feed_partial_path(path: &str, query: Option<&str>) -> bool {
+    if path != "/svc/shreddit/feeds/popular-feed"
+        || query.is_none_or(|query| query.len() > 2048)
+    {
+        return false;
+    }
+    let mut fields = std::collections::HashMap::new();
+    for (key, value) in url::form_urlencoded::parse(query.unwrap().as_bytes()) {
+        if !matches!(
+            key.as_ref(),
+            "adDistance"
+                | "ad_posts_served"
+                | "after"
+                | "cursor"
+                | "distance"
+                | "navigationSessionId"
+                | "sort"
+        ) || value.len() > 1024
+            || value.chars().any(char::is_control)
+            || fields.insert(key.into_owned(), value.into_owned()).is_some()
+        {
+            return false;
+        }
+    }
+    fields
+        .get("sort")
+        .is_some_and(|sort| sort.eq_ignore_ascii_case("hot"))
+        && fields.get("cursor").is_some_and(|value| !value.is_empty())
+        && fields
+            .get("navigationSessionId")
+            .is_some_and(|value| !value.is_empty() && value.len() <= 128)
+        && ["adDistance", "ad_posts_served", "distance"]
+            .iter()
+            .all(|key| {
+                fields
+                    .get(*key)
+                    .is_none_or(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+            })
 }
 
 pub fn is_listing_partial_url(input: &str) -> bool {

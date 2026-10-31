@@ -17,25 +17,24 @@ git rev-parse HEAD
 sw_vers
 uname -m                              # arm64
 xcrun --find clang                    # an existing Xcode/CLT clang path
-brew install node@22 python meson ninja pkgconf
-export PATH="$(brew --prefix node@22)/bin:$PATH"
+brew install python meson ninja pkgconf
 python3 --version                     # 3.12 or newer
-node --version                        # v22.x
 rustup toolchain install stable --profile minimal --component clippy --target aarch64-apple-darwin
 rustup override set stable
 rustc --version                       # 1.90 or newer
+cargo install tauri-cli --version 2.12.4 --locked
 export TMPDIR="$(python3 -c 'import pathlib, tempfile; print(pathlib.Path(tempfile.gettempdir()).resolve())')"
-npm ci
 cargo test --locked
 cargo clippy --locked --all-targets
 python3 scripts/test-macos-policy.py
 python3 scripts/test-ffmpeg-lgpl.py
-node --check reader/app.js
 ```
 
 - [ ] All commands exit 0. Core tests: 153 passed in total, one ignored network
   test; no failures. Policy tests: 2 pass. Recipe tests: 10 total, with host-specific
-  skips on Mac. JavaScript check prints nothing on success. Review any clippy
+  skips on Mac. Confirm the GitHub Actions `reader-ux` job passes; it runs the
+  interaction suite and parses `reader/app.js` in container Chromium without a local
+  browser or driver. Review any clippy
   warnings; a missing clippy component is not a successful lint.
 
 ## 2. Build and exercise the bundled helpers

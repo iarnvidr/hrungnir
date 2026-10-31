@@ -119,8 +119,158 @@ pub fn parse_listing_partial(
 ) -> Result<PageCapture> {
     let mut listing = Url::parse(&classic_url(listing_url)?)?;
     listing.set_query(None);
+    if !crate::browsing::is_listing_partial_url(&response.url) {
+        return Err("Response was not a public listing continuation".into());
+    }
+    let continuation = Url::parse(&response.url)?;
+    if crate::browsing::popular_feed_partial_path(continuation.path(), continuation.query()) {
+        let parts: Vec<_> = listing.path().trim_matches('/').split('/').collect();
+        if parts.len() != 3
+            || parts[0] != "r"
+            || !parts[1].eq_ignore_ascii_case("popular")
+            || parts[2] != "hot"
+        {
+            return Err("Popular feed continuation did not match the active listing".into());
+        }
+    }
     let html = decode(&response)?;
     crate::reddit_modern::parse_partial(&Html::parse_document(&html), &listing, limit)
+}
+
+/// Bounded structural evidence for a native search response; it stores no HTML,
+/// result text, request query, cookies, or signed URLs.
+pub fn search_response_structure(
+    response: &crate::response_capture::CapturedResponse,
+) -> Result<serde_json::Value> {
+    let html = decode(response)?;
+    let document = Html::parse_document(&html);
+    let count = |css: &str| document.select(&selector(css)).take(5000).count();
+    let mut testids = std::collections::BTreeMap::<String, usize>::new();
+    let cards: Vec<_> = document
+        .select(&selector("[data-testid=\"search-sdui-post\"]"))
+        .take(100)
+        .collect();
+    let preview_cards: Vec<_> = document
+        .select(&selector(
+            "[data-testid=\"search-post-with-content-preview\"]",
+        ))
+        .take(100)
+        .collect();
+    let title_selector = selector(
+        "a[data-testid=\"post-title-text\"][href], a[data-testid=\"post-title\"][href]",
+    );
+    let mut card_testids = std::collections::BTreeMap::<String, usize>::new();
+    for card in &cards {
+        for node in card.select(&selector("[data-testid]")).take(500) {
+            if let Some(testid) = node.value().attr("data-testid") {
+                *card_testids.entry(testid.chars().take(80).collect()).or_default() += 1;
+            }
+        }
+    }
+    let response_base = Url::parse(&response.url)?;
+    let preview_card_paths: Vec<Vec<String>> = preview_cards
+        .iter()
+        .map(|card| {
+            card.select(&title_selector)
+                .filter_map(|link| {
+                    link.value()
+                        .attr("href")
+                        .and_then(|href| response_base.join(href).ok())
+                        .map(|url| url.path().to_owned())
+                })
+                .take(4)
+                .collect()
+        })
+        .collect();
+    for node in document.select(&selector("[data-testid]")).take(5000) {
+        if let Some(testid) = node.value().attr("data-testid") {
+            if testid.contains("search") || testid.contains("pagination") || testid.contains("post-title") {
+                *testids.entry(testid.chars().take(80).collect()).or_default() += 1;
+            }
+        }
+    }
+    Ok(serde_json::json!({
+        "html_bytes":html.len(),
+        "search_result_cards":count("[data-testid=\"search-sdui-post\"]"),
+        "search_result_title_links":count("a[data-testid=\"post-title-text\"][href], a[data-testid=\"post-title\"][href]"),
+        "search_card_title_links":cards.iter().map(|card| card.select(&title_selector).count()).sum::<usize>(),
+        "search_card_testids":card_testids,
+        "search_preview_cards":preview_cards.len(),
+        "search_preview_card_title_links":preview_cards.iter().map(|card| card.select(&title_selector).count()).sum::<usize>(),
+        "search_preview_card_paths":preview_card_paths,
+        "shreddit_posts":count("shreddit-post"),
+        "results_page_tabs":count("search-results-page-tabs"),
+        "sort_dropdowns":count("search-sort-dropdown-menu"),
+        "next_links_or_buttons":count("a[rel=\"next\"], button[aria-label*=\"Next\"], button[aria-label*=\"next\"]"),
+        "listing_continuations":count("faceplate-partial[slot=\"load-after\"][src]"),
+        "search_testids":testids,
+    }))
+}
+
+/// Bounded path-only evidence for the aggregate popular listing in a native
+/// debug probe. Query values and page content are deliberately omitted.
+pub fn popular_listing_response_structure(
+    response: &crate::response_capture::CapturedResponse,
+) -> Result<serde_json::Value> {
+    let html = decode(response)?;
+    let document = Html::parse_document(&html);
+    let base = Url::parse(&response.url)?;
+    let mut continuations = Vec::new();
+    for partial in document
+        .select(&selector("faceplate-partial[slot=\"load-after\"][src]"))
+        .take(20)
+    {
+        let Some(url) = partial
+            .value()
+            .attr("src")
+            .and_then(|src| base.join(src).ok())
+        else {
+            continue;
+        };
+        let mut query_keys: Vec<_> = url
+            .query_pairs()
+            .map(|(key, _)| key.into_owned())
+            .collect();
+        query_keys.sort();
+        query_keys.dedup();
+        let mut fields = std::collections::BTreeMap::<String, Vec<String>>::new();
+        for (key, value) in url.query_pairs() {
+            fields
+                .entry(key.into_owned())
+                .or_default()
+                .push(value.into_owned());
+        }
+        let first = |key: &str| fields.get(key).and_then(|values| values.first());
+        let numeric_fields = ["adDistance", "ad_posts_served", "distance"]
+            .iter()
+            .all(|key| {
+                fields.get(*key).is_none_or(|values| {
+                    values.len() == 1
+                        && values[0]
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit())
+                })
+            });
+        continuations.push(serde_json::json!({
+            "path":url.path(),
+            "query_keys":query_keys,
+            "query_bytes":url.query().map(str::len).unwrap_or(0),
+            "query_value_lengths":fields.iter().map(|(key, values)| (key, values.iter().map(String::len).collect::<Vec<_>>())).collect::<std::collections::BTreeMap<_, _>>(),
+            "sort_value":first("sort"),
+            "sort_is_hot":first("sort").is_some_and(|value| value.eq_ignore_ascii_case("hot")),
+            "cursor_nonempty":first("cursor").is_some_and(|value| !value.is_empty()),
+            "session_nonempty":first("navigationSessionId").is_some_and(|value| !value.is_empty()),
+            "numeric_fields":numeric_fields,
+            "accepted_by_current_gate":crate::browsing::listing_partial_path(url.path(), url.query()),
+        }));
+    }
+    Ok(serde_json::json!({
+        "listing_path":base.path(),
+        "html_bytes":html.len(),
+        "server_rendered_posts":document.select(&selector("shreddit-post")).take(500).count(),
+        "continuation_count":continuations.len(),
+        "continuations":continuations,
+    }))
 }
 
 pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<PageCapture> {
@@ -151,7 +301,18 @@ pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<Page
         let mut page =
             crate::reddit_modern::parse(&document, &base, searching, post_id.as_deref())?;
         if !searching && post_id.is_none() {
-            page.more_url = crate::reddit_modern::more_posts_url(&document);
+            page.more_url = crate::reddit_modern::more_posts_url(&document, &base);
+            if base.path().starts_with("/r/popular/")
+                && page.more_url.is_none()
+                && document
+                    .select(&selector("faceplate-partial[slot=\"load-after\"][src]"))
+                    .next()
+                    .is_some()
+            {
+                return Err(
+                    "Popular listing exposed an unsupported continuation route or query".into(),
+                );
+            }
         }
         return Ok(page);
     }

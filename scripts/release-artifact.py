@@ -23,6 +23,8 @@ CI_WORKFLOW = '.github/workflows/ci.yml'
 HELPER_PATH = 'scripts/release-artifact.py'
 PLATFORM = 'darwin-aarch64'
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
+LEGACY_TOOLCHAIN_KEYS = {'rustc', 'node', 'macos', 'sdk'}
+TOOLCHAIN_KEYS = {'rustc', 'tauri_cli', 'macos', 'sdk'}
 
 
 def sha(data):
@@ -36,6 +38,11 @@ def git(root, *args):
 
 def version(root):
     return json.loads((root / 'src-tauri/tauri.conf.json').read_text())['version']
+
+
+def valid_toolchain(tools):
+    """Accept prior signed receipts while new receipts record the Rust CLI."""
+    return isinstance(tools, dict) and set(tools) in (LEGACY_TOOLCHAIN_KEYS, TOOLCHAIN_KEYS)
 
 
 def request(path, binary=False):
@@ -125,7 +132,8 @@ def receipt(root):
         'tree': git(root, 'rev-parse', 'HEAD^{tree}'),
         'workflow_sha': os.environ['GITHUB_WORKFLOW_SHA'],
         'toolchain': {name: subprocess.run(command, capture_output=True, text=True, check=True).stdout.strip()
-                      for name, command in {'rustc': ['rustc', '--version'], 'node': ['node', '--version'],
+                      for name, command in {'rustc': ['rustc', '--version'],
+                                            'tauri_cli': ['cargo-tauri', '--version'],
                                             'macos': ['sw_vers', '-productVersion'],
                                             'sdk': ['xcrun', '--show-sdk-version']}.items()},
         'platform': PLATFORM,
@@ -255,7 +263,7 @@ def validate_pr_candidate(data, artifact, run, pr, merge_sha, merge_tree, build_
     if any(record.get(key) != value for key, value in expected.items()):
         raise ValueError('native receipt does not match the accepted PR tree, base, or run')
     tools = record.get('toolchain', {})
-    if (set(tools) != {'rustc', 'node', 'macos', 'sdk'}
+    if (not valid_toolchain(tools)
             or any(not isinstance(value, str) or not value for value in tools.values())):
         raise ValueError('native toolchain identity is incomplete')
     files = validate_files(record, members, build_version)
@@ -505,7 +513,7 @@ def manual_main_candidate(root, run_id, merge_sha, merge_tree, build_version, ap
     if any(key in receipt_record for key in ('pr_number', 'pr_head_sha', 'head_repository')):
         raise ValueError('manual main fallback receipt unexpectedly identifies a PR build')
     tools = receipt_record.get('toolchain', {})
-    if set(tools) != {'rustc', 'node', 'macos', 'sdk'} or any(not isinstance(v, str) or not v for v in tools.values()):
+    if not valid_toolchain(tools) or any(not isinstance(v, str) or not v for v in tools.values()):
         raise ValueError('manual native toolchain identity is incomplete')
     files = validate_files(receipt_record, members, build_version)
     policy_files = verify_policy_files(receipt_record.get('workflow_sha'), merge_sha, api_fn)

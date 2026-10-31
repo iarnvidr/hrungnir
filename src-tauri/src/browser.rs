@@ -4,17 +4,41 @@ use reddit_offline::{
     desktop::DesktopStore,
     proxy::BrowserProxy,
 };
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const WORKER: &str = "reddit-live";
+
+/// Keep explicit live CLI data roots on separate macOS WebKit profiles. Hash
+/// canonical paths instead of exposing paths in the fixed-size store ID.
+pub fn webview_store_identifier(data_dir: &Path, live_cli: bool) -> Result<[u8; 16], String> {
+    if !live_cli {
+        return Ok(if cfg!(debug_assertions) {
+            *b"OfflineRedditDev"
+        } else {
+            *b"OfflineReddit001"
+        });
+    }
+    let canonical = std::fs::canonicalize(data_dir).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"hrungnir-wkwebview-cli-store-v1\0");
+    hasher.update(canonical.as_os_str().as_encoded_bytes());
+    let digest = hasher.finalize();
+    let mut identifier = [0; 16];
+    identifier.copy_from_slice(&digest[..16]);
+    Ok(identifier)
+}
+
 struct Progress {
     generation: u64,
     url: String,
     revision: u64,
     error: Option<String>,
+    rejected_path: Option<String>,
     captured: bool,
     ids: Vec<String>,
     layout: Option<String>,
@@ -26,6 +50,7 @@ struct Progress {
 pub struct Browser {
     app: AppHandle,
     pub store: DesktopStore,
+    webview_store_identifier: [u8; 16],
     proxy: BrowserProxy,
     progress: Mutex<Progress>,
     pub gate: tokio::sync::Mutex<()>,
@@ -37,19 +62,26 @@ pub struct Browser {
 }
 
 impl Browser {
-    pub fn new(app: AppHandle, store: DesktopStore, proxy: BrowserProxy) -> Arc<Self> {
+    pub fn new(
+        app: AppHandle,
+        store: DesktopStore,
+        proxy: BrowserProxy,
+        webview_store_identifier: [u8; 16],
+    ) -> Arc<Self> {
         proxy.set_online(false);
         let captures = proxy.take_captures();
         let failures = proxy.take_failures();
         let browser = Arc::new(Self {
             app,
             store,
+            webview_store_identifier,
             proxy,
             progress: Mutex::new(Progress {
                 generation: 0,
                 url: String::new(),
                 revision: 0,
                 error: None,
+                rejected_path: None,
                 captured: false,
                 ids: Vec::new(),
                 layout: None,
@@ -101,6 +133,45 @@ impl Browser {
                             "proxy capture: generation={generation}, compressed_bytes={}",
                             response.bytes.len()
                         );
+                        if cfg!(debug_assertions)
+                            && std::env::var_os("HRUNGNIR_NATIVE_PROBE").is_some()
+                        {
+                            let structure = response.url.parse::<tauri::Url>().ok().and_then(|url| {
+                                if reddit_offline::browsing::search_path(url.path()) {
+                                    Some((
+                                        "search_structure",
+                                        reddit_offline::reddit_html::search_response_structure(&response),
+                                    ))
+                                } else if url.path() == "/r/popular"
+                                    || url.path().starts_with("/r/popular/")
+                                {
+                                    Some((
+                                        "listing_structure",
+                                        reddit_offline::reddit_html::popular_listing_response_structure(&response),
+                                    ))
+                                } else {
+                                    None
+                                }
+                            });
+                            if let Some((stage, result)) = structure {
+                                match result {
+                                Ok(shape) => browser.record_detail(
+                                    stage,
+                                    "observed",
+                                    0,
+                                    None,
+                                    shape,
+                                ),
+                                Err(error) => browser.record_detail(
+                                    stage,
+                                    "failed",
+                                    0,
+                                    Some(error.to_string()),
+                                    serde_json::json!({"generation":generation}),
+                                ),
+                                }
+                            }
+                        }
                         let partial = reddit_offline::browsing::is_listing_partial_url(&response.url);
                         let parsed = if partial {
                             let (listing, taken) = {
@@ -249,6 +320,7 @@ impl Browser {
             url: url.clone(),
             revision: 0,
             error: None,
+            rejected_path: None,
             captured: false,
             ids: Vec::new(),
             layout: None,
@@ -297,8 +369,11 @@ impl Browser {
             let allowed = reddit_url(url.as_str())
                 && reddit_offline::browsing::public_content_path(url.path());
             if reddit_url(url.as_str()) && !allowed {
-                progress.error =
-                    Some("Reddit redirected this source away from public community content".into());
+                progress.error = Some(format!(
+                    "Reddit redirected to {} outside public community content",
+                    url.path()
+                ));
+                progress.rejected_path = Some(url.path().to_owned());
                 navigation.ready.notify_one();
             }
             if allowed {
@@ -318,7 +393,7 @@ impl Browser {
             allowed
         });
         #[cfg(target_os = "macos")]
-        let builder = builder.data_store_identifier(*b"OfflineReddit001");
+        let builder = builder.data_store_identifier(self.webview_store_identifier);
         #[cfg(target_os = "linux")]
         let builder = builder.data_directory(
             self.app
@@ -673,11 +748,12 @@ impl Browser {
         sort: &str,
         period: &str,
     ) -> Result<Vec<String>, String> {
-        self.acquire(
-            listing_url(subreddit, sort, period).map_err(|e| e.to_string())?,
-            false,
-        )
-        .await?;
+        self.listing_at_url(listing_url(subreddit, sort, period).map_err(|e| e.to_string())?)
+            .await
+    }
+
+    pub async fn listing_at_url(self: &Arc<Self>, url: String) -> Result<Vec<String>, String> {
+        self.acquire(url, false).await?;
         Ok(self
             .progress
             .lock()
@@ -750,6 +826,41 @@ impl Browser {
         let progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
         let now = reddit_offline::diagnostics::now_ms();
         let active:Vec<_>=self.active.lock().unwrap_or_else(|e|e.into_inner()).iter().map(|(stage,(started,count))|serde_json::json!({"stage":stage,"started_at_ms":started,"elapsed_ms":now.saturating_sub(*started),"count":count})).collect();
-        serde_json::json!({"source":{"host":"www.reddit.com","transport":"HTTPS response tee","parser":"Reddit HTML in Rust","trust":"app-scoped, exact www.reddit.com host","layout":"current","last_observed_layout":progress.layout,"preference_configured":progress.preference_present,"last_capture_posts":progress.ids.len(),"acquisition_busy":self.gate.try_lock().is_err(),"remote_ui":false,"comments":"downloaded HTML subset, maximum 300"},"proxy":self.proxy.status(),"operations":self.operations.lock().unwrap_or_else(|e| e.into_inner()).clone(),"active_operations":active,"logging":reddit_offline::diagnostics::health()})
+        serde_json::json!({"source":{"host":"www.reddit.com","transport":"HTTPS response tee","parser":"Reddit HTML in Rust","trust":"app-scoped, exact www.reddit.com host","layout":"current","last_observed_layout":progress.layout,"preference_configured":progress.preference_present,"last_capture_posts":progress.ids.len(),"last_rejected_path":progress.rejected_path,"acquisition_busy":self.gate.try_lock().is_err(),"remote_ui":false,"comments":"downloaded HTML subset, maximum 300"},"proxy":self.proxy.status(),"operations":self.operations.lock().unwrap_or_else(|e| e.into_inner()).clone(),"active_operations":active,"logging":reddit_offline::diagnostics::health()})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::webview_store_identifier;
+    use std::{fs, path::PathBuf};
+
+    #[test]
+    fn live_cli_webview_store_ids_are_stable_and_data_root_scoped() {
+        let root: PathBuf = std::env::temp_dir().join(format!(
+            "hrungnir-store-id-test-{}-{}",
+            std::process::id(),
+            reddit_offline::diagnostics::now_ms()
+        ));
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+
+        let first_id = webview_store_identifier(&first, true).unwrap();
+        assert_eq!(first_id, webview_store_identifier(&first, true).unwrap());
+        assert_ne!(first_id, webview_store_identifier(&second, true).unwrap());
+        assert_eq!(first_id.len(), 16);
+
+        let default_id = webview_store_identifier(&first, false).unwrap();
+        assert_eq!(
+            &default_id,
+            if cfg!(debug_assertions) {
+                b"OfflineRedditDev"
+            } else {
+                b"OfflineReddit001"
+            }
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }
