@@ -24,7 +24,7 @@
     rows: threads, hits: [], error: false, comments: null,
     failCommunity: null, failAllRedirect: false, holdCommunityFor: null, completedCommunities: [],
     cacheError: false, holdCache: false, completedCacheQueries: [],
-    enablePaging: false, pageError: false, holdPage: false, pageCalls: [], repeatCursor: false, pageThreads: [],
+      enablePaging: false, pageError: false, pageExpired: false, holdPage: false, pageCalls: [], repeatCursor: false, pageThreads: [],
       refreshError: false, refreshNotLoaded: false, refreshHold: false, refreshedComments: null, refreshedMediaUrls: null, provideMedia: false,
       streamCandidateCalls: [], streamPlayCalls: [], streamPlayRejectOnce: false,
   };
@@ -112,6 +112,7 @@
       if (command === 'fetch_listing_page') {
         search.pageCalls.push({ ...args });
         if (search.holdPage) await new Promise(resolve => { search.releasePage = resolve; });
+        if (search.pageExpired) throw new Error('Listing cursor expired; refresh the listing.');
         if (search.pageError) throw new Error('Continuation source unavailable');
         if (args.cursor === 'page-1') return {
           posts: [

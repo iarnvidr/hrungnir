@@ -112,6 +112,7 @@ async (page) => {
     window.__ux.search.holdCache = false;
     window.__ux.search.hits = [{id:'t3_article', title:'All Reddit downloaded result', subreddit:'space'}];
   });
+  await page.locator('#search-scope').focus();
   await page.locator('#search-scope').selectOption('all');
   await page.waitForFunction(() => document.querySelector('#cache-search-list .cache-search-title')?.textContent === 'All Reddit downloaded result');
   assert(await page.locator('#search-scope').evaluate(node => node === document.activeElement), 'scope change lost focus while suggestions loaded');
@@ -300,5 +301,17 @@ async (page) => {
   await page.locator('#listing-load-more').click();
   await page.waitForFunction(() => document.querySelector('#listing-pagination-status').textContent.includes('same page again'));
   assert(!(await page.locator('#listing-load-more').isVisible()), 'repeated continuation cursor did not stop pagination');
-  return {passed:['failed subreddit preserves listing and focus','retry commits requested community','r/all redirect explanation and explicit search action','stale subreddit response cannot replace newer search','stale community completion preserves Library and clears busy state','downloaded search retry and retained focus/query','stale suggestion response cannot cross search scopes','pagination failure preserves posts and retries same cursor','pagination deduplicates and auto loads to exhaustion without scroll jump','continued media hint streams only on explicit play, survives offline save, and falls back locally','repeated continuation cursor stops safely','refresh rejects listing-only responses and preserves keyboard focus, comments, and video; refresh updates source total and new replies','More/search Options disclosures close with Escape and outside interaction','720px dark theme at enlarged text','1100px light theme']};
+  await page.evaluate(() => { window.__ux.search.repeatCursor = false; window.__ux.search.pageExpired = true; });
+  await waitForListing('space');
+  await page.waitForFunction(() => document.querySelectorAll('.thread-item').length === 25);
+  await page.locator('#listing-load-more').click();
+  await page.waitForFunction(() => document.querySelector('#listing-pagination-status').textContent.includes('cursor expired'));
+  assert(await page.locator('#listing-load-more').innerText() === 'Refresh listing', 'expired continuation did not offer a fresh listing action');
+  await page.evaluate(() => { window.__ux.search.communityCountBeforeCursorRefresh = window.__ux.search.completedCommunities.length; });
+  await page.locator('#listing-load-more').click();
+  await page.waitForFunction(() => window.__ux.search.completedCommunities.length > window.__ux.search.communityCountBeforeCursorRefresh && !document.querySelector('#browse-submit').disabled);
+  assert((await page.locator('#current-subreddit').innerText()).includes('Posts in r/space'), 'expired cursor recovery refreshed the wrong community');
+  assert((await page.locator('#listing-pagination-status').innerText()).includes('Scroll to load more'), 'expired cursor recovery did not install a fresh continuation');
+  assert(await page.locator('.thread-item').count() === 25, 'expired cursor recovery did not return to a clean first page');
+  return {passed:['failed subreddit preserves listing and focus','retry commits requested community','r/all redirect explanation and explicit search action','stale subreddit response cannot replace newer search','stale community completion preserves Library and clears busy state','downloaded search retry and retained focus/query','stale suggestion response cannot cross search scopes','pagination failure preserves posts and retries same cursor','pagination deduplicates and auto loads to exhaustion without scroll jump','continued media hint streams only on explicit play, survives offline save, and falls back locally','repeated continuation cursor stops safely','expired listing cursor offers a fresh transactional listing','refresh rejects listing-only responses and preserves keyboard focus, comments, and video; refresh updates source total and new replies','More/search Options disclosures close with Escape and outside interaction','720px dark theme at enlarged text','1100px light theme']};
 }

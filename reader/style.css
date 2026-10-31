@@ -110,6 +110,8 @@ button:disabled { opacity: .55; cursor: wait; }
   background: transparent; color: var(--text); text-align: left; font: inherit; line-height: 1.35;
 }
 .thread-item:hover { background: var(--raised); }
+@keyframes feed-row-arrive { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+.thread-item-appended { animation: feed-row-arrive 140ms ease-out both; }
 .thread-item[aria-current=true] { padding-left: 7px; border-color: var(--line2); border-left: 2px solid var(--accent); background: var(--accent-soft); }
 .thread-item[aria-busy=true] { opacity: .62; cursor: progress; }
 .thread-list[aria-busy=true] { opacity: .7; }
@@ -417,6 +419,7 @@ button:disabled { opacity: .55; cursor: wait; }
 .subreddit-fetch-section [aria-busy="true"] { cursor: progress; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  .thread-item-appended { animation: none !important; }
 }
 .settings-actions { grid-column: 1 / -1; display: flex; justify-content: end; }
 .settings-group [aria-invalid="true"] { border-color: var(--red); outline-color: var(--red); }

@@ -1264,6 +1264,10 @@
       : `${base}/${encodeURIComponent(sort)}/`;
   }
 
+  function isExpiredListingCursor(message) {
+    return /(?:listing )?cursor expired|expired listing cursor/i.test(String(message || ''));
+  }
+
   function updateListingPagination() {
     const state = redditSearch ? null : listingPaginationBySubreddit.get(activeSubreddit);
     const canContinue = Boolean(state && typeof state.cursor === 'string' && state.cursor && !state.exhausted);
@@ -1276,7 +1280,9 @@
     }
     ui.listingLoadMore.hidden = state.exhausted || Boolean(state.stopReason);
     ui.listingLoadMore.setAttribute('aria-disabled', String(state.loading || feedLoading || ui.browse.disabled));
-    ui.listingLoadMore.textContent = state.error ? 'Retry loading more posts' : (state.loading || feedLoading ? 'Loading more posts…' : 'Load more posts');
+    ui.listingLoadMore.textContent = state.error
+      ? (isExpiredListingCursor(state.error) ? 'Refresh listing' : 'Retry loading more posts')
+      : (state.loading || feedLoading ? 'Loading more posts…' : 'Load more posts');
     ui.listingPaginationStatus.classList.toggle('error', Boolean(state.error));
     const loaded = (listingBySubreddit.get(activeSubreddit) || []).length;
     ui.listingPaginationStatus.textContent = state.error
@@ -1407,6 +1413,7 @@
     threads.forEach((thread, index) => {
       if (appendOnly && (!appendedIds || !appendedIds.has(thread.id) || ui.list.querySelector(`[data-thread-id="${CSS.escape(thread.id)}"]`))) return;
       const card = element('article', 'thread-item');
+      if (appendOnly) card.classList.add('thread-item-appended');
       card.dataset.threadId = thread.id;
       card.dataset.threadIndex = String(index);
       card.setAttribute('aria-current', String(thread.id === activeId));
@@ -3971,7 +3978,12 @@
         if (entries.some((entry) => entry.isIntersecting)) void loadNextListingPage();
       }, { root: null, rootMargin: '240px 0px', threshold: 0 });
     }
-    ui.listingLoadMore.addEventListener('click', () => void loadNextListingPage());
+    ui.listingLoadMore.addEventListener('click', () => {
+      if (ui.browse.disabled || listingPageInFlight.has(activeSubreddit)) return;
+      const state = listingPaginationBySubreddit.get(activeSubreddit);
+      if (state?.error && isExpiredListingCursor(state.error)) void browseSubreddit(`/r/${activeSubreddit}`);
+      else void loadNextListingPage();
+    });
     document.addEventListener('keydown', (event) => {
       if (!(event.repeat && (event.key === 'l' || event.key === 'Enter'))) keyboardNavigationSequence++;
     }, { capture: true });
