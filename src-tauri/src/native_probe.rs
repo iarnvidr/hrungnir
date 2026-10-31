@@ -131,10 +131,12 @@ async fn search_case(
 }
 
 pub async fn run(app: AppHandle, browser: Arc<Browser>, output: PathBuf, data_dir: PathBuf) {
+    let verify_offline_video = std::env::var("HRUNGNIR_NATIVE_PROBE_OFFLINE_VIDEO")
+        .is_ok_and(|value| value == "1");
     // Target the unresolved aggregate continuation question only.
     let cases = vec![
         listing_case(&browser, "popular").await,
-        crate::video_probe::run(&app, &browser, "soccer").await,
+        crate::video_probe::run(&app, &browser, "soccer", verify_offline_video).await,
     ];
 
     let diagnostics = browser.diagnostics();

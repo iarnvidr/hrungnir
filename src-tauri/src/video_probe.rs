@@ -331,7 +331,56 @@ async fn webview_playback(app: &AppHandle, candidate: &Url) -> Value {
     })
 }
 
-pub async fn run(app: &AppHandle, browser: &Arc<Browser>, subreddit: &str) -> Value {
+async fn offline_cache_proof(app: &AppHandle, thread_id: &str) -> Value {
+    let Some(window) = app.get_webview_window("main") else {
+        return json!({"status":"main_webview_missing"});
+    };
+    let started = Instant::now();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let received = events.clone();
+    let listener_started = started;
+    let listener = app.listen(PROBE_EVENT, move |event| {
+        record_event(&received, event.payload(), listener_started);
+    });
+    let Ok(encoded_id) = serde_json::to_string(thread_id) else {
+        app.unlisten(listener);
+        return json!({"status":"thread_id_encode_failed"});
+    };
+    let script = format!(
+        "(() => {{ const emit=(payload)=>{{try{{void window.__TAURI__.event.emit('{PROBE_EVENT}',payload).catch(()=>{{}})}}catch(_){{}}}}; const invoke=window.__TAURI__?.core?.invoke; if(!invoke){{emit({{event:'offline_cache_proof',status:'bridge_missing'}});return}}; const summarize=(result)=>({{comments_hit:!!result?.cache?.comments_hit,media_hit:!!result?.cache?.media_hit,asset_count:Array.isArray(result?.media)?result.media.length:0,video_count:Array.isArray(result?.media)?result.media.filter(asset=>asset?.kind==='video').length:0}}); (async()=>{{let stage='first_download';try{{const first=await invoke('fetch_thread',{{id:{encoded_id},include_media:true}}); stage='first_validation'; const first_validated=await invoke('validate_cached_media',{{id:{encoded_id}}}); stage='cached_fetch'; const cached=await invoke('fetch_thread',{{id:{encoded_id},include_media:true}}); stage='offline_reopen'; const reopened=await invoke('open_cached_thread',{{id:{encoded_id}}}); emit({{event:'offline_cache_proof',status:'completed',first:summarize(first),first_validated:!!first_validated,cached:summarize(cached),reopened:summarize(reopened),reopened_validated:!!(await invoke('validate_cached_media',{{id:{encoded_id}}}))}})}}catch(_){{emit({{event:'offline_cache_proof',status:'failed',stage}})}}}})() }})()"
+    );
+    if let Err(error) = window.eval(&script) {
+        app.unlisten(listener);
+        return json!({"status":"eval_failed","error":error.to_string()});
+    }
+    let deadline = started + Duration::from_secs(240);
+    loop {
+        let snapshot = events
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(result) = snapshot
+            .iter()
+            .find(|event| event["event"] == "offline_cache_proof")
+        {
+            let result = result.clone();
+            app.unlisten(listener);
+            return result;
+        }
+        if Instant::now() >= deadline {
+            app.unlisten(listener);
+            return json!({"status":"timeout","timeout_ms":240000});
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+pub async fn run(
+    app: &AppHandle,
+    browser: &Arc<Browser>,
+    subreddit: &str,
+    verify_offline_cache: bool,
+) -> Value {
     let listing_started = Instant::now();
     let listing = fetch_subreddit_pages_operation(browser, subreddit, "hot", "day", 3).await;
     let snapshot = match listing {
@@ -379,9 +428,25 @@ pub async fn run(app: &AppHandle, browser: &Arc<Browser>, subreddit: &str) -> Va
         });
     }
     let playback = webview_playback(app, &candidate).await;
+    let offline_cache = if playback["status"] == "played" && verify_offline_cache {
+        Some(offline_cache_proof(app, &thread_id).await)
+    } else {
+        None
+    };
+    let offline_cache_confirmed = offline_cache.as_ref().is_some_and(|proof| {
+        proof["status"] == "completed"
+            && proof["first_validated"] == true
+            && proof["first"]["video_count"].as_u64().unwrap_or_default() > 0
+            && proof["cached"]["comments_hit"] == true
+            && proof["cached"]["media_hit"] == true
+            && proof["reopened"]["comments_hit"] == true
+            && proof["reopened"]["media_hit"] == true
+            && proof["reopened_validated"] == true
+            && proof["reopened"]["video_count"].as_u64().unwrap_or_default() > 0
+    });
     json!({
         "name":format!("video:{subreddit}"),
-        "status":if playback["status"]=="played" {"ok"} else {"native_playback_incomplete"},
+        "status":if playback["status"]!="played" {"native_playback_incomplete"} else if verify_offline_cache && !offline_cache_confirmed {"offline_cache_proof_incomplete"} else {"ok"},
         "thread_id":thread_id,
         "community":community,
         "candidate_host":"v.redd.it",
@@ -391,6 +456,8 @@ pub async fn run(app: &AppHandle, browser: &Arc<Browser>, subreddit: &str) -> Va
         "listing_elapsed_ms":listing_elapsed_ms,
         "manifest":manifest,
         "native_wkwebview":playback,
-        "cache_state":"probe_did_not_create_completed_media_cache",
+        "offline_cache_proof":offline_cache,
+        "offline_cache_confirmed":offline_cache_confirmed,
+        "cache_state":if offline_cache.is_some() { "bounded_debug_download_and_reopen_exercised" } else { "probe_did_not_create_completed_media_cache" },
     })
 }

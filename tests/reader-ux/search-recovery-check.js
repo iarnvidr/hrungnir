@@ -269,7 +269,7 @@ async (page) => {
   assert(!(await page.locator('.header-tools').evaluate(node => node.open)), 'Escape did not close More tools');
   assert(await moreTools.evaluate(node => node === document.activeElement), 'Escape did not return focus to More tools');
   await moreTools.click();
-  await page.locator('#current-subreddit').click();
+  await page.locator('#subreddit-input').click();
   assert(!(await page.locator('.header-tools').evaluate(node => node.open)), 'outside interaction did not close More tools');
   assert(!(await page.locator('#cache-search-input').evaluate(node => node === document.activeElement)), 'outside interaction stole focus into search');
   await page.locator('.search-options > summary').click();

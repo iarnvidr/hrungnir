@@ -710,3 +710,4 @@ body {
   #header-search-submit { grid-column: 2; }
   .search-options { grid-column: 3; }
 }
+#tab-library { justify-self: start; width: max-content; }

@@ -829,8 +829,12 @@
     }
     const current = (() => { try { return normalizeSubreddit(ui.input.value); } catch (_) { return ''; } })();
     ui.favoriteCurrent.disabled = !current;
-    ui.favoriteCurrent.textContent = favorites.has(current) ? '★ Favorited' : '☆ Favorite current';
-    ui.favoriteCurrent.setAttribute('aria-pressed', String(favorites.has(current)));
+    const isCurrentFavorite = favorites.has(current);
+    ui.favoriteCurrent.textContent = isCurrentFavorite ? '★ Favorited' : '☆ Favorite';
+    const favoriteLabel = current ? `${isCurrentFavorite ? 'Remove' : 'Add'} r/${current} ${isCurrentFavorite ? 'from' : 'to'} favorites` : 'Favorite current subreddit';
+    ui.favoriteCurrent.setAttribute('aria-label', favoriteLabel);
+    ui.favoriteCurrent.title = favoriteLabel;
+    ui.favoriteCurrent.setAttribute('aria-pressed', String(isCurrentFavorite));
   }
 
   function normalizeLibraryState(state) {
