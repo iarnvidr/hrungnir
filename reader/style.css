@@ -147,6 +147,12 @@ button:disabled { opacity: .55; cursor: wait; }
 .thread-view h1 { margin: 8px 0 14px; color: var(--text); font-size: calc(21px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); line-height: 1.3; }
 .thread-body { margin: 0 0 18px; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
 .comments-header { margin: 19px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: calc(11px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); text-transform: uppercase; }
+.comments-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 19px; }
+.comments-heading .comments-header { flex: 1 1 auto; min-width: 0; margin: 0; }
+.discussion-refresh { flex: none; min-height: 30px; }
+.discussion-refresh-status { margin: 3px 0 6px; }
+.discussion-refresh-status.error { color: var(--red); }
+.partial-comments-note { padding: 5px 8px; border-left: 2px solid var(--warn); background: var(--accent-soft); }
 .comment-note { padding: 6px 0; color: var(--muted); font-size: calc(11px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); }
 .comment-list { display: grid; gap: 7px; }
 .comment { min-width: 0; margin-left: 4px; padding-left: 8px; border-left: 2px solid var(--line2); }
@@ -337,6 +343,11 @@ button:disabled { opacity: .55; cursor: wait; }
 .thread-meta { flex-wrap: wrap; gap: 4px 7px; }
 .thread-comment-count { color: var(--muted); font-size: calc(10px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .thread-comment-count.cached { color: var(--warn); }
+.listing-pagination { display: grid; justify-items: center; gap: 5px; max-width: 900px; margin: 12px auto 24px; padding: 10px; border-top: 1px solid var(--line); text-align: center; }
+.listing-pagination[hidden] { display: none; }
+.listing-pagination p { margin: 0; }
+.listing-pagination .error { color: var(--red); }
+#listing-sentinel { width: 100%; height: 1px; }
 .thread-card-actions { align-self: center; justify-content: end; flex-wrap: nowrap; gap: 6px; padding: 2px 7px 2px 0; }
 .thread-card-actions .button { min-height: 25px; padding: 3px 6px; font-size: calc(10px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); white-space: nowrap; }
 .open-web-link { min-height: 25px; padding: 2px 4px; font-size: calc(10px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); white-space: nowrap; }
@@ -624,7 +635,7 @@ body {
 .thread-item, .comment-card, .cache-search-hit { scroll-margin-top: calc(var(--workspace-tabs-height, 38px) + var(--community-sticky-height, 0px) + var(--masthead-height, 90px) + 8px); }
 .workspace-tabs {
   position: sticky; top: 0; z-index: 4;
-  display: flex; align-items: stretch; gap: 8px;
+  display: flex; align-self: start; align-items: stretch; gap: 8px;
   min-height: 38px; padding-inline: 10px;
   background: var(--rail); border-bottom: 1px solid var(--line);
 }
@@ -666,6 +677,13 @@ body {
 }
 
 /* Compact search gets its own full row once the reader column narrows. */
+:root[data-subreddit-tabs="vertical"] .subreddit-tools > summary { display: none; }
+:root[data-subreddit-tabs="vertical"] .subreddit-tools[open] { margin: 0; padding: 0; border: 0; }
+:root[data-subreddit-tabs="horizontal"] .community-nav-section { display: flex; flex: 1 1 auto; align-items: center; min-width: 0; gap: 8px; margin: 0; padding: 0; border: 0; }
+:root[data-subreddit-tabs="horizontal"] .community-nav-section .section-heading { flex: none; }
+:root[data-subreddit-tabs="horizontal"] .community-nav-section .section-heading h1 { margin: 0; }
+:root[data-subreddit-tabs="horizontal"] .community-nav-section .subreddit-list { flex: 1 1 auto; max-height: none; }
+:root[data-subreddit-tabs="horizontal"] .community-nav-section .empty { flex: none; margin: 0; }
 @media (max-width: 900px) {
   .masthead { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; grid-template-areas: "brand tools . status" "search search search search"; align-items: center; gap: 6px 9px; }
   .wordmark { grid-area: brand; }

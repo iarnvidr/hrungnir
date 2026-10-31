@@ -5,11 +5,16 @@ async (page) => {
     await page.locator('#browse-submit').click();
     await page.waitForFunction(() => !document.querySelector('#browse-submit').disabled);
   };
+  const openSettings = async () => {
+    if (!(await page.locator('.header-tools').evaluate(node => node.open))) await page.locator('.header-tools > summary').click();
+    await page.locator('#settings-open').click();
+  };
 
   await page.evaluate(() => localStorage.clear());
   await page.reload();
   await page.waitForFunction(() => document.querySelectorAll('.thread-item').length === 28);
-  await waitForListing('soccer');
+  await waitForListing('space');
+  assert(await page.locator('.thread-item[data-thread-id="t3_article"] .thread-comment-count').innerText() === '3 comments', 'post row does not show the source comment total');
   const originalCount = await page.locator('.thread-item').count();
 
   // A failed community fetch leaves the previously rendered listing in place.
@@ -117,10 +122,107 @@ async (page) => {
   await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 50)));
   assert(await page.locator('#cache-search-list .cache-search-title').innerText() === 'All Reddit downloaded result', 'late cache response replaced results from a newer scope');
 
+  // Pagination keeps the current page intact on errors, retries the same cursor,
+  // deduplicates overlapping pages, and continues when the sentinel is reached.
+  await page.evaluate(() => {
+    window.__ux.search.enablePaging = true;
+    window.__ux.search.pageError = true;
+    window.__ux.search.holdPage = true;
+    window.scrollTo(0, 0);
+  });
+  await waitForListing('space');
+  await page.waitForFunction(() => document.querySelectorAll('.thread-item').length === 25);
+  assert(await page.locator('.thread-item[data-thread-id="t3_article"] .thread-comment-count').innerText() === '3 comments', 'post row does not show the source comment total');
+  await page.locator('.thread-open').first().click();
+  await page.waitForFunction(() => window.__ux.posts.has('t3_article'));
+  await page.evaluate(() => window.__ux.releasePost('t3_article'));
+  await page.waitForFunction(() => document.querySelector('.comments-header')?.textContent === '3 comments · 1 downloaded');
+  assert((await page.locator('.partial-comments-note').innerText()).includes('Downloaded 1 of 3 comments'), 'partial discussion does not explain the loaded-vs-source count');
+  assert(!(await page.locator('#thread-view').innerText()).includes('No comments yet'), 'partial discussion claimed no comments exist');
+  await page.locator('#tab-browse').click();
+  if (!(await page.evaluate(() => window.__ux.search.pageCalls.length))) await page.locator('#listing-load-more').click();
+  await page.waitForFunction(() => typeof window.__ux.search.releasePage === 'function');
+  await page.evaluate(() => { window.scrollTo(0, 0); window.__ux.search.releasePage(); });
+  await page.waitForFunction(() => document.querySelector('#listing-pagination-status').textContent.includes('Could not load more posts'));
+  assert(await page.locator('.thread-item').count() === 25, 'pagination failure removed existing posts');
+  assert((await page.locator('#current-subreddit').innerText()).includes('Posts in r/space'), 'pagination failure changed the selected listing');
+  assert(await page.evaluate(() => window.scrollY) === 0, 'pagination failure changed the user scroll position');
+  assert(await page.locator('#listing-load-more').innerText() === 'Retry loading more posts', 'pagination failure has no retry action');
+  await page.evaluate(() => { window.__ux.search.pageError = false; });
+  await page.locator('#listing-load-more').click();
+  await page.waitForFunction(() => window.__ux.search.pageCalls.length === 2 && typeof window.__ux.search.releasePage === 'function');
+  assert(await page.evaluate(() => window.__ux.search.pageCalls[0].cursor === window.__ux.search.pageCalls[1].cursor), 'pagination retry advanced or replaced the failed cursor');
+  await page.evaluate(() => {
+    window.__ux.firstListingRow = document.querySelector('.thread-item[data-thread-id="t3_article"]');
+    window.scrollTo(0, 0);
+  });
+  await page.locator('.thread-item[data-thread-id="t3_article"] .thread-open').click();
+  await page.evaluate(() => window.__ux.search.releasePage());
+  await page.waitForFunction(() => document.querySelector('#thread-view')?.textContent.includes('A readable article about the next space mission'));
+  assert(await page.locator('#thread-view').isVisible(), 'page completion pulled the reader away from the selected post');
+  assert(await page.locator('#discussion-comments').innerText().includes('A cached comment match.'), 'page summary replaced downloaded comments while the reader was open');
+  await page.locator('#tab-browse').click();
+  await page.waitForFunction(() => document.querySelectorAll('.thread-item').length === 27);
+  assert(await page.evaluate(() => document.querySelector('.thread-item[data-thread-id="t3_article"]') === window.__ux.firstListingRow), 'returning from the reader remounted existing feed rows after append');
+  assert(await page.locator('.thread-item[data-thread-id="t3_article"] .thread-comment-count').innerText() === '30 comments', 'listing summary did not refresh the existing post source comment total');
+  assert(await page.evaluate(() => window.scrollY) === 0, 'appending a page moved the current scroll position');
+  await page.locator('.thread-item[data-thread-id="t3_article"] .thread-open').click();
+  await page.waitForFunction(() => document.querySelector('.comments-header')?.textContent === '30 comments · 1 downloaded');
+  assert((await page.locator('#discussion-comments').innerText()).includes('A cached comment match.'), 'summary update discarded the previously downloaded comment body');
+  await page.locator('#tab-browse').click();
+  assert((await page.locator('#listing-pagination-status').innerText()).includes('Scroll to load more'), 'continuation state is not announced');
+  await page.evaluate(() => document.querySelector('#listing-sentinel').scrollIntoView({block:'center'}));
+  await page.waitForFunction(() => window.__ux.search.pageCalls.length === 3 && window.__ux.search.pageCalls[2].cursor === 'page-2' && typeof window.__ux.search.releasePage === 'function');
+  const scrollAtSecondPage = await page.evaluate(() => window.scrollY);
+  await page.evaluate(() => window.__ux.search.releasePage());
+  await page.waitForFunction(() => document.querySelectorAll('.thread-item').length === 28 && document.querySelector('#listing-pagination-status').textContent.includes('End of this listing'));
+  assert(await page.evaluate(() => window.scrollY) === scrollAtSecondPage, 'automatic continuation moved the user scroll position');
+  assert(await page.locator('.thread-item[data-thread-id="t3_fixture24"]').count() === 1, 'overlapping pages duplicated an existing post');
+  assert(await page.evaluate(() => document.querySelectorAll('.thread-item').length === new Set([...document.querySelectorAll('.thread-item[data-thread-id]')].map(node => node.dataset.threadId)).size), 'pagination produced duplicate post rows');
+  assert(!(await page.locator('#listing-load-more').isVisible()), 'end of listing left a load button enabled');
+  assert(await page.locator('.thread-item[data-thread-id="t3_fixture27"] .inline-media-toggle').isVisible(), 'continued video post lost its media affordance');
+  assert(!(await page.evaluate(() => window.__ux.calls.some(call => call.command === 'fetch_thread' && call.args.id === 't3_fixture27'))), 'continuation fetched video media before the user asked to play it');
+  await page.evaluate(() => { window.__ux.search.provideMedia = true; });
+  await page.locator('.thread-item[data-thread-id="t3_fixture27"] .inline-media-toggle').click();
+  await page.waitForFunction(() => window.__ux.calls.some(call => call.command === 'fetch_thread' && call.args.id === 't3_fixture27'));
+
+  // Refreshing comments updates cached text/counts without remounting the
+  // current video player or discarding the prior discussion on failure.
+  await page.evaluate(() => { window.__ux.search.refreshNotLoaded = true; window.__ux.search.refreshError = false; });
+  await page.locator('.thread-item[data-thread-id="t3_video"] .thread-open').click();
+  await page.waitForFunction(() => window.__ux.posts.has('t3_video'));
+  await page.evaluate(() => window.__ux.releasePost('t3_video'));
+  await page.waitForFunction(() => document.querySelector('#thread-view video'));
+  await page.evaluate(() => {
+    window.__ux.videoBeforeRefresh = document.querySelector('#thread-view video');
+    window.__ux.videoSourceBeforeRefresh = window.__ux.videoBeforeRefresh.currentSrc || window.__ux.videoBeforeRefresh.src;
+    return window.__ux.videoSourceBeforeRefresh;
+  });
+  const oldDiscussion = await page.locator('#discussion-comments').innerText();
+  await page.locator('.discussion-refresh').focus();
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelector('#discussion-refresh-status').textContent.includes('Could not refresh comments'));
+  assert(await page.locator('.discussion-refresh').evaluate(node => node === document.activeElement), 'invalid listing-only refresh response dropped keyboard focus');
+  assert((await page.locator('#discussion-comments').innerText()).includes(oldDiscussion.split('\n')[0]), 'listing-only refresh response replaced the cached discussion');
+  assert(await page.evaluate(() => document.querySelector('#thread-view video') === window.__ux.videoBeforeRefresh), 'listing-only refresh response remounted the video player');
+  await page.evaluate(() => { window.__ux.search.refreshNotLoaded = false; window.__ux.search.refreshError = true; });
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelector('#discussion-refresh-status').textContent.includes('Could not refresh comments'));
+  assert(await page.evaluate(() => document.querySelector('#thread-view video') === window.__ux.videoBeforeRefresh), 'failed discussion refresh remounted the video player');
+  assert(await page.evaluate(() => (document.querySelector('#thread-view video').currentSrc || document.querySelector('#thread-view video').src) === window.__ux.videoSourceBeforeRefresh), 'failed discussion refresh replaced the video source');
+  assert((await page.locator('#discussion-comments').innerText()).includes(oldDiscussion.split('\n')[0]), 'failed discussion refresh removed the cached discussion');
+  assert((await page.locator('#discussion-refresh-status').innerText()).includes('still available'), 'refresh failure did not explain that cached comments remain available');
+  await page.evaluate(() => { window.__ux.search.refreshError = false; });
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelector('.comments-header')?.textContent === '8 comments · 2 downloaded');
+  assert((await page.locator('#thread-view').innerText()).includes('A newly downloaded reply.'), 'discussion refresh did not show new comments');
+  assert(await page.evaluate(() => document.querySelector('#thread-view video') === window.__ux.videoBeforeRefresh), 'successful discussion refresh remounted the video player');
+  assert(await page.locator('.discussion-refresh').evaluate(node => node === document.activeElement), 'successful keyboard refresh did not restore focus to the refresh control');
+  await page.locator('#tab-browse').click();
+
   // Keep the screenshots grounded in an actual populated subreddit feed.
-  await waitForListing('soccer');
   await page.setViewportSize({width:720, height:900});
-  await page.locator('#settings-open').click();
+  await openSettings();
   await page.locator('#theme-select').selectOption('classified');
   await page.evaluate(() => {
     const input = document.querySelector('#reader-text-scale');
@@ -128,6 +230,7 @@ async (page) => {
     input.dispatchEvent(new Event('input', {bubbles:true}));
   });
   await page.locator('#settings-close').click();
+  assert(await page.locator('.header-tools > summary').evaluate(node => node === document.activeElement), 'closing Settings did not return focus to More tools');
   await page.locator('#cache-search-input').fill('same query');
   await page.waitForFunction(() => document.querySelector('#cache-search-list .cache-search-title')?.textContent === 'All Reddit downloaded result');
   const moreTools = page.locator('.header-tools > summary');
@@ -140,15 +243,24 @@ async (page) => {
   await moreTools.click();
   assert(await page.locator('#settings-open').isVisible(), 'More tools does not expose Settings when opened');
   await page.screenshot({path:'artifacts/reader-ux/search-recovery-dark-720-tools-open.png'});
+  await page.keyboard.press('Escape');
+  assert(!(await page.locator('.header-tools').evaluate(node => node.open)), 'Escape did not close More tools');
+  assert(await moreTools.evaluate(node => node === document.activeElement), 'Escape did not return focus to More tools');
   await moreTools.click();
-  assert(!(await page.locator('#settings-open').isVisible()), 'closing More tools leaves its menu exposed');
+  await page.locator('#current-subreddit').click();
+  assert(!(await page.locator('.header-tools').evaluate(node => node.open)), 'outside interaction did not close More tools');
+  assert(!(await page.locator('#cache-search-input').evaluate(node => node === document.activeElement)), 'outside interaction stole focus into search');
   await page.locator('.search-options > summary').click();
   assert(await page.locator('.search-options').evaluate(node => node.open), 'search options disclosure did not open');
+  await page.keyboard.press('Escape');
+  assert(!(await page.locator('.search-options').evaluate(node => node.open)), 'Escape did not close search options');
+  assert(await page.locator('.search-options > summary').evaluate(node => node === document.activeElement), 'Escape did not return focus to search options');
+  await page.locator('.search-options > summary').click();
   await page.screenshot({path:'artifacts/reader-ux/search-recovery-dark-720-options-open.png'});
   await page.locator('.search-options > summary').click();
 
   await page.setViewportSize({width:1100, height:900});
-  await page.locator('#settings-open').click();
+  await openSettings();
   await page.locator('#theme-select').selectOption('classified_light');
   await page.evaluate(() => {
     const input = document.querySelector('#reader-text-scale');
@@ -162,5 +274,11 @@ async (page) => {
   assert(lightBox.x >= 0 && lightBox.x + lightBox.width <= 1100, 'downloaded suggestions overflow at 1100px');
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'search layout overflows at 1100px');
   await page.screenshot({path:'artifacts/reader-ux/search-recovery-light-1100.png'});
-  return {passed:['failed subreddit preserves listing and focus','retry commits requested subreddit','r/all redirect explanation and explicit search action','stale subreddit response cannot replace newer search','stale community completion preserves Library and clears busy state','downloaded search retry and retained focus/query','stale suggestion response cannot cross search scopes','720px dark theme at enlarged text','1100px light theme']};
+  await page.evaluate(() => { window.__ux.search.repeatCursor = true; window.__ux.search.holdPage = false; window.scrollTo(0, 0); });
+  await waitForListing('soccer');
+  await page.waitForFunction(() => document.querySelectorAll('.thread-item').length === 25);
+  await page.locator('#listing-load-more').click();
+  await page.waitForFunction(() => document.querySelector('#listing-pagination-status').textContent.includes('same page again'));
+  assert(!(await page.locator('#listing-load-more').isVisible()), 'repeated continuation cursor did not stop pagination');
+  return {passed:['failed subreddit preserves listing and focus','retry commits requested community','r/all redirect explanation and explicit search action','stale subreddit response cannot replace newer search','stale community completion preserves Library and clears busy state','downloaded search retry and retained focus/query','stale suggestion response cannot cross search scopes','pagination failure preserves posts and retries same cursor','pagination deduplicates and auto loads to exhaustion without scroll jump','repeated continuation cursor stops safely','refresh failure retains comments and video player; refresh updates source total and new replies','More/search Options disclosures close with Escape and outside interaction','720px dark theme at enlarged text','1100px light theme']};
 }

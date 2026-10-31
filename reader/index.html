@@ -22,7 +22,7 @@
   <header class="masthead">
     <a class="wordmark" href="#browse-panel" aria-label="Hrungnir home"><img src="hrungnir.png" alt=""><span><b>Hrungnir</b><small>OFFLINE READER</small></span></a>
     <form id="header-search-form" class="header-search" role="search" autocomplete="off">
-      <label class="sr-only" for="cache-search-input">Search Reddit; cached matches appear while typing</label>
+      <label class="sr-only" for="cache-search-input">Search Reddit; downloaded matches appear while typing</label>
       <input id="cache-search-input" type="search" autocomplete="off" placeholder="Search Reddit or downloaded posts…" aria-label="Search Reddit; downloaded matches appear while typing" aria-controls="cache-search-results cache-search-list thread-list" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false">
       <label class="sr-only" for="search-scope">Search in</label>
       <select id="search-scope" class="select-control" aria-label="Search in"><option value="all">All Reddit</option><option value="subreddit">This subreddit</option><option value="cache">Downloaded posts</option></select>
@@ -55,32 +55,35 @@
           <nav id="subreddit-list" class="subreddit-list" aria-label="Favorite and recent subreddits"></nav>
           <p id="subreddit-empty" class="muted empty">No communities yet. Fetch a subreddit below to get started.</p>
         </section>
-        <details class="rail-section subreddit-view-options"><summary>Filter and sort</summary>
-          <label class="small muted" for="subreddit-group-filter">Group</label>
-          <select id="subreddit-group-filter" class="select-control"><option value="">All subreddits</option></select>
-          <label class="small muted" for="subreddit-order">Order</label>
-          <select id="subreddit-order" class="select-control"><option value="recent">Recent</option><option value="favorites">Favorites</option><option value="alphabetical">A–Z</option></select>
-        </details>
-        <section class="rail-section subreddit-fetch-section">
-          <label class="small muted" for="subreddit-input">Fetch posts from</label>
-          <form id="browse-form" class="browse-form" autocomplete="off">
-            <label class="sr-only" for="subreddit-input">Subreddit</label>
-            <input id="subreddit-input" name="subreddit" value="/r/soccer" placeholder="/r/soccer" aria-label="Subreddit, such as /r/soccer" spellcheck="false" autocapitalize="off" autocorrect="off">
-            <div class="browse-actions">
-              <button id="browse-submit" data-testid="browse-subreddit" type="submit">Fetch posts</button>
-              <button id="browse-refresh" data-testid="refresh-subreddit" type="button" aria-label="Fetch this subreddit again" title="Fetch this subreddit again">↻</button>
+        <details class="rail-section subreddit-tools" open>
+          <summary aria-label="Community tools">Tools</summary>
+          <details class="rail-section subreddit-view-options"><summary>Filter and sort</summary>
+            <label class="small muted" for="subreddit-group-filter">Group</label>
+            <select id="subreddit-group-filter" class="select-control"><option value="">All subreddits</option></select>
+            <label class="small muted" for="subreddit-order">Order</label>
+            <select id="subreddit-order" class="select-control"><option value="recent">Recent</option><option value="favorites">Favorites</option><option value="alphabetical">A–Z</option></select>
+          </details>
+          <section class="rail-section subreddit-fetch-section">
+            <label class="small muted" for="subreddit-input">Fetch posts from</label>
+            <form id="browse-form" class="browse-form" autocomplete="off">
+              <label class="sr-only" for="subreddit-input">Subreddit</label>
+              <input id="subreddit-input" name="subreddit" value="/r/soccer" placeholder="/r/soccer" aria-label="Subreddit, such as /r/soccer" spellcheck="false" autocapitalize="off" autocorrect="off">
+              <div class="browse-actions">
+                <button id="browse-submit" data-testid="browse-subreddit" type="submit">Fetch posts</button>
+                <button id="browse-refresh" data-testid="refresh-subreddit" type="button" aria-label="Fetch this subreddit again" title="Fetch this subreddit again">↻</button>
+              </div>
+            </form>
+          </section>
+          <details class="advanced rail-section">
+            <summary>Advanced · import and cache</summary>
+            <div class="tools-section">
+              <button id="demo-import" data-testid="import-fixture" class="button" type="button">Import synthetic example</button>
+              <button id="file-import" data-testid="import-json" class="button" type="button">Import JSON file…</button>
+              <input id="json-file" type="file" accept="application/json,.json" hidden>
+              <button id="clear-cache" data-testid="clear-cache" class="button danger" type="button">Clear cached posts…</button>
+              <p class="small muted">JSON import limit: 4 MiB. Synthetic example import uses a fixed 10 MiB cache budget.</p>
             </div>
-          </form>
-        </section>
-        <details class="advanced rail-section">
-          <summary>Advanced · import and cache</summary>
-          <div class="tools-section">
-            <button id="demo-import" data-testid="import-fixture" class="button" type="button">Import synthetic example</button>
-            <button id="file-import" data-testid="import-json" class="button" type="button">Import JSON file…</button>
-            <input id="json-file" type="file" accept="application/json,.json" hidden>
-            <button id="clear-cache" data-testid="clear-cache" class="button danger" type="button">Clear cached posts…</button>
-            <p class="small muted">JSON import limit: 4 MiB. Synthetic example import uses a fixed 10 MiB cache budget.</p>
-          </div>
+          </details>
         </details>
       </aside>
 
@@ -106,6 +109,11 @@
         <nav id="search-communities" class="search-communities" aria-label="Communities in search results" hidden></nav>
         <div id="thread-list" class="thread-list" aria-label="Fetched post list"></div>
         <p id="empty-state" class="muted empty">Fetch a subreddit above. Previously fetched posts remain available here.</p>
+        <section id="listing-pagination" class="listing-pagination" aria-label="More posts" hidden>
+          <p id="listing-pagination-status" class="small muted" role="status" aria-live="polite" tabindex="-1"></p>
+          <button id="listing-load-more" class="button secondary" type="button">Load more posts</button>
+          <div id="listing-sentinel" aria-hidden="true"></div>
+        </section>
       </section>
     </section>
 

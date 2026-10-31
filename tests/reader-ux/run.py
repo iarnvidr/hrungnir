@@ -325,7 +325,7 @@ def main() -> int:
                     result = cdp.evaluate(expression)
                 except Exception as exc:
                     try:
-                        debug = cdp.evaluate("(() => { const frame=document.querySelector('#reader-fixture'); const doc=frame?.contentDocument; return {inputTrace:window.__readerUxDebug||[], frameUrl:frame?.src||null, readyState:doc?.readyState||null, title:doc?.title||null, threadRows:doc?.querySelectorAll('.thread-item').length??null, status:doc?.querySelector('#connection-status')?.textContent||null, pageBody:doc?.body?.innerText?.slice(0,700)||null}; })()")
+                        debug = cdp.evaluate("(() => { const frame=document.querySelector('#reader-fixture'); const doc=frame?.contentDocument; return {inputTrace:(window.__readerUxDebug||[]).slice(-15), frameUrl:frame?.src||null, readyState:doc?.readyState||null, title:doc?.title||null, threadRows:doc?.querySelectorAll('.thread-item').length??null, status:doc?.querySelector('#connection-status')?.textContent||null, pageBody:doc?.body?.innerText?.slice(0,600)||null}; })()")
                     except Exception as diagnostic_error:
                         debug = {"diagnosticError": str(diagnostic_error)}
                     errors = "\n".join(cdp.page_errors) or "none captured"

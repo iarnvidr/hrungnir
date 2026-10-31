@@ -3,6 +3,7 @@
     id: `t3_${i === 0 ? 'article' : i === 1 ? 'video' : i === 2 ? 'discussion' : `fixture${i}`}`,
     title: i === 0 ? 'A readable article about the next space mission' : i === 1 ? 'Match highlights with audio' : i === 2 ? 'Season five episode discussion threads' : `Reader fixture ${i}: another story to read`,
     subreddit: i % 2 ? 'soccer' : 'space',
+    comment_count: i + 3,
     body: i === 2 ? 'Season five\n\nEpisode one (https://www.reddit.com/r/space/comments/episode/one/)' : '',
     flair: i % 3 === 0 ? 'News' : i % 3 === 1 ? 'Match Clip' : 'Discussion',
     comments: [], missing: [], captured_at: Math.floor(Date.now() / 1000), source: 'proxy', comments_status: 'not_loaded',
@@ -23,7 +24,10 @@
     rows: threads, hits: [], error: false, comments: null,
     failCommunity: null, failAllRedirect: false, holdCommunityFor: null, completedCommunities: [],
     cacheError: false, holdCache: false, completedCacheQueries: [],
+    enablePaging: false, pageError: false, holdPage: false, pageCalls: [], repeatCursor: false, pageThreads: [],
+     refreshError: false, refreshNotLoaded: false, refreshHold: false, refreshedComments: null, provideMedia: false,
   };
+  const pagedThreads = threads.map(thread => ({ ...thread, subreddit: 'space' }));
   window.__ux = { calls, completed, posts, articles, threads, updates, search,
     emit: (name, payload) => listeners.get(name)?.({payload}),
     releasePost: id => posts.get(id)?.(), releaseArticle: id => articles.get(id)?.() };
@@ -70,10 +74,49 @@
         if (search.failCommunity === args.subreddit) throw new Error('Community source unavailable');
         if (search.holdCommunity || search.holdCommunityFor === args.subreddit) await new Promise(resolve => { search.releaseCommunity = resolve; });
         search.completedCommunities.push(args.subreddit);
+        if (search.enablePaging) {
+          search.pageThreads = pagedThreads.map(thread => ({ ...thread, subreddit: args.subreddit }));
+          return { ...snap(search.pageThreads.slice(0, 25)), listing_page: { cursor: 'page-1', exhausted: false } };
+        }
         return snap();
       }
+      if (command === 'fetch_listing_page') {
+        search.pageCalls.push({ ...args });
+        if (search.holdPage) await new Promise(resolve => { search.releasePage = resolve; });
+        if (search.pageError) throw new Error('Continuation source unavailable');
+        if (args.cursor === 'page-1') return {
+          posts: [
+            { ...search.pageThreads[0], body: '', comments: [], missing: [], comments_status: 'not_loaded', comment_count: 30 },
+            search.pageThreads[24], search.pageThreads[25], search.pageThreads[26],
+          ],
+          listing_page: { cursor: search.repeatCursor ? 'page-1' : 'page-2', exhausted: false },
+        };
+        if (args.cursor === 'page-2') return {
+          posts: [search.pageThreads[26], search.pageThreads[27]],
+          media_hints: { t3_fixture27: { kind: 'video', count: 1 } },
+          listing_page: { cursor: null, exhausted: true },
+        };
+        throw new Error('Unknown fixture cursor');
+      }
       if (command === 'fetch_thread') {
-        if (args.include_media !== false) return new Promise(() => {}); // Simulate a stalled media download.
+        if (args.include_media !== false) {
+          if (!search.provideMedia) return new Promise(() => {}); // Simulate a stalled media download.
+          const thread = { ...threads.find(t => t.id === args.id), comments_status: 'partial_proxy', comments: search.comments || [] };
+          return { snapshot: snap([thread]), media: [{ kind: 'video', name: 'Fixture clip', url: `https://asset.localhost/${'a'.repeat(64)}/${args.id}/clip.mp4` }], cache: { comments_hit: true, media_hit: true } };
+        }
+        if (args.refresh) {
+          if (search.refreshHold) await new Promise(resolve => { search.releaseRefresh = resolve; });
+          if (search.refreshNotLoaded) {
+            const thread = { ...threads.find(t => t.id === args.id), comments_status: 'not_loaded', comments: [], missing: [] };
+            return { snapshot: snap([thread]), media: [], cache: { comments_hit: false, media_hit: false } };
+          }
+          if (search.refreshError) throw new Error('Reddit comments are unavailable');
+          const thread = { ...threads.find(t => t.id === args.id), comment_count: 8, comments_status: 'partial_proxy', comments: search.refreshedComments || [
+            { id: 't1_parent', parent_id: args.id, body: 'Updated parent comment.' },
+            { id: 't1_reply', parent_id: 't1_parent', body: 'A newly downloaded reply.' },
+          ] };
+          return { snapshot: snap([thread]), media: [], cache: { comments_hit: false, media_hit: true } };
+        }
         await wait(posts, args.id);
         completed.push(args.id);
         const thread = { ...threads.find(t => t.id === args.id), comments_status: 'partial_proxy', comments: search.comments || [{ id: 't1_parent', parent_id: args.id, body: 'A useful discussion, available before the video finishes.' }] };

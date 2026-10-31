@@ -60,6 +60,15 @@ async (page) => {
     await page.locator('#post-tabs-layout').selectOption(post);
     await page.locator('#subreddit-tabs-layout').selectOption(community);
     await page.locator('#settings-close').click();
+    if (community === 'horizontal') {
+      assert(!(await page.locator('.subreddit-tools').evaluate(node => node.open)), 'horizontal community toolbar should start compact');
+      await page.locator('.subreddit-tools > summary').click();
+      assert(await page.locator('#browse-form').isVisible(), 'horizontal community toolbar does not expose subreddit fetching');
+      await page.locator('.subreddit-tools > summary').click();
+    } else {
+      assert(await page.locator('.subreddit-tools').evaluate(node => node.open), 'vertical community tools were hidden');
+      assert(!(await page.locator('.subreddit-tools > summary').isVisible()), 'vertical community tools keep a redundant disclosure control');
+    }
     assert(await page.locator('.subreddit-visit').first().isVisible(), `${post}/${community}: communities hidden in reader`);
     assert(await page.locator('.post-tab-open').first().isVisible(), `${post}/${community}: posts hidden in reader`);
     const posts = await page.locator('.post-tab-open').all();
@@ -68,7 +77,7 @@ async (page) => {
     const communities = await page.locator('.subreddit-visit').all();
     const c0 = await communities[0].boundingBox(), c1 = await communities[1].boundingBox();
     assert(community === 'vertical' ? c1.y > c0.y + 10 : Math.abs(c1.y - c0.y) < 2, `${post}/${community}: wrong community orientation`);
-    for (const width of [1200, 500]) {
+    for (const width of [1200, 1100, 720, 500]) {
       await page.setViewportSize({width, height: 760});
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), `${post}/${community}: horizontal page overflow at ${width}`);
     }
