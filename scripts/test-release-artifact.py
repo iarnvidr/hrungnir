@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -62,6 +63,9 @@ class ReleaseArtifactTests(unittest.TestCase):
             'event': 'pull_request', 'head_sha': self.pr_head, 'conclusion': 'success',
             'pull_requests': [{'number': 42, 'base': {'sha': self.base}}],
         }
+        self.ci_artifact = {
+            'id': 458, 'name': 'hrungnir-ci-receipt-124-1', 'expired': False,
+        }
         self.native_artifact = {
             'id': 456, 'name': f'{release.NATIVE_ARTIFACT_PREFIX}-pr-123-2', 'expired': False,
         }
@@ -89,6 +93,7 @@ class ReleaseArtifactTests(unittest.TestCase):
         self.policy_drift = False
         self.native_record_tree = self.tree
         self.build_candidate()
+        self.build_ci_receipt()
 
     def build_candidate(self, event='pull_request', run=None, artifact=None, tree=None):
         run = run or self.native_run
@@ -110,6 +115,17 @@ class ReleaseArtifactTests(unittest.TestCase):
         self.native_blob = zip_data(members)
         artifact['digest'] = 'sha256:' + digest(self.native_blob)
 
+    def build_ci_receipt(self, base=None, tree=None, pr_number=42):
+        record = {
+            'schema': 1, 'repository': release.REPOSITORY, 'workflow_path': release.CI_WORKFLOW,
+            'run_id': self.ci_run['id'], 'run_attempt': self.ci_run['run_attempt'],
+            'event': 'pull_request', 'head_sha': self.pr_head, 'base_sha': base or self.base,
+            'pr_number': pr_number, 'tested_tree': tree or self.tree,
+            'workflow_sha': self.commit, 'helper_sha': 'e' * 40,
+        }
+        self.ci_blob = zip_data({'ci-receipt.json': json.dumps(record, sort_keys=True).encode()})
+        self.ci_artifact['digest'] = 'sha256:' + digest(self.ci_blob)
+
     def git(self, root, *args):
         return self.tree if 'HEAD^{tree}' in args else self.commit
 
@@ -126,16 +142,22 @@ class ReleaseArtifactTests(unittest.TestCase):
             return {'workflow_runs': [self.mapping_run] if self.include_mapping else []}
         if path.endswith('/actions/runs/123'):
             return self.native_run
+        if path.endswith('/actions/runs/124'):
+            return self.ci_run
         if path.endswith('/actions/runs/321'):
             return self.manual_run
         if path.endswith('/actions/runs/123/artifacts?per_page=100'):
             return {'artifacts': [self.native_artifact]}
+        if path.endswith('/actions/runs/124/artifacts?per_page=100'):
+            return {'artifacts': [self.ci_artifact]}
         if path.endswith('/actions/runs/321/artifacts?per_page=100'):
             return {'artifacts': [self.manual_artifact]}
         if path.endswith('/actions/runs/789/artifacts?per_page=100'):
             return {'artifacts': [self.mapping_artifact]}
         if path.endswith('/actions/artifacts/456/zip'):
             return self.native_blob
+        if path.endswith('/actions/artifacts/458/zip'):
+            return self.ci_blob
         if path.endswith('/actions/artifacts/654/zip'):
             return self.manual_blob
         if path.endswith('/actions/artifacts/987/zip'):
@@ -166,7 +188,7 @@ class ReleaseArtifactTests(unittest.TestCase):
         self.assertEqual(result['source_run_attempt'], 2)
         self.assertEqual(result['source_artifact_id'], 456)
         self.assertEqual(result['source_artifact_digest'], self.native_artifact['digest'])
-        self.assertEqual(result['ci_run_id'], 124)
+        self.assertEqual(result['ci_receipt']['run_id'], 124)
         self.assertEqual(json.loads((self.root / 'accepted-native.json').read_text()), result)
 
     def test_promoter_rejects_fork_even_with_successful_native_run(self):
@@ -185,8 +207,41 @@ class ReleaseArtifactTests(unittest.TestCase):
             self.promote()
         self.policy_drift = False
         self.include_ci = False
-        with self.assertRaisesRegex(ValueError, 'successful Linux CI'):
+        with self.assertRaisesRegex(ValueError, 'Linux CI receipt unavailable'):
             self.promote()
+
+    def test_promoter_uses_receipts_when_github_drops_merged_pr_run_associations(self):
+        self.native_run['pull_requests'] = []
+        self.ci_run['pull_requests'] = []
+        mapping = self.promote()
+        self.assertEqual(mapping['pr_number'], 42)
+        self.assertEqual(mapping['ci_receipt']['base_sha'], self.base)
+        self.install_mapping_bundle(mapping)
+        retrieved = self.retrieve()
+        self.assertEqual(retrieved['source_run_id'], 123)
+
+    def test_ci_receipt_must_match_same_pr_base_and_merge_tree(self):
+        self.build_ci_receipt(base='f' * 40)
+        with self.assertRaisesRegex(ValueError, 'Linux CI receipt unavailable'):
+            self.promote()
+        self.build_ci_receipt(tree='f' * 40)
+        with self.assertRaisesRegex(ValueError, 'Linux CI receipt unavailable'):
+            self.promote()
+
+    def test_ci_receipt_records_attempt_base_head_tree_and_policy(self):
+        event_path = self.root / 'event.json'
+        event_path.write_text(json.dumps({'pull_request': {
+            'number': 42, 'head': {'sha': self.pr_head}, 'base': {'sha': self.base}}}))
+        env = {'GITHUB_EVENT_NAME': 'pull_request', 'GITHUB_EVENT_PATH': str(event_path),
+               'GITHUB_REPOSITORY': release.REPOSITORY, 'GITHUB_RUN_ID': '124',
+               'GITHUB_RUN_ATTEMPT': '3', 'GITHUB_WORKFLOW_SHA': self.commit}
+        with mock.patch.dict(os.environ, env), mock.patch.object(release, 'git', side_effect=self.git):
+            release.ci_receipt(self.root)
+        record = json.loads((self.root / 'artifacts/ci-receipt.json').read_text())
+        self.assertEqual(record['run_attempt'], 3)
+        self.assertEqual(record['head_sha'], self.pr_head)
+        self.assertEqual(record['base_sha'], self.base)
+        self.assertEqual(record['tested_tree'], self.tree)
 
     def test_promoter_rejects_unsafe_paths_inside_the_native_app_zip(self):
         self.app_archive = zip_data({'Hrungnir.app/../../outside': b'escape'})
@@ -259,6 +314,21 @@ class ReleaseArtifactTests(unittest.TestCase):
         self.mapping_artifact['digest'] = 'sha256:' + digest(self.mapping_blob)
         with self.assertRaisesRegex(ValueError, 'unexpected or unsafe'):
             self.retrieve()
+
+    def test_redirect_keeps_github_token_on_api_host_only_and_rejects_http(self):
+        handler = release.SafeRedirect()
+        request = __import__('urllib.request').request.Request(
+            'https://api.github.com/repos/iarnvidr/hrungnir/actions/artifacts/1/zip',
+            headers={'Authorization': 'Bearer fixture'})
+        redirected = handler.redirect_request(request, None, 302, 'Found', {},
+                                              'https://objects.example/artifact.zip')
+        self.assertNotIn('Authorization', redirected.headers)
+        same_host = handler.redirect_request(request, None, 302, 'Found', {},
+                                             'https://api.github.com/other')
+        self.assertEqual(same_host.get_header('Authorization'), 'Bearer fixture')
+        with self.assertRaisesRegex(ValueError, 'non-HTTPS'):
+            handler.redirect_request(request, None, 302, 'Found', {},
+                                     'http://objects.example/artifact.zip')
 
 
 if __name__ == '__main__':

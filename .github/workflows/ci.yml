@@ -43,3 +43,13 @@ jobs:
           verb: call
           module: ./ci/dagger/check
           args: build-lint-test --source .
+      - name: Record the exact successful PR CI receipt
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/release-artifact.py ci-receipt --root "$GITHUB_WORKSPACE"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.event_name == 'pull_request'
+        with:
+          name: hrungnir-ci-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-receipt.json
+          if-no-files-found: error
+          retention-days: 90

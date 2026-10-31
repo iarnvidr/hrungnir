@@ -52,6 +52,8 @@ def request(path, binary=False):
 
 class SafeRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlsplit(newurl).scheme != 'https':
+            raise ValueError('refusing non-HTTPS artifact or API redirect')
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
         if redirected is not None and urlsplit(req.full_url).netloc != urlsplit(newurl).netloc:
             redirected.remove_header('Authorization')
@@ -92,7 +94,7 @@ def verify_policy_files(workflow_sha, merge_sha, api_fn):
     if not isinstance(workflow_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', workflow_sha):
         raise ValueError('native receipt has no valid workflow revision')
     result = {}
-    for path in (NATIVE_WORKFLOW, HELPER_PATH):
+    for path in (NATIVE_WORKFLOW, CI_WORKFLOW, HELPER_PATH):
         merged = blob_sha(path, merge_sha, api_fn)
         produced = blob_sha(path, workflow_sha, api_fn)
         if merged != produced:
@@ -138,6 +140,31 @@ def receipt(root):
             'head_repository': (pr_head.get('repo') or {}).get('full_name'),
         })
     (root / 'artifacts/native-receipt.json').write_text(json.dumps(record, sort_keys=True) + '\n')
+
+
+def ci_receipt(root):
+    if os.environ.get('GITHUB_EVENT_NAME') != 'pull_request':
+        raise ValueError('CI receipt is only produced for pull request runs')
+    event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+    pr = event.get('pull_request') or {}
+    head = pr.get('head') or {}
+    base = pr.get('base') or {}
+    record = {
+        'schema': 1, 'repository': os.environ['GITHUB_REPOSITORY'],
+        'workflow_path': CI_WORKFLOW, 'run_id': int(os.environ['GITHUB_RUN_ID']),
+        'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']), 'event': 'pull_request',
+        'head_sha': head.get('sha'), 'base_sha': base.get('sha'),
+        'pr_number': pr.get('number'), 'tested_tree': git(root, 'rev-parse', 'HEAD^{tree}'),
+        'workflow_sha': os.environ['GITHUB_WORKFLOW_SHA'],
+        'helper_sha': git(root, 'rev-parse', f'HEAD:{HELPER_PATH}'),
+    }
+    if (not isinstance(record['head_sha'], str) or not isinstance(record['base_sha'], str)
+            or not re.fullmatch(r'[0-9a-f]{40}', record['head_sha'])
+            or not re.fullmatch(r'[0-9a-f]{40}', record['base_sha'])
+            or not isinstance(record['pr_number'], int)):
+        raise ValueError('PR CI event has incomplete immutable identity')
+    (root / 'artifacts').mkdir(exist_ok=True)
+    (root / 'artifacts/ci-receipt.json').write_text(json.dumps(record, sort_keys=True) + '\n')
 
 
 def validate_run_identity(run, artifact, event, commit):
@@ -198,16 +225,11 @@ def validate_app_archive(data):
 def validate_pr_candidate(data, artifact, run, pr, merge_sha, merge_tree, build_version, api_fn):
     pr_number = pr.get('number')
     pr_head = (pr.get('head') or {}).get('sha')
-    tested_base = None
-    linked = run.get('pull_requests', [])
-    if len(linked) == 1 and linked[0].get('number') == pr_number:
-        tested_base = (linked[0].get('base') or {}).get('sha')
     if (not pr_number or not pr_head or pr.get('merge_commit_sha') != merge_sha
             or not pr.get('merged') or (pr.get('base') or {}).get('ref') != 'main'
             or (pr.get('base') or {}).get('repo', {}).get('full_name') != REPOSITORY
             or (pr.get('head') or {}).get('repo', {}).get('full_name') != REPOSITORY
-            or len(linked) != 1 or linked[0].get('number') != pr_number
-            or not tested_base):
+            or run.get('head_sha') != pr_head):
         raise ValueError('candidate PR is not the exact merged same-repository main PR')
     validate_run_identity(run, artifact, 'pull_request', pr_head)
     if run.get('head_repository', {}).get('full_name') != REPOSITORY:
@@ -216,6 +238,13 @@ def validate_pr_candidate(data, artifact, run, pr, merge_sha, merge_tree, build_
                                  f'Hrungnir-{build_version}-macos-arm64.zip.sha256',
                                  'native-receipt.json'})
     record = json.loads(members['native-receipt.json'])
+    tested_base = record.get('tested_base')
+    if not isinstance(tested_base, str) or not re.fullmatch(r'[0-9a-f]{40}', tested_base):
+        raise ValueError('native receipt has no valid tested PR base')
+    linked = run.get('pull_requests') or []
+    if linked and (len(linked) != 1 or linked[0].get('number') != pr_number
+                   or (linked[0].get('base') or {}).get('sha') != tested_base):
+        raise ValueError('native run association conflicts with its immutable PR receipt')
     expected = {
         'schema': 2, 'repository': REPOSITORY, 'workflow_path': NATIVE_WORKFLOW,
         'run_id': run['id'], 'run_attempt': run['run_attempt'], 'event': 'pull_request',
@@ -256,18 +285,93 @@ def workflow_runs(workflow, head_sha, event, api_fn):
     return found
 
 
-def require_ci_gate(pr, tested_base, api_fn):
+def require_ci_gate(pr, tested_base, merge_sha, merge_tree, api_fn):
     head = (pr.get('head') or {}).get('sha')
     number = pr.get('number')
     runs = workflow_runs(CI_WORKFLOW, head, 'pull_request', api_fn)
-    matches = [run for run in runs if run.get('path') == CI_WORKFLOW
-               and run.get('head_sha') == head and run.get('conclusion') == 'success'
-               and len(run.get('pull_requests', [])) == 1
-               and run['pull_requests'][0].get('number') == number
-               and (run['pull_requests'][0].get('base') or {}).get('sha') == tested_base]
-    if not matches:
-        raise ValueError('no successful Linux CI run for the exact same-repository PR head and base')
-    return max(matches, key=lambda run: (run.get('id', 0), run.get('run_attempt', 0)))
+    candidates = [run for run in runs if run.get('path') == CI_WORKFLOW
+                  and run.get('event') == 'pull_request' and run.get('head_sha') == head
+                  and run.get('conclusion') == 'success'
+                  and run.get('repository', {}).get('full_name') == REPOSITORY
+                  and run.get('head_repository', {}).get('full_name') == REPOSITORY]
+    accepted = []
+    errors = []
+    for run in candidates:
+        try:
+            artifacts = api_fn(f"repos/{REPOSITORY}/actions/runs/{run['id']}/artifacts?per_page=100").get('artifacts', [])
+            name = f"hrungnir-ci-receipt-{run['id']}-{run['run_attempt']}"
+            found = [item for item in artifacts if item.get('name') == name and not item.get('expired')]
+            if len(found) != 1:
+                raise ValueError('CI run has no unique unexpired immutable receipt')
+            artifact = found[0]
+            members = zip_members(artifact_bytes(artifact, api_fn), {'ci-receipt.json'})
+            record = json.loads(members['ci-receipt.json'])
+            linked = run.get('pull_requests') or []
+            expected = {'schema': 1, 'repository': REPOSITORY, 'workflow_path': CI_WORKFLOW,
+                        'run_id': run['id'], 'run_attempt': run['run_attempt'], 'event': 'pull_request',
+                        'head_sha': head, 'base_sha': tested_base, 'pr_number': number,
+                        'tested_tree': merge_tree}
+            if (any(record.get(key) != value for key, value in expected.items())
+                    or (linked and (len(linked) != 1 or linked[0].get('number') != number
+                                    or (linked[0].get('base') or {}).get('sha') != tested_base))):
+                raise ValueError('CI receipt does not identify the accepted PR, base, and tested tree')
+            policy_files = verify_policy_files(record.get('workflow_sha'), merge_sha, api_fn)
+            if record.get('helper_sha') != policy_files[HELPER_PATH]:
+                raise ValueError('CI receipt helper differs from the accepted main source')
+            accepted.append((run.get('id', 0), run.get('run_attempt', 0), {
+                'run_id': run['id'], 'run_attempt': run['run_attempt'],
+                'artifact_id': artifact['id'], 'artifact_digest': artifact['digest'],
+                'workflow_sha': record['workflow_sha'], 'policy_files': policy_files,
+                'tested_tree': merge_tree, 'base_sha': tested_base,
+            }))
+        except (ValueError, KeyError, TypeError, OSError, zipfile.BadZipFile) as error:
+            errors.append(str(error))
+    if not accepted:
+        reason = errors[-1] if errors else 'no successful trusted-repository Linux CI run for the PR head'
+        raise ValueError(f'accepted Linux CI receipt unavailable: {reason}')
+    return max(accepted, key=lambda item: (item[0], item[1]))[2]
+
+
+def verify_ci_receipt(accepted, merge_sha, merge_tree, api_fn):
+    reference = accepted.get('ci_receipt')
+    if not isinstance(reference, dict):
+        raise ValueError('accepted mapping has no exact Linux CI receipt')
+    run_id, attempt = reference.get('run_id'), reference.get('run_attempt')
+    if not isinstance(run_id, int) or not isinstance(attempt, int):
+        raise ValueError('accepted Linux CI run identity is malformed')
+    run = api_fn(f'repos/{REPOSITORY}/actions/runs/{run_id}')
+    if (run.get('id') != run_id or run.get('run_attempt') != attempt
+            or run.get('path') != CI_WORKFLOW or run.get('event') != 'pull_request'
+            or run.get('conclusion') != 'success' or run.get('head_sha') != accepted.get('pr_head_sha')
+            or run.get('repository', {}).get('full_name') != REPOSITORY
+            or run.get('head_repository', {}).get('full_name') != REPOSITORY):
+        raise ValueError('Linux CI run is not the successful accepted same-repository PR head')
+    linked = run.get('pull_requests') or []
+    if linked and (len(linked) != 1 or linked[0].get('number') != accepted.get('pr_number')
+                   or (linked[0].get('base') or {}).get('sha') != accepted.get('source_base_sha')):
+        raise ValueError('Linux CI run association conflicts with its accepted receipt')
+    artifacts = api_fn(f'repos/{REPOSITORY}/actions/runs/{run_id}/artifacts?per_page=100').get('artifacts', [])
+    name = f'hrungnir-ci-receipt-{run_id}-{attempt}'
+    found = [item for item in artifacts if item.get('id') == reference.get('artifact_id')
+             and item.get('name') == name and item.get('digest') == reference.get('artifact_digest')
+             and not item.get('expired')]
+    if len(found) != 1:
+        raise ValueError('accepted Linux CI artifact ID or immutable digest changed')
+    members = zip_members(artifact_bytes(found[0], api_fn), {'ci-receipt.json'})
+    record = json.loads(members['ci-receipt.json'])
+    expected = {'schema': 1, 'repository': REPOSITORY, 'workflow_path': CI_WORKFLOW,
+                'run_id': run_id, 'run_attempt': attempt, 'event': 'pull_request',
+                'head_sha': accepted.get('pr_head_sha'), 'base_sha': accepted.get('source_base_sha'),
+                'pr_number': accepted.get('pr_number'), 'tested_tree': merge_tree,
+                'workflow_sha': reference.get('workflow_sha')}
+    if any(record.get(key) != value for key, value in expected.items()):
+        raise ValueError('Linux CI receipt no longer matches the accepted PR, base, and tree')
+    policy_files = verify_policy_files(record.get('workflow_sha'), merge_sha, api_fn)
+    if (record.get('helper_sha') != policy_files[HELPER_PATH]
+            or reference.get('policy_files') != policy_files
+            or reference.get('tested_tree') != merge_tree
+            or reference.get('base_sha') != accepted.get('source_base_sha')):
+        raise ValueError('Linux CI receipt policy differs from the accepted main source')
 
 
 def promote(root, merge_sha, api_fn=request):
@@ -290,8 +394,9 @@ def promote(root, merge_sha, api_fn=request):
     runs = workflow_runs(NATIVE_WORKFLOW, head, 'pull_request', api_fn)
     candidates = [run for run in runs if run.get('path') == NATIVE_WORKFLOW
                  and run.get('head_sha') == head and run.get('conclusion') == 'success'
-                 and len(run.get('pull_requests', [])) == 1
-                 and run['pull_requests'][0].get('number') == pr['number']]
+                  and run.get('event') == 'pull_request'
+                  and run.get('repository', {}).get('full_name') == REPOSITORY
+                  and run.get('head_repository', {}).get('full_name') == REPOSITORY]
     accepted = []
     errors = []
     for run in candidates:
@@ -304,16 +409,16 @@ def promote(root, merge_sha, api_fn=request):
         try:
             data = artifact_bytes(artifact, api_fn)
             record = validate_pr_candidate(data, artifact, run, pr, merge_sha, merge_tree, build_version, api_fn)
-            ci_run = require_ci_gate(pr, record['source_base_sha'], api_fn)
-            accepted.append((run.get('id', 0), run.get('run_attempt', 0), record, ci_run))
+            ci_receipt_ref = require_ci_gate(pr, record['source_base_sha'], merge_sha,
+                                             merge_tree, api_fn)
+            accepted.append((run.get('id', 0), run.get('run_attempt', 0), record, ci_receipt_ref))
         except (ValueError, KeyError, TypeError, OSError, zipfile.BadZipFile) as error:
             errors.append(str(error))
     if not accepted:
         reason = errors[-1] if errors else 'no successful native PR artifact for the exact merged head and tree'
         raise ValueError(f'accepted native artifact unavailable: {reason}')
-    _, _, record, ci_run = max(accepted, key=lambda item: (item[0], item[1]))
-    record['ci_run_id'] = ci_run['id']
-    record['ci_run_attempt'] = ci_run['run_attempt']
+    _, _, record, ci_receipt_ref = max(accepted, key=lambda item: (item[0], item[1]))
+    record['ci_receipt'] = ci_receipt_ref
     (root / 'accepted-native.json').write_text(json.dumps(record, sort_keys=True) + '\n')
     return record
 
@@ -429,6 +534,7 @@ def retrieve(root, tag, api_fn=request, trusted_main_run_id=None):
     else:
         mapping = mapping_run(api_fn, merge_sha)
         accepted = read_mapping(api_fn, mapping, merge_sha, merge_tree, build_version)
+        verify_ci_receipt(accepted, merge_sha, merge_tree, api_fn)
         run, pr, artifact = source_artifact(accepted, api_fn)
         data = artifact_bytes(artifact, api_fn)
         verified = validate_pr_candidate(data, artifact, run, pr, merge_sha,
@@ -465,6 +571,8 @@ if __name__ == '__main__':
     sub = parser.add_subparsers(dest='operation', required=True)
     receipt_parser = sub.add_parser('receipt')
     receipt_parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[1])
+    ci_receipt_parser = sub.add_parser('ci-receipt')
+    ci_receipt_parser.add_argument('--root', type=Path, default=Path.cwd())
     promote_parser = sub.add_parser('promote')
     promote_parser.add_argument('--root', type=Path, default=Path.cwd())
     promote_parser.add_argument('--merge-sha', required=True)
@@ -476,6 +584,8 @@ if __name__ == '__main__':
     try:
         if args.operation == 'receipt':
             receipt(args.root)
+        elif args.operation == 'ci-receipt':
+            ci_receipt(args.root)
         elif args.operation == 'promote':
             promote(args.root, args.merge_sha)
         else:
