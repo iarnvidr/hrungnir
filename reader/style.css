@@ -172,6 +172,9 @@ button:disabled { opacity: .55; cursor: wait; }
 .parent-peek { margin-top: 6px; padding: 7px 8px; border-left: 2px solid var(--accent); background: var(--accent-soft); color: var(--text); font-size: calc(11px * var(--reader-text-scale, 1) / var(--reader-ui-scale, 1)); white-space: pre-wrap; }
 .children { display: grid; gap: 7px; margin-top: 7px; }
 .children[hidden] { display: none; }
+.comment-page-control { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin: 6px 0 8px 12px; }
+.comment-page-control.top-level { margin-left: 0; }
+.comment-page-status { margin: 0; max-width: 72ch; }
 .anchor-target { scroll-margin: 90px; outline: 1px solid var(--accent); }
 .media-section { margin-top: 26px; }
 .media-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 10px; }

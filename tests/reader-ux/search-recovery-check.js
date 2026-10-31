@@ -331,7 +331,7 @@ async (page) => {
   assert(await page.locator('#search-pagination').isVisible(), 'Reddit search did not expose continuation controls');
   if (!(await page.evaluate(() => window.__ux.search.searchPageCalls.length))) await page.locator('#search-load-more').click();
   await page.waitForFunction(() => document.querySelector('#search-pagination-status').textContent.includes('continuation unavailable'));
-  const firstSearchPageIds = await page.locator('.thread-item').evaluateAll(nodes => nodes.map(node => node.dataset.threadId));
+  const firstSearchPageIds = await page.evaluate(() => [...document.querySelectorAll('.thread-item')].map(node => node.dataset.threadId));
   assert(firstSearchPageIds.length === 25, 'failed search continuation removed or replaced current results');
   assert(await page.locator('#cache-search-input').inputValue() === 'continuation proof', 'failed search continuation cleared the query');
   await page.evaluate(() => { window.__ux.search.searchPageError = false; window.__ux.search.holdSearchPage = true; });
@@ -346,7 +346,7 @@ async (page) => {
   await page.evaluate(() => { window.__ux.search.firstSearchRow = document.querySelector('.thread-item'); window.__ux.search.searchPageScroll = window.scrollY; });
   await page.evaluate(() => window.__ux.search.releaseSearchPage());
   await page.waitForFunction(() => document.querySelectorAll('.thread-item').length === 28 && document.querySelector('#search-pagination-status').textContent.includes('End of Reddit search') && document.activeElement.id === 'search-pagination-status');
-  const pagedSearchIds = await page.locator('.thread-item').evaluateAll(nodes => nodes.map(node => node.dataset.threadId));
+  const pagedSearchIds = await page.evaluate(() => [...document.querySelectorAll('.thread-item')].map(node => node.dataset.threadId));
   assert(new Set(pagedSearchIds).size === 28 && firstSearchPageIds.every((id, index) => pagedSearchIds[index] === id), 'search continuation did not preserve source order and deduplicate overlapping results');
   assert(await page.evaluate(() => document.querySelector('.thread-item') === window.__ux.search.firstSearchRow), 'search continuation remounted existing result rows');
   assert(await page.evaluate(() => window.scrollY === window.__ux.search.searchPageScroll), 'search continuation moved the reader scroll position');

@@ -19,7 +19,7 @@ pub async fn run(app: &AppHandle) -> Value {
         .as_nanos()
         .to_string();
     let expected_id = run_id.clone();
-    let (sender, receiver) = tokio::sync::oneshot::channel::<Value>();
+    let (sender, mut receiver) = tokio::sync::oneshot::channel::<Value>();
     let sender = Arc::new(Mutex::new(Some(sender)));
     let progress = Arc::new(Mutex::new(Vec::<Value>::new()));
     let progress_received = progress.clone();
@@ -28,6 +28,10 @@ pub async fn run(app: &AppHandle) -> Value {
         if value["run_id"].as_str() != Some(expected_id.as_str()) {
             return;
         }
+        reddit_offline::diagnostics::event(
+            "test.native_ui_progress",
+            json!({"stage":value["stage"],"finished":value["finished"],"elapsed_ms":value["elapsed_ms"]}),
+        );
         if value["finished"] == true {
             if let Some(sender) = sender.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 let _ = sender.send(value);
@@ -49,7 +53,21 @@ pub async fn run(app: &AppHandle) -> Value {
     );
     let result = match window.eval(&script) {
         Err(error) => json!({"name":"native-ui","status":"failed","error":error.to_string()}),
-        Ok(()) => match tokio::time::timeout(Duration::from_secs(240), receiver).await {
+        Ok(()) => match tokio::time::timeout(Duration::from_secs(240), async {
+            loop {
+                tokio::select! {
+                    value = &mut receiver => break value,
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                        // The first eval can land in the initial blank document.
+                        // Reinject only until the loaded reader acknowledges it.
+                        let acknowledged = !progress.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
+                        if !acknowledged {
+                            let _ = window.eval(&script);
+                        }
+                    }
+                }
+            }
+        }).await {
             Ok(Ok(value)) => value,
             Ok(Err(_)) => json!({"name":"native-ui","status":"failed","error":"Native UI result channel closed"}),
             Err(_) => json!({"name":"native-ui","status":"failed","error":"Native UI journey timed out"}),

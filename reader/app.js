@@ -114,6 +114,10 @@
   const linkPreviewCompleted = new Set();
   const discussionRefreshStates = new Map();
   const discussionRefreshInFlight = new Map();
+  const commentPageStates = new Map();
+  const commentPageInFlight = new Map();
+  const commentPageGenerationByThread = new Map();
+  const completeCommentThreads = new Set();
   const listingBySubreddit = new Map();
   const listingPaginationBySubreddit = new Map();
   const listingPageInFlight = new Map();
@@ -1893,6 +1897,84 @@
     return (thread.comments || []).find((comment) => comment.id === id) || null;
   }
 
+  function commentPageStateKey(threadId, parentId) { return `${threadId}\u0000${parentId}`; }
+
+  function rememberCommentPageStates(threadId, pages, { replace = false } = {}) {
+    if (!Array.isArray(pages)) return;
+    if (replace) {
+      commentPageGenerationByThread.set(threadId, (commentPageGenerationByThread.get(threadId) || 0) + 1);
+      const prefix = `${threadId}\u0000`;
+      for (const key of commentPageStates.keys()) if (key.startsWith(prefix)) commentPageStates.delete(key);
+    }
+    const thread = threadCache.get(threadId);
+    const knownParents = new Set((thread?.comments || []).map((comment) => comment.id));
+    knownParents.add(threadId);
+    for (const page of pages) {
+      if (!page || typeof page.parent_id !== 'string' || !knownParents.has(page.parent_id) ||
+          !(page.cursor === null || typeof page.cursor === 'string') || typeof page.exhausted !== 'boolean' ||
+          (page.cursor === null && !page.exhausted)) continue;
+      const key = commentPageStateKey(threadId, page.parent_id);
+      const previous = commentPageStates.get(key);
+      const state = previous || {};
+      Object.assign(state, {
+        parentId: page.parent_id,
+        cursor: typeof page.cursor === 'string' && page.cursor ? page.cursor : null,
+        exhausted: page.exhausted,
+        stopReason: '',
+        loading: state.loading || false,
+        error: state.error || '',
+      });
+      commentPageStates.set(key, state);
+    }
+  }
+
+  function renderCommentPageControl(container, thread, parentId, topLevel = false) {
+    const state = commentPageStates.get(commentPageStateKey(thread.id, parentId));
+    if (!state) return;
+    if (state.stopReason) {
+      const status = element('p', 'small muted comment-page-status', state.stopReason);
+      status.setAttribute('role', 'status');
+      status.setAttribute('aria-live', 'polite');
+      container.append(status);
+      return;
+    }
+    if (state.exhausted || !state.cursor) {
+      if (topLevel && state.exhausted) {
+        const statusText = completeCommentThreads.has(thread.id)
+          ? `All ${thread.comment_count} comments reported by Reddit are downloaded.`
+          : 'No more top-level comments are available. Replies within comments load separately.';
+        const status = element('p', 'small muted comment-page-status', statusText);
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+        status.tabIndex = -1;
+        container.append(status);
+      }
+      return;
+    }
+    const control = element('div', `comment-page-control${topLevel ? ' top-level' : ''}`);
+    const expired = /(?:cursor|continuation).{0,30}expired|expired.{0,30}(?:cursor|continuation)/i.test(state.error);
+    const button = element('button', 'button secondary comment-page-load', state.error ? (expired ? 'Refresh discussion' : 'Retry loading replies') : state.loading ? 'Loading replies…' : topLevel ? 'Load more comments' : 'Load more replies');
+    button.type = 'button';
+    button.dataset.testid = `comment-page-${parentId}`;
+    button.dataset.parentId = parentId;
+    button.setAttribute('aria-controls', topLevel ? 'discussion-comments' : `comment-children-${parentId}`);
+    button.setAttribute('aria-disabled', String(state.loading));
+    button.addEventListener('click', () => expired ? void refreshDiscussion(thread.id) : void loadCommentPage(thread.id, parentId));
+    control.append(button);
+    if (state.error) {
+      const status = element('p', 'small error-text comment-page-status', `Could not load more ${topLevel ? 'comments' : 'replies'}. Your downloaded discussion remains available. ${state.error}`);
+      status.setAttribute('role', 'status');
+      status.setAttribute('aria-live', 'polite');
+      control.append(status);
+    } else if (state.loading) {
+      const status = element('p', 'small muted comment-page-status', `Loading more ${topLevel ? 'comments' : 'replies'}…`);
+      status.setAttribute('role', 'status');
+      status.setAttribute('aria-live', 'polite');
+      control.append(status);
+    }
+    container.append(control);
+  }
+
   async function focusAnchor(threadId, anchor, node) {
     document.querySelectorAll('.anchor-target').forEach((item) => item.classList.remove('anchor-target'));
     if (node) node.classList.add('anchor-target');
@@ -1926,7 +2008,9 @@
     content.append(body);
     const actions = element('div', 'comment-actions');
     const children = flat ? [] : (byParent.get(comment.id) || []);
-    const collapse = element('button', '', children.length ? `− hide ${children.length} ${children.length === 1 ? 'reply' : 'replies'}` : 'no replies');
+    const pageState = commentPageStates.get(commentPageStateKey(thread.id, comment.id));
+    const unavailableChildren = Boolean(pageState && pageState.cursor && !pageState.exhausted);
+    const collapse = element('button', '', children.length ? `− hide ${children.length} ${children.length === 1 ? 'reply' : 'replies'}` : unavailableChildren ? 'replies not downloaded' : 'no replies');
     collapse.type = 'button';
     collapse.dataset.testid = `collapse-${comment.id}`;
     collapse.disabled = children.length === 0;
@@ -1965,12 +2049,14 @@
     }
     content.append(actions);
     const childList = element('div', 'children');
+    childList.id = `comment-children-${comment.id}`;
     childList.hidden = collapsedCommentIds.has(`${thread.id}:${comment.id}`);
     if (!flat && !ancestors.has(comment.id)) {
       const nextAncestors = new Set(ancestors);
       nextAncestors.add(comment.id);
       for (const child of children) childList.append(renderComment(thread, child, byParent, depth + 1, false, nextAncestors));
     }
+    if (!flat) renderCommentPageControl(childList, thread, comment.id);
     card.append(head, content);
     section.append(card, childList);
     section.addEventListener('click', (event) => {
@@ -2396,6 +2482,10 @@
     for (const returned of result.snapshot.threads) mergedThreads.set(returned.id, returned);
     snapshot = mergeSnapshot(result.snapshot, { threads: [...mergedThreads.values()] });
     threadCache.set(id, thread);
+    if (Array.isArray(result.comment_pages)) {
+      completeCommentThreads.delete(id);
+      rememberCommentPageStates(id, result.comment_pages, { replace: true });
+    }
     loadedThreadIds.add(id);
     unavailableThreadIds.delete(id);
     if (updateListings) {
@@ -2439,7 +2529,7 @@
     const section = element('section', 'discussion-comments');
     section.id = 'discussion-comments';
     const comments = Array.isArray(thread.comments) ? thread.comments : [];
-    const isPartial = thread.comments_status === 'partial_browser' || thread.comments_status === 'partial_proxy';
+    const isPartial = (thread.comments_status === 'partial_browser' || thread.comments_status === 'partial_proxy') && !completeCommentThreads.has(thread.id);
     const totalComments = thread.comment_count !== null && thread.comment_count !== undefined ? Number(thread.comment_count) : NaN;
     const hasTotalComments = Number.isSafeInteger(totalComments) && totalComments >= 0;
     const downloadedLabel = `${comments.length} downloaded`;
@@ -2479,6 +2569,7 @@
       section.append(element('p', 'muted comment-note cached-listing-note', postLoadsInFlight.has(thread.id) ? 'Loading comments…' : note));
     } else if (comments.length) {
       const list = element('div', 'comment-list');
+      list.id = 'discussion-comment-list';
       const byParent = makeCommentTree(thread);
       for (const root of (byParent.get(thread.id) || [])) list.append(renderComment(thread, root, byParent, 0));
       section.append(list);
@@ -2490,6 +2581,7 @@
           : 'No comments are available in the downloaded text.';
       section.append(element('p', 'muted comment-note', note));
     }
+    renderCommentPageControl(section, thread, thread.id, true);
     return section;
   }
 
@@ -2538,11 +2630,15 @@
       if (!currentSection) return;
       const focusedComment = document.activeElement.closest?.('.comment')?.dataset.commentId || null;
       const focusRefresh = document.activeElement.classList?.contains('discussion-refresh');
+      const focusedPageParentId = document.activeElement.closest?.('.comment-page-load')?.dataset.parentId || null;
       const scrollPosition = window.scrollY;
       currentSection.replaceWith(renderDiscussion(thread));
       if (focusedComment) {
         const target = [...ui.view.querySelectorAll('.comment')].find((item) => item.dataset.commentId === focusedComment);
         if (target) target.focus({ preventScroll: true });
+      } else if (focusedPageParentId) {
+        const button = [...ui.view.querySelectorAll('.comment-page-load')].find((item) => item.dataset.parentId === focusedPageParentId);
+        (button || ui.view.querySelector('#discussion-comments .comment-page-status') || ui.view.querySelector('#discussion-comments')).focus({ preventScroll: true });
       } else if (focusRefresh) ui.view.querySelector('.discussion-refresh')?.focus({ preventScroll: true });
       window.scrollTo(0, scrollPosition);
     } catch (error) {
@@ -2557,6 +2653,111 @@
       }
     } finally {
       if (discussionRefreshInFlight.get(id) === flight) discussionRefreshInFlight.delete(id);
+    }
+  }
+
+  function rerenderDiscussionPreservingFocus(thread) {
+    if (activeId !== thread.id || ui.readerPanel.hidden) return;
+    const currentSection = ui.view.querySelector('#discussion-comments');
+    if (!currentSection) return;
+    const active = document.activeElement;
+    const hadFocusInside = currentSection.contains(active);
+    const testId = hadFocusInside ? active.getAttribute('data-testid') : null;
+    const commentId = hadFocusInside ? active.closest('.comment')?.dataset.commentId : null;
+    const pageParentId = hadFocusInside ? active.closest('.comment-page-load')?.dataset.parentId : null;
+    const scrollPosition = window.scrollY;
+    currentSection.replaceWith(renderDiscussion(thread));
+    if (hadFocusInside) {
+      const restored = testId ? ui.view.querySelector(`[data-testid="${CSS.escape(testId)}"]`) : null;
+      const fallback = pageParentId ? ui.view.querySelector(`.comment[data-comment-id="${CSS.escape(pageParentId)}"]`) : null;
+      const target = restored || fallback || (commentId ? ui.view.querySelector(`.comment[data-comment-id="${CSS.escape(commentId)}"]`) : null) || ui.view;
+      target.focus?.({ preventScroll: true });
+    }
+    window.scrollTo(0, scrollPosition);
+  }
+
+  async function loadCommentPage(threadId, parentId) {
+    const key = commentPageStateKey(threadId, parentId);
+    const state = commentPageStates.get(key);
+    if (!state || !state.cursor || state.exhausted || state.loading || commentPageInFlight.has(key)) return;
+    const thread = threadCache.get(threadId);
+    if (!thread || !['browser', 'proxy'].includes(thread.source)) return;
+    const flight = {};
+    const generation = commentPageGenerationByThread.get(threadId) || 0;
+    const cursor = state.cursor;
+    commentPageInFlight.set(key, flight);
+    state.loading = true;
+    state.error = '';
+    rerenderDiscussionPreservingFocus(thread);
+    try {
+      const result = await invoke('fetch_comment_page', { id: threadId, parent_id: parentId, cursor });
+      if (commentPageGenerationByThread.get(threadId) !== generation || commentPageStates.get(key) !== state) return;
+      if (!result || result.parent_id !== parentId || !Array.isArray(result.comments) ||
+          !result.comments.every((comment) => comment && /^t1_[A-Za-z0-9_]+$/.test(comment.id) && comment.parent_id === parentId) ||
+          !(result.cursor === null || typeof result.cursor === 'string') || typeof result.exhausted !== 'boolean' ||
+          (result.cursor === null && !result.exhausted) || !Number.isSafeInteger(result.loaded_count) || result.loaded_count < 0 ||
+          !(result.source_total === null || (Number.isSafeInteger(result.source_total) && result.source_total >= 0)) ||
+          (result.comment_pages !== undefined && !Array.isArray(result.comment_pages))) {
+        throw new Error('The reader received an invalid comment continuation page.');
+      }
+      const current = threadCache.get(threadId);
+      if (!current) return;
+      const mergedComments = [...(current.comments || [])];
+      const positions = new Map(mergedComments.map((comment, index) => [comment.id, index]));
+      for (const comment of result.comments) {
+        const existingIndex = positions.get(comment.id);
+        if (existingIndex === undefined) {
+          positions.set(comment.id, mergedComments.length);
+          mergedComments.push(comment);
+        } else {
+          if (mergedComments[existingIndex].parent_id !== parentId) throw new Error('The comment continuation moved an existing comment to a different parent.');
+          mergedComments[existingIndex] = { ...mergedComments[existingIndex], ...comment };
+        }
+      }
+      const updated = {
+        ...current,
+        comments: mergedComments,
+        comment_count: result.source_total === null ? current.comment_count : result.source_total,
+      };
+      threadCache.set(threadId, updated);
+      for (const [subreddit, listing] of listingBySubreddit) {
+        listingBySubreddit.set(subreddit, listing.map((item) => item.id === threadId ? updated : item));
+      }
+      const snapshotThreads = new Map((snapshot?.threads || []).map((item) => [item.id, item]));
+      snapshotThreads.set(threadId, updated);
+      snapshot = { ...(snapshot || {}), threads: [...snapshotThreads.values()] };
+      const nextCursor = typeof result.cursor === 'string' && result.cursor ? result.cursor : null;
+      if (result.exhausted || !nextCursor) {
+        state.cursor = null;
+        state.exhausted = true;
+        state.stopReason = '';
+      } else if (nextCursor === cursor) {
+        state.cursor = null;
+        state.exhausted = false;
+        state.stopReason = 'This reply branch returned the same page again. Loading stopped to avoid a loop.';
+      } else {
+        state.cursor = nextCursor;
+        state.exhausted = false;
+        state.stopReason = '';
+      }
+      state.error = '';
+      rememberCommentPageStates(threadId, result.comment_pages || []);
+      const pagePrefix = `${threadId}\u0000`;
+      const pageStates = [...commentPageStates].filter(([pageKey]) => pageKey.startsWith(pagePrefix)).map(([, pageState]) => pageState);
+      if (result.source_total !== null && result.loaded_count >= result.source_total && pageStates.length > 0 && pageStates.every((pageState) => pageState.exhausted)) {
+        completeCommentThreads.add(threadId);
+      } else completeCommentThreads.delete(threadId);
+      updateThreadRowCommentCount(threadId, updated);
+      discussionRefreshStates.delete(threadId);
+    } catch (error) {
+      if (commentPageGenerationByThread.get(threadId) === generation && commentPageStates.get(key) === state) state.error = explainError(error);
+    } finally {
+      if (commentPageInFlight.get(key) === flight) commentPageInFlight.delete(key);
+      if (commentPageGenerationByThread.get(threadId) === generation && commentPageStates.get(key) === state) {
+        state.loading = false;
+        const updated = threadCache.get(threadId);
+        if (updated) rerenderDiscussionPreservingFocus(updated);
+      }
     }
   }
 

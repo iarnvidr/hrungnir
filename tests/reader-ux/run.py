@@ -30,6 +30,7 @@ CHECKS = (
     "search-keyboard-check.js",
     "search-layout-check.js",
     "search-recovery-check.js",
+    "comment-pagination-check.js",
 )
 
 
