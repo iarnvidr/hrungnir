@@ -2915,6 +2915,7 @@
     setFeedback(`Fetching posts from /r/${subreddit}…`);
     setStatus(`Fetching /r/${subreddit}…`);
     startOperationProgress('Fetching subreddit posts', transition);
+    let failedRequest = false;
     try {
       const result = await invoke('fetch_subreddit', { subreddit, sort: requestedSort, top_period: requestedPeriod });
       if (request !== subredditRequestSequence) return;
@@ -2967,6 +2968,7 @@
       }
     } catch (error) {
       if (request === subredditRequestSequence && transition === operationSequence) {
+        failedRequest = true;
         recordClientEvent('source_fetch', performance.now() - startedAt, 0);
         const details = explainError(error);
         const unsupportedAllRedirect = subreddit === 'all' && /redirect/i.test(details);
@@ -2983,7 +2985,6 @@
         } : null;
         setFeedback(message, true, unsupportedAllRedirect ? null : () => void browseSubreddit(`/r/${subreddit}`), useSearch);
         setStatus(unsupportedAllRedirect ? 'r/all listing unavailable' : `Fetch failed · /r/${subreddit}`, 'error');
-        if (restoreInputFocus && [document.body, ui.input, ui.browse, ui.browseRefresh].includes(document.activeElement)) ui.input.focus();
       }
     } finally {
       stopOperationProgress(transition);
@@ -3005,6 +3006,8 @@
           ui.list.removeAttribute('aria-busy');
         }
         updateListingPagination();
+        if (failedRequest && transition === operationSequence && restoreInputFocus
+          && [document.body, ui.input, ui.browse, ui.browseRefresh].includes(document.activeElement)) ui.input.focus();
       }
     }
   }

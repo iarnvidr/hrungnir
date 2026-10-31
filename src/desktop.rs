@@ -115,7 +115,11 @@ impl DesktopStore {
             .filter_map(|thread| crate::media::hint(thread).map(|hint| (thread.id.clone(), hint)))
             .collect();
         Ok(Snapshot {
-            link_previews: crate::link_preview::entries(self.path.parent().unwrap_or(Path::new(".")), "", &threads),
+            link_previews: crate::link_preview::entries(
+                self.path.parent().unwrap_or(Path::new(".")),
+                "",
+                &threads,
+            ),
             threads,
             media_hints,
             position: cache.position()?,
@@ -178,23 +182,78 @@ impl DesktopStore {
                 // acquired discussion. Keep its complete cached content and
                 // media identity until a real detail response replaces them.
                 // In particular, zero replies is a completed result too.
-                if listing
-                    && (thread.comments_status.as_deref() == Some("not_loaded")
+                if listing {
+                    if (thread.comments_status.as_deref() == Some("not_loaded")
                         || (thread.comments_status.is_none() && thread.comments.is_empty()))
-                    && crate::browsing::comments_ready(&previous)
-                {
-                    thread.body = previous.body;
-                    thread.comments = previous.comments;
-                    thread.missing = previous.missing;
-                    thread.comments_status = previous.comments_status;
-                    thread.comment_count = thread.comment_count.or(previous.comment_count);
-                    thread.link_url = previous.link_url;
-                    thread.media_urls = previous.media_urls;
-                } else if listing && thread.media_urls.is_empty() {
-                    thread.media_urls = previous.media_urls;
-                }
-                if listing && thread.comment_count.is_none() {
-                    thread.comment_count = previous.comment_count;
+                        && crate::browsing::comments_ready(&previous)
+                    {
+                        thread.body = previous.body;
+                        thread.comments = previous.comments;
+                        thread.missing = previous.missing;
+                        thread.comments_status = previous.comments_status;
+                        thread.comment_count = thread.comment_count.or(previous.comment_count);
+                        thread.link_url = previous.link_url;
+                        thread.media_urls = previous.media_urls;
+                    } else if thread.media_urls.is_empty() {
+                        thread.media_urls = previous.media_urls;
+                    }
+                    if thread.comment_count.is_none() {
+                        thread.comment_count = previous.comment_count;
+                    }
+                } else {
+                    if matches!(
+                        thread.comments_status.as_deref(),
+                        Some("partial_proxy" | "partial_browser")
+                    ) {
+                        // Detail captures are bounded partial views. Keep known
+                        // comments that this response did not include, while fresh
+                        // representations win for IDs that appear in both.
+                        let mut merged_ids = std::collections::HashSet::new();
+                        let mut merged = Vec::with_capacity(
+                            previous
+                                .comments
+                                .len()
+                                .saturating_add(thread.comments.len()),
+                        );
+                        // Keep the fresh source order and representation, then
+                        // append older known comments absent from this capture.
+                        for comment in std::mem::take(&mut thread.comments) {
+                            merged_ids.insert(comment.id.clone());
+                            merged.push(comment);
+                        }
+                        for comment in previous.comments {
+                            if merged_ids.insert(comment.id.clone()) {
+                                merged.push(comment);
+                            }
+                        }
+                        if merged.len() > 10_000 {
+                            return Err("merged discussion exceeds 10000 cached comments".into());
+                        }
+                        thread.comments = merged;
+
+                        // A refreshed comment can resolve an ID previously recorded
+                        // as missing; preserve other known missing identities.
+                        let cached_ids: std::collections::HashSet<_> = thread
+                            .comments
+                            .iter()
+                            .map(|comment| comment.id.as_str())
+                            .collect();
+                        let mut missing = std::collections::BTreeSet::new();
+                        for id in previous.missing.into_iter().chain(thread.missing.drain(..)) {
+                            if !cached_ids.contains(id.as_str()) {
+                                missing.insert(id);
+                            }
+                        }
+                        thread.missing = missing.into_iter().collect();
+                        thread.comment_count = thread.comment_count.or(previous.comment_count);
+                        if serde_json::to_vec(&thread)?.len() > IMPORT_LIMIT {
+                            return Err(
+                                "merged discussion exceeds 4 MiB per-thread import limit".into()
+                            );
+                        }
+                    } else if thread.comment_count.is_none() {
+                        thread.comment_count = previous.comment_count;
+                    }
                 }
             }
             threads.push(thread);
@@ -222,16 +281,22 @@ mod tests {
         let path = temp_db();
         let _ = std::fs::remove_file(&path);
         let store = DesktopStore::new(path.clone());
-        let mut original: Thread = serde_json::from_str(include_str!("../fixtures/thread.json")).unwrap();
+        let mut original: Thread =
+            serde_json::from_str(include_str!("../fixtures/thread.json")).unwrap();
         original.comments_status = Some("partial_proxy".into());
         original.comment_count = Some(40);
         original.body = "cached full body ".repeat(500);
         original.media_urls = vec!["https://v.redd.it/clip123/HLSPlaylist.m3u8".into()];
         original.source = Some("proxy".into());
-        original.permalink = Some("https://www.reddit.com/r/offline_lab/comments/fixture/fixture/".into());
-        Cache::open(&path).unwrap().import(&original, PAYLOAD_BUDGET).unwrap();
+        original.permalink =
+            Some("https://www.reddit.com/r/offline_lab/comments/fixture/fixture/".into());
+        Cache::open(&path)
+            .unwrap()
+            .import(&original, PAYLOAD_BUDGET)
+            .unwrap();
 
-        let mut listing: Thread = serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
+        let mut listing: Thread =
+            serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
         listing.title = "Refreshed title".into();
         listing.body.clear();
         listing.comments.clear();
@@ -239,28 +304,42 @@ mod tests {
         listing.comments_status = Some("not_loaded".into());
         listing.comment_count = Some(44);
         let page = crate::browsing::PageCapture {
-            url: "https://www.reddit.com/r/offline_lab/hot/".into(), scroll_y: 0.0,
-            threads: vec![listing], layout: None, layout_preference: None, more_url: None,
+            url: "https://www.reddit.com/r/offline_lab/hot/".into(),
+            scroll_y: 0.0,
+            threads: vec![listing],
+            layout: None,
+            layout_preference: None,
+            more_url: None,
         };
-        store.capture_page(&serde_json::to_string(&page).unwrap()).unwrap();
+        store
+            .capture_page(&serde_json::to_string(&page).unwrap())
+            .unwrap();
         let refreshed = store.read(&original.id).unwrap().unwrap();
         assert_eq!(refreshed.title, "Refreshed title");
         assert_eq!(refreshed.body, original.body);
         assert_eq!(refreshed.comments, original.comments);
         assert_eq!(refreshed.comment_count, Some(44));
 
-        let mut listing: Thread = serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
+        let mut listing: Thread =
+            serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
         listing.comments.clear();
         listing.body.clear();
         listing.comments_status = Some("not_loaded".into());
         listing.comment_count = None;
-        let page = crate::browsing::PageCapture { threads: vec![listing], ..page };
-        store.capture_page(&serde_json::to_string(&page).unwrap()).unwrap();
+        let page = crate::browsing::PageCapture {
+            threads: vec![listing],
+            ..page
+        };
+        store
+            .capture_page(&serde_json::to_string(&page).unwrap())
+            .unwrap();
         let stored = store.read(&original.id).unwrap().unwrap();
         assert_eq!(stored.comment_count, Some(44));
         assert_eq!(stored.body, original.body);
         assert_eq!(stored.comments, original.comments);
-        let summary = store.listing_snapshot_for_ids(std::slice::from_ref(&original.id)).unwrap();
+        let summary = store
+            .listing_snapshot_for_ids(std::slice::from_ref(&original.id))
+            .unwrap();
         let hint = summary.media_hints.get(&original.id).unwrap();
         assert_eq!(hint.kind, "video");
         assert_eq!(hint.count, 1);
