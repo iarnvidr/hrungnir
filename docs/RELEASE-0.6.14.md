@@ -8,7 +8,9 @@
 
 Known limits: Reddit redirects `/r/all` away from its public listing path, so Hrungnir reports that path as unsupported instead of displaying unrelated content. Popular results remain a page of at most 25 posts; this does not exhaust the entire feed.
 
-Apple Silicon, macOS 14+. Verify a downloaded archive before extracting:
+Apple Silicon, macOS 14+. This app is ad-hoc signed and not notarized. Gatekeeper
+may require you to approve the downloaded app in Privacy & Security. Do not
+disable Gatekeeper globally. Verify the archive before extracting:
 
 ```sh
 shasum -a 256 -c Hrungnir-0.6.14-macos-arm64.zip.sha256
