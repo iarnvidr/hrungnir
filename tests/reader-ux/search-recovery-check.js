@@ -13,7 +13,7 @@ async (page) => {
   await page.evaluate(() => localStorage.clear());
   await page.reload();
   await page.waitForFunction(() => document.querySelectorAll('.thread-item').length === 28);
-  await waitForListing('space');
+  await waitForListing('soccer');
   assert(await page.locator('.thread-item[data-thread-id="t3_article"] .thread-comment-count').innerText() === '3 comments', 'post row does not show the source comment total');
   const originalCount = await page.locator('.thread-item').count();
 
