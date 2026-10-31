@@ -44,6 +44,7 @@ class Cdp:
         self.responses: dict[int, dict] = {}
         self.browser = browser
         self.pressed_keys: set[str] = set()
+        self.page_errors: list[str] = []
 
     def command(self, method: str, params: dict | None = None, *, context: int | None = None) -> dict:
         self.next_id += 1
@@ -65,6 +66,11 @@ class Cdp:
                 return reply.get("result", {})
             if isinstance(reply.get("id"), int):
                 self.responses[reply["id"]] = reply
+                continue
+            if reply.get("method") == "Runtime.exceptionThrown":
+                details = reply.get("params", {}).get("exceptionDetails", {})
+                exception = details.get("exception", {}).get("description")
+                self.page_errors.append(exception or details.get("text", "uncaught browser exception"))
                 continue
             if reply.get("method") == "Runtime.bindingCalled" and reply.get("params", {}).get("name") == "__readerUxBridge":
                 self.handle_bridge(reply["params"])
@@ -297,7 +303,7 @@ def main() -> int:
             cdp.command("Runtime.enable")
             cdp.command("Runtime.addBinding", {"name": "__readerUxBridge"})
             cdp.command("Emulation.setDeviceMetricsOverride", {"width": 1280, "height": 900, "deviceScaleFactor": 1, "mobile": False})
-            bootstrap = "window.__readerUxErrors = []; window.addEventListener('error', event => window.__readerUxErrors.push(event.message)); window.addEventListener('unhandledrejection', event => window.__readerUxErrors.push(event.reason?.message || String(event.reason)));\n" + (HERE / "browser-facade.js").read_text()
+            bootstrap = (HERE / "browser-facade.js").read_text()
             cdp.command("Page.addScriptToEvaluateOnNewDocument", {"source": bootstrap})
             cdp.command("Page.navigate", {"url": url + "__runner.html"})
             cdp.wait_ready()
@@ -306,10 +312,10 @@ def main() -> int:
             for filename in CHECKS:
                 source = (HERE / filename).read_text()
                 expression = "(async () => { const check = (" + source + "); return await check(window.__readerUxPage); })()"
+                cdp.page_errors.clear()
                 result = cdp.evaluate(expression)
-                errors = cdp.evaluate("document.querySelector('#reader-fixture').contentWindow.__readerUxErrors.slice()") or []
-                if errors:
-                    raise RuntimeError(f"{filename}: page errors: " + "\n".join(errors))
+                if cdp.page_errors:
+                    raise RuntimeError(f"{filename}: page errors: " + "\n".join(cdp.page_errors))
                 passed = result.get("passed", []) if isinstance(result, dict) else []
                 print(f"{filename}: {len(passed)} groups passed; " + ", ".join(passed), flush=True)
         return 0
