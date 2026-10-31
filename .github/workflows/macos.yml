@@ -2,9 +2,7 @@ name: macOS
 
 on:
   pull_request:
-  # Keep the main-branch native artifact producer until release promotion is mapped.
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,6 +16,7 @@ env:
 
 jobs:
   build:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: macos-15
     timeout-minutes: 60
     steps:
@@ -101,13 +100,13 @@ jobs:
         run: python3 scripts/release-artifact.py receipt
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        # Only trusted main runs are release eligible; PR artifacts remain feedback.
-        # The receipt is generated after extracted-app acceptance above.
+        # PR runs feed main acceptance mapping. Manual main runs remain an explicit fallback.
         id: native-artifact
         with:
-          name: hrungnir-macos-arm64-pr
+          name: hrungnir-macos-arm64-${{ github.event_name == 'pull_request' && 'pr' || 'main' }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/*.zip
             artifacts/*.zip.sha256
             artifacts/native-receipt.json
           if-no-files-found: error
+          retention-days: 90
