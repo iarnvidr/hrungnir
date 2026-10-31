@@ -39,7 +39,7 @@ def require_container() -> None:
 
 class Cdp:
     def __init__(self, ws_url: str, browser: "Cdp | None" = None) -> None:
-        self.ws = websocket.create_connection(ws_url, timeout=300, enable_multithread=True)
+        self.ws = websocket.create_connection(ws_url, timeout=300, enable_multithread=True, suppress_origin=True)
         self.next_id = 0
         self.responses: dict[int, dict] = {}
         self.browser = browser
