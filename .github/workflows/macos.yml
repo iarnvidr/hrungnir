@@ -113,7 +113,10 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: "14.0"
           CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
-        run: cargo tauri build --debug --no-bundle --target aarch64-apple-darwin --config src-tauri/tauri.test.conf.json
+        run: |
+          cargo build --locked --example replay-comment-page --target aarch64-apple-darwin
+          python3 scripts/test-comment-replay.py "$CARGO_TARGET_DIR/aarch64-apple-darwin/debug/examples/replay-comment-page"
+          cargo tauri build --debug --no-bundle --target aarch64-apple-darwin --config src-tauri/tauri.test.conf.json
 
       - name: Package and bind native test artifact
         env:
@@ -123,6 +126,7 @@ jobs:
           app="artifacts/native-test/Hrungnir Test.app"
           codesign --force --sign - "$app/Contents/Resources/bin/yt-dlp"
           codesign --force --sign - "$app/Contents/Resources/bin/ffmpeg"
+          codesign --force --sign - "$app/Contents/Resources/bin/hrungnir-comment-replay"
           codesign --force --sign - "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           version="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"

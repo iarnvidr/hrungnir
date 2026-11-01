@@ -108,11 +108,11 @@ pub async fn run(browser: &Arc<Browser>) -> Value {
     let initial_ids: std::collections::BTreeSet<_> =
         initial.comments.iter().map(|comment| comment.id.clone()).collect();
     let root_parent = initial.id.clone();
-    let top_level = browser
-        .comment_pages_for(&initial.id)
-        .into_iter()
+    let initial_pages = browser.comment_pages_for(&initial.id);
+    let top_level = initial_pages
+        .iter()
         .find(|state| state.parent_id == root_parent && state.cursor.is_some());
-    let Some(top_level) = top_level else {
+    let Some(first_cursor) = top_level.and_then(|state| state.cursor.clone()) else {
         return json!({
             "name":"comments:continuation",
             "status":"no_top_level_handle",
@@ -122,7 +122,6 @@ pub async fn run(browser: &Arc<Browser>) -> Value {
             "comment_structure":last_comment_structure(browser),
         });
     };
-    let first_cursor = top_level.cursor.expect("selected live handle has a cursor");
     let first = match browser
         .fetch_comment_page(&initial.id, &root_parent, &first_cursor)
         .await
@@ -141,64 +140,191 @@ pub async fn run(browser: &Arc<Browser>) -> Value {
         .filter(|comment| !initial_ids.contains(&comment.id))
         .map(|comment| comment.id.clone())
         .collect();
+    let mut root_second_new = Vec::new();
+    let mut root_second_loaded = None;
+    let mut root_second_has_next = None;
+    let mut root_exhausted = first.cursor.is_none();
+    let mut root_second_result = if first.cursor.is_some() { "pending" } else { "not_offered" };
+    let mut root_second_problem = false;
+    let mut all_page_totals_match = first.source_total == after_first.comment_count;
+    let mut required_ids: std::collections::BTreeSet<String> = initial_ids.clone();
+    required_ids.extend(first_new.iter().cloned());
+    let mut chosen_parent_kind: Option<&str> = None;
+    let mut chosen_parent_id: Option<String> = None;
+    let mut chosen_second_new = Vec::new();
+    let mut chosen_source_total = Some(first.source_total);
+    let mut chosen_loaded_first = None;
+    let mut chosen_loaded_second = None;
+    let mut chosen_has_next = None;
+    let mut nested_result = json!({"status":"unavailable"});
+    let mut nested_succeeded = false;
+    let mut nested_attempts = Vec::new();
+    let mut nested_continuation_problem = false;
+    let mut same_parent_continuation = false;
+    let mut exhausted_nested_parents = Vec::new();
 
-    let Some(second_cursor) = first.cursor.clone() else {
-        return json!({
-            "name":"comments:continuation",
-            "status":"first_page_exhausted",
-            "post_id":initial.id,
-            "source_total_before":initial.comment_count,
-            "source_total_after":after_first.comment_count,
-            "loaded_before":initial.comments.len(),
-            "loaded_after_first":first.loaded_count,
-            "first_page_new_ids":first_new,
-            "first_page_has_next":false,
-            "comment_structure":last_comment_structure(browser),
-        });
-    };
-    let second = match browser
-        .fetch_comment_page(&initial.id, &root_parent, &second_cursor)
-        .await
-    {
-        Ok(page) => page,
-        Err(error) => return json!({"name":"comments:second_page","status":"failed","error":error}),
-    };
-    let after_second = match browser.store.read(&initial.id) {
-        Ok(Some(thread)) => thread,
-        Ok(None) => return json!({"name":"comments:second_page","status":"failed","error":"Post missing after second page merge"}),
-        Err(error) => return json!({"name":"comments:second_page","status":"failed","error":error.to_string()}),
-    };
-    let all_ids: std::collections::BTreeSet<_> =
-        after_second.comments.iter().map(|comment| comment.id.clone()).collect();
-    let second_new: Vec<_> = all_ids.difference(&initial_ids).cloned().collect();
-    let first_page_ids: std::collections::BTreeSet<_> = first_new.iter().cloned().collect();
-    let second_page_new: Vec<_> = second_new
-        .iter()
-        .filter(|id| !first_page_ids.contains(*id))
-        .cloned()
-        .collect();
-    let nested = second
-        .comment_pages
-        .iter()
-        .find(|state| state.parent_id != root_parent && state.cursor.is_some());
-    let nested_result = if let Some(state) = nested {
-        match browser
-            .fetch_comment_page(&initial.id, &state.parent_id, state.cursor.as_deref().unwrap_or_default())
-            .await
-        {
-            Ok(page) => json!({
-                "status":"ok",
-                "parent_id":state.parent_id,
-                "returned_count":page.comments.len(),
-                "loaded_count":page.loaded_count,
-                "has_next":page.cursor.is_some(),
-            }),
-            Err(error) => json!({"status":"failed","parent_id":state.parent_id,"error":error}),
+    // Prefer two advancing pages from the root branch when its source cursor
+    // exists. Exhaustion here is a valid source outcome, so fall back to
+    // retained nested handles rather than declaring the entire post exhausted.
+    if let Some(second_cursor) = first.cursor.as_deref() {
+        match browser.fetch_comment_page(&initial.id, &root_parent, second_cursor).await {
+            Ok(second) => match browser.store.read(&initial.id) {
+                Ok(Some(after_second)) => {
+                    all_page_totals_match &= second.source_total == after_second.comment_count;
+                    let first_page_ids: std::collections::BTreeSet<_> =
+                        after_first.comments.iter().map(|comment| comment.id.clone()).collect();
+                    root_second_new = after_second.comments.iter()
+                        .filter(|comment| !first_page_ids.contains(&comment.id))
+                        .map(|comment| comment.id.clone()).collect();
+                    root_second_loaded = Some(second.loaded_count);
+                    root_second_has_next = Some(second.cursor.is_some());
+                    root_exhausted = second.cursor.is_none();
+                    chosen_source_total = Some(second.source_total);
+                    if !root_second_new.is_empty() {
+                        root_second_result = "advanced";
+                        same_parent_continuation = true;
+                        chosen_parent_kind = Some("root");
+                        chosen_parent_id = Some(root_parent.clone());
+                        chosen_second_new = root_second_new.clone();
+                        chosen_loaded_first = Some(first.loaded_count);
+                        chosen_loaded_second = Some(second.loaded_count);
+                        chosen_has_next = Some(second.cursor.is_some());
+                        required_ids.extend(root_second_new.iter().cloned());
+                    } else {
+                        root_second_result = "not_advancing";
+                        root_second_problem = true;
+                    }
+                }
+                Ok(None) => {
+                    root_second_result = "cache_read_failed";
+                    root_second_problem = true;
+                }
+                Err(_) => {
+                    root_second_result = "cache_read_failed";
+                    root_second_problem = true;
+                }
+            },
+            Err(_) => {
+                root_second_result = "fetch_failed";
+                root_second_problem = true;
+            }
         }
-    } else {
-        json!({"status":"no_nested_handle"})
-    };
-    let nested_succeeded = nested_result.get("status").and_then(Value::as_str) == Some("ok");
+    }
+
+    // Always exercise retained nested handles, including when the root branch
+    // itself advanced. A fragment may expose only one source page per branch.
+        let retained = browser.comment_pages_for(&initial.id);
+        let known_comment_ids: std::collections::BTreeSet<_> = match browser.store.read(&initial.id) {
+            Ok(Some(thread)) => thread.comments.iter().map(|comment| comment.id.clone()).collect(),
+            _ => std::collections::BTreeSet::new(),
+        };
+        let candidates: Vec<_> = retained.into_iter()
+            .filter(|state| state.parent_id != root_parent
+                && state.cursor.is_some()
+                && known_comment_ids.contains(&state.parent_id))
+            .take(3)
+            .collect();
+        for candidate in candidates {
+            let parent_id = candidate.parent_id.clone();
+            let Some(cursor) = candidate.cursor.as_deref() else { continue };
+            let before_first: std::collections::BTreeSet<_> = match browser.store.read(&initial.id) {
+                Ok(Some(thread)) => thread.comments.iter().map(|comment| comment.id.clone()).collect(),
+                _ => {
+                    nested_continuation_problem = true;
+                    nested_attempts.push(json!({"parent_id":parent_id,"stage":"before_first","error":"cache_read_failed"}));
+                    continue;
+                }
+            };
+            let page_one = match browser.fetch_comment_page(&initial.id, &parent_id, cursor).await {
+                Ok(page) => page,
+                Err(_) => {
+                    nested_continuation_problem = true;
+                    nested_attempts.push(json!({"parent_id":parent_id,"stage":"first_page","error":"backend_fetch_failed"}));
+                    continue;
+                }
+            };
+            let after_nested_first = match browser.store.read(&initial.id) {
+                Ok(Some(thread)) => thread,
+                _ => {
+                    nested_continuation_problem = true;
+                    nested_attempts.push(json!({"parent_id":parent_id,"stage":"after_first","error":"cache_read_failed"}));
+                    continue;
+                }
+            };
+            let nested_first_new: Vec<_> = after_nested_first.comments.iter()
+                .filter(|comment| !before_first.contains(&comment.id))
+                .map(|comment| comment.id.clone()).collect();
+            all_page_totals_match &= page_one.source_total == after_nested_first.comment_count;
+            chosen_source_total = Some(page_one.source_total);
+            required_ids.extend(nested_first_new.iter().cloned());
+            nested_succeeded |= !nested_first_new.is_empty();
+            if nested_first_new.is_empty() {
+                nested_continuation_problem = true;
+            }
+            nested_result = json!({"status":if nested_first_new.is_empty() {"not_advancing"} else {"advanced"},"parent_id":parent_id,
+                "first_page_new_count":nested_first_new.len(),"has_next":page_one.cursor.is_some()});
+            if page_one.cursor.is_none() {
+                if !nested_first_new.is_empty() {
+                    exhausted_nested_parents.push(parent_id.clone());
+                }
+                nested_attempts.push(json!({"parent_id":parent_id,"stage":"first_page",
+                    "status":if nested_first_new.is_empty() {"not_advancing"} else {"exhausted"},
+                    "new_count":nested_first_new.len()}));
+            }
+
+            if let Some(next_cursor) = page_one.cursor.as_deref() {
+                let before_second: std::collections::BTreeSet<_> = after_nested_first.comments
+                    .iter().map(|comment| comment.id.clone()).collect();
+                match browser.fetch_comment_page(&initial.id, &parent_id, next_cursor).await {
+                    Ok(page_two) => match browser.store.read(&initial.id) {
+                        Ok(Some(after_nested_second)) => {
+                        let nested_second_new: Vec<_> = after_nested_second.comments.iter()
+                            .filter(|comment| !before_second.contains(&comment.id))
+                            .map(|comment| comment.id.clone()).collect();
+                        all_page_totals_match &= page_two.source_total == after_nested_second.comment_count;
+                        chosen_source_total = Some(page_two.source_total);
+                        required_ids.extend(nested_second_new.iter().cloned());
+                        if nested_second_new.is_empty() {
+                            nested_continuation_problem = true;
+                        }
+                        nested_succeeded |= !nested_second_new.is_empty();
+                        let nested_pair_advanced = !nested_first_new.is_empty() && !nested_second_new.is_empty();
+                        same_parent_continuation |= nested_pair_advanced;
+                        nested_result = json!({"status":if nested_pair_advanced {"advanced"} else {"not_advancing"},
+                            "parent_id":parent_id,"first_page_new_count":nested_first_new.len(),
+                            "second_page_new_count":nested_second_new.len(),
+                            "source_total":page_two.source_total,"loaded_count":page_two.loaded_count,
+                            "has_next":page_two.cursor.is_some()});
+                        nested_attempts.push(json!({"parent_id":parent_id,"stage":"second_page",
+                            "status":if nested_pair_advanced {"advanced"} else {"not_advancing"},
+                            "first_page_new_count":nested_first_new.len(),
+                            "second_page_new_count":nested_second_new.len()}));
+                        if nested_pair_advanced && chosen_parent_kind.is_none() {
+                            chosen_parent_kind = Some("nested");
+                            chosen_parent_id = Some(parent_id.clone());
+                            chosen_second_new = nested_second_new;
+                            chosen_source_total = Some(page_two.source_total);
+                            chosen_loaded_first = Some(page_one.loaded_count);
+                            chosen_loaded_second = Some(page_two.loaded_count);
+                            chosen_has_next = Some(page_two.cursor.is_some());
+                        }
+                        if page_two.cursor.is_none() && nested_pair_advanced {
+                            exhausted_nested_parents.push(parent_id.clone());
+                        }
+                        }
+                        _ => {
+                            nested_continuation_problem = true;
+                            nested_attempts.push(json!({"parent_id":parent_id,"stage":"after_second","error":"cache_read_failed"}));
+                        }
+                    },
+                    Err(_) => {
+                        nested_continuation_problem = true;
+                        nested_attempts.push(json!({"parent_id":parent_id,"stage":"second_page","error":"backend_fetch_failed"}));
+                    }
+                }
+            }
+        }
+
     let reopened = match browser.store.read(&initial.id) {
         Ok(Some(thread)) => thread,
         Ok(None) => return json!({"name":"comments:reopen","status":"failed","error":"Post missing on cached reopen"}),
@@ -206,36 +332,62 @@ pub async fn run(browser: &Arc<Browser>) -> Value {
     };
     let reopened_ids: std::collections::BTreeSet<_> =
         reopened.comments.iter().map(|comment| comment.id.clone()).collect();
-    let persisted_new = second_new.iter().filter(|id| reopened_ids.contains(*id)).count();
+    let persisted_new = required_ids.difference(&initial_ids)
+        .filter(|id| reopened_ids.contains(*id)).count();
     let initial_preserved = initial_ids.is_subset(&reopened_ids);
-    let first_page_preserved = after_first.comments.iter().all(|comment| reopened_ids.contains(&comment.id));
-    let second_page_preserved = all_ids.is_subset(&reopened_ids);
+    let first_page_preserved = first_new.iter().all(|id| reopened_ids.contains(id));
+    let second_page_preserved = chosen_second_new.iter().all(|id| reopened_ids.contains(id));
+    let source_total_preserved = all_page_totals_match
+        && chosen_source_total.flatten() == reopened.comment_count;
+    exhausted_nested_parents.sort();
+    exhausted_nested_parents.dedup();
+    let distinct_exhausted_branches = root_exhausted && exhausted_nested_parents.len() >= 2;
+    let coverage_label = if same_parent_continuation {
+        "same_parent_continuation"
+    } else if distinct_exhausted_branches {
+        "distinct_exhausted_branches"
+    } else {
+        "incomplete"
+    };
     json!({
         "name":"comments:continuation",
         "status":if first_new.is_empty()
-            || second_page_new.is_empty()
-            || persisted_new != second_new.len()
+            || coverage_label == "incomplete"
+            || root_second_problem
+            || nested_continuation_problem
+            || persisted_new != required_ids.difference(&initial_ids).count()
             || first.source_total != after_first.comment_count
-            || second.source_total != after_second.comment_count
-            || reopened.comment_count != after_second.comment_count
+            || !source_total_preserved
             || !nested_succeeded
             || !initial_preserved
             || !first_page_preserved
             || !second_page_preserved
         { "incomplete" } else { "ok" },
-        "post_id":after_second.id,
+        "post_id":reopened.id,
         "source_total_before":initial.comment_count,
-        "source_total_after":after_second.comment_count,
+        "source_total_after":reopened.comment_count,
         "loaded_before":initial.comments.len(),
         "loaded_after_first":first.loaded_count,
-        "loaded_after_second":second.loaded_count,
+        "root_exhausted":root_exhausted,
+        "root_second_page_result":root_second_result,
+        "root_second_page_problem":root_second_problem,
+        "root_second_page_new_count":root_second_new.len(),
+        "root_second_loaded_count":root_second_loaded,
+        "root_second_has_next":root_second_has_next,
+        "coverage_label":coverage_label,
+        "distinct_exhausted_branches":exhausted_nested_parents,
         "first_page_new_ids":first_new,
-        "second_page_new_ids":second_page_new,
-        "same_parent_second_page":true,
-        "second_page_has_next":second.cursor.is_some(),
+        "two_page_parent_kind":chosen_parent_kind,
+        "two_page_parent_id":chosen_parent_id,
+        "two_page_second_new_ids":chosen_second_new,
+        "two_page_first_loaded_count":chosen_loaded_first,
+        "two_page_second_loaded_count":chosen_loaded_second,
+        "two_page_has_next":chosen_has_next,
         "nested_page":nested_result,
+        "nested_attempts":nested_attempts,
         "reopened_count":reopened.comments.len(),
         "persisted_new_count":persisted_new,
+        "source_total_preserved":source_total_preserved,
         "initial_comments_preserved":initial_preserved,
         "first_page_comments_preserved":first_page_preserved,
         "second_page_comments_preserved":second_page_preserved,

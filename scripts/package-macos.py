@@ -46,6 +46,13 @@ for name in ('yt-dlp','ffmpeg'):
     if not (tools/name).is_file(): sys.exit('Run scripts/fetch-media-tools.py before packaging')
     shutil.copy2(tools/name,app/'Contents/Resources/bin'/name)
     (app/'Contents/Resources/bin'/name).chmod(0o755)
+if args.test:
+    replay = root / 'src-tauri/target/aarch64-apple-darwin/debug/examples/replay-comment-page'
+    if not replay.is_file():
+        sys.exit('The Actions-built comment replay utility is missing')
+    replay_target = app / 'Contents/Resources/bin/hrungnir-comment-replay'
+    shutil.copy2(replay, replay_target)
+    replay_target.chmod(0o755)
 if (tools/'ffmpeg.configuration.txt').is_file():
     shutil.copy2(tools/'ffmpeg.configuration.txt',app/'Contents/Resources/licenses'/'ffmpeg-configuration.txt')
 with (app / "Contents/Info.plist").open("wb") as out:

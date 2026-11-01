@@ -62,6 +62,8 @@ If the calling shell times out, do not retry the run or remove its scratch direc
 
 The dedicated test reader window stays hidden and unfocused. No host test browser or browser driver is used. ChromeDriver is forbidden, and no macOS quarantine, Gatekeeper or other host security settings may be changed to run tests.
 
+The test artifact also includes `Contents/Resources/bin/hrungnir-comment-replay`, a standalone offline parser utility built and tested in Actions. Reader probes may retain up to four private comment response captures in their isolated `comment-fixtures` directory. Run the utility with a capture path to inspect structural counts without opening the app or making a network request. Its output omits comment bodies, identities, URLs and cursors. Keep raw captures private; preserve only the redacted report and delete captures, downloaded archives, extracted apps and disposable data after the batch has exited. The replay utility is excluded from production bundles.
+
 The browser interaction suite runs in the Linux Actions container with Python/CDP and Chromium, not on a host Mac browser. Its results do not prove native macOS WKWebView behavior; the verified macOS test artifact covers that separate path.
 
 `scripts/live-smoke.py` is the historical 0.2.0 Live/Saved harness; it does not describe the 0.3.0 contract. `scripts/unified-smoke.py` exercises the current local reader/media flow.

@@ -11,11 +11,125 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
 };
+#[cfg(debug_assertions)]
+use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const WORKER: &str = "reddit-live";
 const SEARCH_DOCUMENT_LIMIT: usize = 2;
+
+#[cfg(debug_assertions)]
+static COMMENT_FIXTURE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(debug_assertions)]
+fn capture_private_comment_fixture(
+    app: &AppHandle,
+    response: &reddit_offline::response_capture::CapturedResponse,
+    post_id: &str,
+    parent_id: &str,
+    community: &str,
+) {
+    const MAX_FIXTURES: usize = 4;
+    const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+    const MAGIC: &[u8; 8] = b"HRNGCM01";
+
+    if app.config().identifier != "io.github.iarnvidr.hrungnir.dev.test"
+        || !std::env::var("HRUNGNIR_NATIVE_PROBE_MODE").is_ok_and(|mode| mode == "reader")
+        || response.bytes.len() > MAX_RESPONSE_BYTES
+    {
+        return;
+    }
+    let Some(report_path) = std::env::var_os("HRUNGNIR_NATIVE_PROBE").map(std::path::PathBuf::from) else {
+        return;
+    };
+    if !report_path.is_absolute() {
+        return;
+    }
+    let Some(report_parent) = report_path.parent().filter(|path| !path.as_os_str().is_empty()) else {
+        return;
+    };
+    let fixture_dir = report_parent.join("comment-fixtures");
+    if std::fs::create_dir_all(&fixture_dir).is_err() {
+        return;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(&fixture_dir) else {
+        return;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::set_permissions(&fixture_dir, std::fs::Permissions::from_mode(0o700)).is_err() {
+            return;
+        }
+    }
+    let Ok(slot) = COMMENT_FIXTURE_COUNT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        (count < MAX_FIXTURES).then_some(count + 1)
+    }) else {
+        return;
+    };
+    #[derive(serde::Serialize)]
+    struct Metadata<'a> {
+        status_code: u16,
+        content_type_kind: &'a str,
+        encoding: &'a str,
+        url: &'a str,
+        post_id: &'a str,
+        parent_id: &'a str,
+        community: &'a str,
+    }
+    let metadata = Metadata {
+        status_code: response.status_code,
+        content_type_kind: response.content_type_kind,
+        encoding: &response.encoding,
+        url: &response.url,
+        post_id,
+        parent_id,
+        community,
+    };
+    let Ok(metadata) = serde_json::to_vec(&metadata) else {
+        return;
+    };
+    let Ok(metadata_len) = u32::try_from(metadata.len()) else {
+        return;
+    };
+    let fixture_path = fixture_dir.join(format!("comment-page-{slot:02}.bin"));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let Ok(mut file) = options.open(&fixture_path) else {
+        return;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if file
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .is_err()
+        {
+            drop(file);
+            let _ = std::fs::remove_file(fixture_path);
+            return;
+        }
+    }
+    use std::io::Write;
+    let write_result = file
+        .write_all(MAGIC)
+        .and_then(|()| file.write_all(&metadata_len.to_le_bytes()))
+        .and_then(|()| file.write_all(&metadata))
+        .and_then(|()| file.write_all(&response.bytes))
+        .and_then(|()| file.sync_data());
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(fixture_path);
+    }
+}
 
 fn normalize_listing_scope(input: &str) -> Result<String, String> {
     let url = tauri::Url::parse(input).map_err(|_| "Invalid listing scope")?;
@@ -1099,6 +1213,23 @@ impl Browser {
                                     pending.session_id,
                                 ));
                             if let Some((request_cursor, post_id, parent_id, session_id)) = pending {
+                                let community = browser
+                                    .store
+                                    .read(&post_id)
+                                    .map_err(|error| error.to_string())
+                                    .and_then(|thread| thread
+                                        .map(|thread| thread.subreddit)
+                                        .ok_or_else(|| "Post was evicted during comment update".to_owned()));
+                                #[cfg(debug_assertions)]
+                                if let Ok(community) = community.as_deref() {
+                                    capture_private_comment_fixture(
+                                        &browser.app,
+                                        &response,
+                                        &post_id,
+                                        &parent_id,
+                                        community,
+                                    );
+                                }
                                 let previous_source_cursor = browser
                                     .comment_session
                                     .lock()
@@ -1119,15 +1250,14 @@ impl Browser {
                                     );
                                     return;
                                 }
-                                let subreddit = browser
-                                    .store
-                                    .read(&post_id)
-                                    .map_err(|error| error.to_string())
-                                    .and_then(|thread| {
-                                        thread
-                                            .map(|thread| thread.subreddit)
-                                            .ok_or_else(|| "Post was evicted during comment update".to_owned())
-                                    });
+                                let subreddit = community;
+                                let mut parsed_counts = serde_json::Value::Null;
+                                let shape = reddit_offline::reddit_html::comment_page_shape(
+                                    &response,
+                                    &post_id,
+                                    &parent_id,
+                                )
+                                .unwrap_or_else(|_| serde_json::json!({"available":false}));
                                 let result = subreddit
                                 .and_then(|subreddit| reddit_offline::reddit_html::parse_comment_page(
                                     &response,
@@ -1136,6 +1266,24 @@ impl Browser {
                                     &subreddit,
                                 ).map_err(|error| error.to_string()))
                                 .and_then(|page| {
+                                    let root_continuations = page
+                                        .continuation_parents
+                                        .iter()
+                                        .filter(|parent| *parent == &post_id)
+                                        .count();
+                                    let root_comments = page
+                                        .comments
+                                        .iter()
+                                        .filter(|comment| comment.parent_id == post_id)
+                                        .count();
+                                    parsed_counts = serde_json::json!({
+                                        "parsed_comment_count": page.comments.len(),
+                                        "root_comment_count": root_comments,
+                                        "nested_comment_count": page.comments.len().saturating_sub(root_comments),
+                                        "continuation_parent_count": page.continuation_parents.len(),
+                                        "root_continuation_parent_count": root_continuations,
+                                        "nested_continuation_parent_count": page.continuation_parents.len().saturating_sub(root_continuations),
+                                    });
                                     let comments = page.comments.clone();
                                     let loaded_count = browser
                                         .store
@@ -1247,7 +1395,11 @@ impl Browser {
                                     if success { "parsed" } else { "failed" },
                                     started.elapsed().as_millis() as u64,
                                     None,
-                                    serde_json::json!({"generation":generation}),
+                                    serde_json::json!({
+                                        "generation":generation,
+                                        "shape":shape,
+                                        "parsed_counts":parsed_counts,
+                                    }),
                                 );
                             } else {
                                 match reddit_offline::reddit_html::comment_response_structure(&response) {

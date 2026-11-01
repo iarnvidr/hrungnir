@@ -91,6 +91,9 @@ class MacPolicyTests(unittest.TestCase):
             test_binary = staging / "src-tauri/target/aarch64-apple-darwin/debug/offline-reader-desktop"
             test_binary.parent.mkdir(parents=True)
             test_binary.write_bytes(struct.pack("<II", 0xFEEDFACF, 0x0100000C))
+            replay_binary = test_binary.parent / "examples/replay-comment-page"
+            replay_binary.parent.mkdir()
+            replay_binary.write_bytes(struct.pack("<II", 0xFEEDFACF, 0x0100000C))
             subprocess.run([sys.executable, str(script), "--test"], check=True, capture_output=True, text=True)
             test_bundle = staging / "artifacts/native-test/Hrungnir Test.app"
             test_info = plistlib.loads((test_bundle / "Contents/Info.plist").read_bytes())
@@ -101,6 +104,8 @@ class MacPolicyTests(unittest.TestCase):
             self.assertTrue(test_info["LSUIElement"])
             self.assertNotIn("CFBundleURLTypes", test_info)
             self.assertTrue((test_bundle / "Contents/MacOS" / test_info["CFBundleExecutable"]).is_file())
+            self.assertTrue((test_bundle / "Contents/Resources/bin/hrungnir-comment-replay").is_file())
+            self.assertFalse((bundle / "Contents/Resources/bin/hrungnir-comment-replay").exists())
             self.assertTrue(bundle.is_dir(), "Test packaging must preserve the normal release bundle")
             archive_script = staging / "scripts/archive-macos.py"
             shutil.copy2(ROOT / "scripts/archive-macos.py", archive_script)
