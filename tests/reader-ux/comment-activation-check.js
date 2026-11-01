@@ -1,7 +1,7 @@
 async (page) => {
   const assert = (value, message) => { if (!value) throw new Error(message); };
   const activationSource = await page.evaluate(() => window.parent.__nativeCommentActivationSource);
-  assert(typeof activationSource === 'string' && activationSource.includes('shreddit-comment-tree'), 'runner did not provide the production comment activation helper source');
+  assert(typeof activationSource === 'string' && activationSource.includes('faceplate-partial') && activationSource.includes('more-comments'), 'runner did not provide the production root-partial activation helper source');
   await page.evaluate((source) => { window.__testCommentPageActivation = eval(source); }, activationSource);
 
   const reset = async (markup) => page.evaluate((html) => {
@@ -51,10 +51,46 @@ async (page) => {
   assert(await page.evaluate(() => window.__commentActivationClicks.join(',') === 'parent'), 'delayed parent continuation did not activate exactly its own control');
 
   await reset('<shreddit-comment-tree><shreddit-comment thingid="t1_parent"><button data-click-id="nested-root">Load more comments</button></shreddit-comment></shreddit-comment-tree>');
-  await start('t3_post', 't3_post', 'root-owner');
-  await addButton('shreddit-comment-tree', 'tree', 'Load more comments');
-  await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'root-owner' && window.__hrungnirCommentPageActivationStatus.status === 'clicked');
-  assert(await page.evaluate(() => window.__commentActivationClicks.join(',') === 'tree'), 'thread-level continuation selected a nested comment button');
+  await start('t3_post', 't3_post', 'root-owner', 260);
+  await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'root-owner' && window.__hrungnirCommentPageActivationStatus.status === 'timed_out');
+  assert(await page.evaluate(() => window.__commentActivationClicks.length === 0), 'thread-level continuation activated a nested reply button instead of a root partial');
+
+  await reset('<div style="height:900px"></div><shreddit-comment-tree><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="wrong-post" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_other"></faceplate-partial><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="unrelated-host" src="https://example.invalid/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial><shreddit-comment thingid="t1_nested-owner"><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="comment-owned" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial></shreddit-comment><faceplate-partial data-lazy-id="requested-root" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial></shreddit-comment-tree>');
+  await page.evaluate(() => {
+    window.__commentActivationIntersections = [];
+    document.querySelectorAll('faceplate-partial[data-lazy-id]').forEach(partial => {
+      const observer = new IntersectionObserver(entries => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            window.__commentActivationIntersections.push(partial.dataset.lazyId);
+            observer.disconnect();
+          }
+        }
+      });
+      observer.observe(partial);
+    });
+  });
+  const rootPartialWasOffscreen = await page.evaluate(() => {
+    const partial = document.querySelector('faceplate-partial[data-lazy-id="requested-root"]');
+    return partial.getBoundingClientRect().top > innerHeight;
+  });
+  assert(rootPartialWasOffscreen, 'root continuation fixture was not initially below the viewport');
+  await start('t3_post', 't3_post', 'root-partial', 1800);
+  await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'root-partial' && window.__hrungnirCommentPageActivationStatus.status === 'activated_root_partial');
+  await page.waitForFunction(() => window.__commentActivationIntersections?.includes('requested-root'));
+  assert(await page.evaluate(() => {
+    const partial = document.querySelector('faceplate-partial[data-lazy-id="requested-root"]');
+    return window.__commentActivationIntersections.join(',') === 'requested-root'
+      && partial.getBoundingClientRect().top < innerHeight;
+  }), 'root activation did not scroll the same-post top-level lazy partial into the real IntersectionObserver viewport');
+
+  await reset('<div style="height:900px"></div><shreddit-comment thingid="t1_parent"><button data-click-id="offscreen-reply">More replies</button></shreddit-comment>');
+  const replyWasOffscreen = await page.evaluate(() => document.querySelector('shreddit-comment[thingid="t1_parent"] button').getBoundingClientRect().top > innerHeight);
+  assert(replyWasOffscreen, 'nested continuation fixture was not initially below the viewport');
+  await start('t3_post', 't1_parent', 'offscreen-reply', 1800);
+  await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'offscreen-reply' && window.__hrungnirCommentPageActivationStatus.status === 'clicked');
+  assert(await page.evaluate(() => window.__commentActivationClicks.join(',') === 'offscreen-reply'
+    && document.querySelector('shreddit-comment[thingid="t1_parent"] button').getBoundingClientRect().top < innerHeight), 'nested activation did not scroll the requested offscreen reply control into view exactly once');
 
   await reset('<shreddit-comment thingid="t1_parent"><button disabled data-click-id="disabled">More replies</button><button aria-disabled="true" data-click-id="aria-disabled">More replies</button><div aria-busy="true"><button data-click-id="busy">More replies</button></div></shreddit-comment>');
   await start('t3_post', 't1_parent', 'replacement', 1400);
@@ -113,6 +149,8 @@ async (page) => {
   return {passed:[
     'delayed reply control activates only its requested parent, not a nested child',
     'thread-level load-more control ignores nested comment buttons',
+    'root activation scrolls only the same-post top-level lazy partial into IntersectionObserver view',
+    'nested reply activation scrolls its own offscreen parent control into view',
     'disabled, aria-disabled, and aria-busy controls wait for an enabled replacement',
     'same parent waits on an unchanged signature and advances after page signature changes',
     'same parent advances once when the prior button node is replaced with identical markup',

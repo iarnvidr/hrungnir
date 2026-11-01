@@ -1,9 +1,14 @@
 ((postId, parentId, activationId, timeoutMs = 15000) => {
     window.__hrungnirCommentPageActivation = activationId;
-    window.__hrungnirCommentPageActivationStatus = {
-        id: activationId,
-        status: "waiting",
+    const diagnostics = {};
+    const publish = status => {
+        window.__hrungnirCommentPageActivationStatus = {
+            id: activationId,
+            status,
+            diagnostics: { ...diagnostics },
+        };
     };
+    publish("waiting");
     if (!window.__hrungnirCommentPageControls) {
         window.__hrungnirCommentPageControls = Object.create(null);
     }
@@ -13,23 +18,22 @@
     const deadline = performance.now() + Math.max(0, Math.min(timeoutMs, 15000));
     const root = parentId === postId;
 
-    const signature = (scope, button) => JSON.stringify([
+    const signature = (scope, target) => JSON.stringify([
         [...scope.querySelectorAll("shreddit-comment[thingid]")]
             .map(node => node.getAttribute("thingid")),
         [...scope.querySelectorAll("faceplate-partial[src]")]
             .map(node => node.getAttribute("src")),
-        button.outerHTML,
+        target.outerHTML,
     ]);
 
     const poll = () => {
         if (!isCurrent()) return;
         if (performance.now() >= deadline) {
-            window.__hrungnirCommentPageActivationStatus = {
-                id: activationId,
-                status: "timed_out",
-            };
+            diagnostics.readyState = document.readyState;
+            publish("timed_out");
             return;
         }
+        diagnostics.readyState = document.readyState;
         // SSR controls can exist before Reddit's deferred component handlers
         // are ready. Waiting for load completion gives custom elements time to
         // register their click behavior before the single activation.
@@ -39,7 +43,7 @@
         }
 
         const scope = root
-            ? document.querySelector("shreddit-comment-tree")
+            ? document
             : [...document.querySelectorAll("shreddit-comment[thingid]")]
                 .find(node => node.getAttribute("thingid") === parentId);
 
@@ -55,39 +59,97 @@
             const enabled = node => !node.disabled
                 && node.getAttribute("aria-disabled") !== "true"
                 && !node.closest('[aria-busy="true"]');
-            const button = [...scope.querySelectorAll("button")].find(node => {
+            const rootPartialMatches = node => {
+                if (node.closest("shreddit-comment[thingid]")) return false;
+                try {
+                    const url = new URL(node.getAttribute("src"), location.href);
+                    const parts = url.pathname.split("/").filter(Boolean);
+                    return url.protocol === "https:"
+                        && ["www.reddit.com", "reddit.com", "sh.reddit.com", "old.reddit.com"]
+                            .includes(url.hostname)
+                        && parts.length === 5
+                        && parts[0] === "svc"
+                        && parts[1] === "shreddit"
+                        && parts[2] === "more-comments"
+                        && /^[A-Za-z0-9_]{2,21}$/.test(parts[3])
+                        && parts[4] === postId;
+                } catch (_) {
+                    return false;
+                }
+            };
+            const rootPartials = root
+                ? [...document.querySelectorAll("faceplate-partial[src]")]
+                : [];
+            const matchingRootPartials = rootPartials.filter(rootPartialMatches);
+            diagnostics.rootPartialCount = rootPartials.length;
+            diagnostics.matchingRootPartialCount = matchingRootPartials.length;
+            diagnostics.requestedCommentScopeFound = Boolean(scope);
+            const button = root ? null : [...scope.querySelectorAll("button")].find(node => {
                 const label = (node.getAttribute("aria-label") || node.textContent || "").trim();
                 const owner = node.closest("shreddit-comment[thingid]");
-                const belongsToRequestedParent = root
-                    ? !owner
-                    : owner && owner.getAttribute("thingid") === parentId;
-                return belongsToRequestedParent
+                return owner && owner.getAttribute("thingid") === parentId
                     && visible(node)
                     && enabled(node)
-                    && (root ? /more comments|load more/i : /more replies/i).test(label);
+                    && /more replies/i.test(label);
             });
 
-            if (button) {
+            // Reddit's top-level continuation is rendered as a lazy
+            // faceplate-partial outside the comment tree, not a button. Its
+            // own IntersectionObserver starts the public request once it is
+            // brought into view. Restrict it to the captured post and to a
+            // root-level element; never construct or fetch its URL here.
+            const rootPartial = matchingRootPartials[0] || null;
+            const target = root ? rootPartial : button;
+            diagnostics.parentOwnedReplyButtonFound = Boolean(button);
+
+            const targetCanActivate = root
+                ? target && target.isConnected && (() => {
+                    const style = getComputedStyle(target);
+                    return style.display !== "none" && style.visibility !== "hidden";
+                })()
+                : target && visible(target);
+
+            if (targetCanActivate) {
                 const previous = window.__hrungnirCommentPageControls[stateKey];
-                const currentSignature = signature(scope, button);
+                const currentSignature = signature(scope, target);
                 const previousStillCurrent = previous && previous.button.isConnected;
+                diagnostics.previousTargetStillConnected = Boolean(previousStillCurrent);
+                diagnostics.previousTargetChanged = Boolean(!previousStillCurrent
+                    || previous.signature !== currentSignature);
+                const box = target.getBoundingClientRect();
+                diagnostics.targetBox = {
+                    width: Math.round(box.width),
+                    height: Math.round(box.height),
+                    inViewport: box.bottom > 0 && box.top < window.innerHeight,
+                };
                 if (!previousStillCurrent || previous.signature !== currentSignature) {
                     window.__hrungnirCommentPageControls[stateKey] = {
-                        button,
+                        button: target,
                         signature: currentSignature,
                     };
                     const controlKeys = Object.keys(window.__hrungnirCommentPageControls);
                     if (controlKeys.length > 128) {
                         delete window.__hrungnirCommentPageControls[controlKeys[0]];
                     }
-                    window.__hrungnirCommentPageActivationStatus = {
-                        id: activationId,
-                        status: "clicked",
-                    };
-                    button.click();
+                    publish(root ? "activated_root_partial" : "clicked");
+                    if (root) {
+                        target.scrollIntoView({ block: "center", inline: "nearest" });
+                    } else {
+                        target.scrollIntoView({ block: "center", inline: "nearest" });
+                        target.click();
+                    }
                     return;
                 }
+                publish("waiting_for_previous_target_change");
+            } else {
+                publish(root ? "waiting_for_root_partial" : "waiting_for_reply_button");
             }
+        } else {
+            diagnostics.requestedCommentScopeFound = false;
+            diagnostics.rootPartialCount = 0;
+            diagnostics.matchingRootPartialCount = 0;
+            diagnostics.parentOwnedReplyButtonFound = false;
+            publish("waiting_for_requested_comment_scope");
         }
         setTimeout(poll, 100);
     };

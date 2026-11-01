@@ -73,16 +73,22 @@
     `real ${scope} search results`);
     const firstCount = rows().length;
     const firstRow = rows()[0];
+    const pageCounts = [firstCount];
     assert(new Set(ids()).size === rows().length, 'Search rendered duplicate post IDs');
     if (config.require_paging) {
-      const button = $('#search-load-more');
-      assert(button && !button.hidden, `${scope} first page exposed no continuation`);
-      if (button.getAttribute('aria-disabled') !== 'true') button.click();
-      await wait(() => rows().length > firstCount, `new unique ${scope} search results`, 60000);
-      assert(rows()[0] === firstRow, 'Search continuation replaced an existing row');
-      assert(new Set(ids()).size === rows().length, 'Continuation rendered duplicate post IDs');
+      for (let continuation = 1; continuation <= 2; continuation++) {
+        const beforePage = rows().length;
+        const button = $('#search-load-more');
+        assert(button && !button.hidden, `${scope} page ${continuation} exposed no continuation`);
+        if (button.getAttribute('aria-disabled') !== 'true') button.click();
+        await wait(() => rows().length > beforePage,
+          `new unique ${scope} search results on continuation ${continuation}`, 60000);
+        assert(rows()[0] === firstRow, 'Search continuation replaced an existing row');
+        assert(new Set(ids()).size === rows().length, 'Continuation rendered duplicate post IDs');
+        pageCounts.push(rows().length);
+      }
     }
-    checks.push({ name: `search:${scope}`, first_count: firstCount, rendered_count: rows().length });
+    checks.push({ name: `search:${scope}`, first_count: firstCount, page_counts: pageCounts, rendered_count: rows().length });
   }
 
   async function run() {

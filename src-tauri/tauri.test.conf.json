@@ -3,7 +3,7 @@
   "productName": "Hrungnir Test",
   "identifier": "io.github.iarnvidr.hrungnir.dev.test",
   "app": {
-    "windows": [{ "label": "main", "title": "Hrungnir Test", "width": 1100, "height": 780, "minWidth": 720, "minHeight": 480 }]
+    "windows": [{ "label": "main", "title": "Hrungnir Test", "width": 1100, "height": 780, "minWidth": 720, "minHeight": 480, "visible": false, "focus": false, "incognito": true }]
   },
   "bundle": { "active": false },
   "plugins": { "updater": { "endpoints": [] } }

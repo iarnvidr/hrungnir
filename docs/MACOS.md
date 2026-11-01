@@ -54,6 +54,8 @@ Run `sh scripts/test-native-reader.sh` to exercise the native reader controls ag
 
 The script runs headless checks first and enforces at least 30 minutes between local native launches. Inspect the remaining interval with `python3 scripts/native-test-window.py`; this does not launch the app. App-backed live Reddit CLI commands also count as local native launches. The standalone `reddit-offline --cli` executable supports cache, local search and library checks without opening an app.
 
+The dedicated test reader window stays hidden and unfocused, with temporary web storage. Its programmatic native-control checks do not interrupt normal desktop use or reuse preferences from an earlier test run. Hidden native runs still obey the same 30-minute interval.
+
 Linux development needs yt-dlp, FFmpeg, GTK/WebKit and the Tauri build prerequisites. Native checks use Xvfb, OS clicks, screenshots, SQLite inspection and WebDriver. WebKitWebDriver can invalidate its inspector when a background source window is destroyed; the acquisition flow is therefore also checked with OS clicks and persisted results. Cached rendering/playback can be checked after a fresh process start without an acquisition window.
 
 `scripts/live-smoke.py` is the historical 0.2.0 Live/Saved harness; it does not describe the 0.3.0 contract. `scripts/unified-smoke.py` exercises the current local reader/media flow.

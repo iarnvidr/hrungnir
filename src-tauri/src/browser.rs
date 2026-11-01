@@ -2082,10 +2082,28 @@ impl Browser {
             if ready {
                 return Ok(());
             }
-            tokio::time::timeout_at(deadline, self.comment_page_ready.notified())
+            if tokio::time::timeout_at(deadline, self.comment_page_ready.notified())
                 .await
-                .map_err(|_| "Reddit did not return a comment page; cached comments are preserved".to_owned())?;
+                .is_err()
+            {
+                let error = "Reddit did not return a comment page; cached comments are preserved";
+                #[cfg(debug_assertions)]
+                self.record_comment_activation_failure(error).await;
+                return Err(error.to_owned());
+            }
         }
+    }
+
+    #[cfg(debug_assertions)]
+    async fn record_comment_activation_failure(&self, error: &str) {
+        let native = crate::source_diagnostics::capture(&self.app, WORKER).await;
+        self.record_detail(
+            "comment_activation_failure",
+            "failed",
+            0,
+            Some(error.to_owned()),
+            serde_json::json!({"native":native}),
+        );
     }
 
     fn prepare_pending_comment_request(&self) -> Result<String, String> {
@@ -2288,6 +2306,14 @@ impl Browser {
                     .filter(|pending| pending.request_cursor == request_cursor.as_str() && pending.session_id == *session_id)
                     .is_some_and(|pending| pending.result.as_ref().is_some_and(|result| result.is_ok()))
             });
+        #[cfg(debug_assertions)]
+        if pending_comment.is_some() {
+            if let Err(error) = &result {
+                // Capture the worker's local readiness state before the
+                // comment-specific cleanup closes its WKWebView.
+                self.record_comment_activation_failure(error).await;
+            }
+        }
         let cleanup = if keep_comment_session {
             Ok(())
         } else if let Some((_, _, _, session_id)) = pending_comment {

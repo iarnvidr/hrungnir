@@ -16,6 +16,8 @@ mod comment_probe;
 #[cfg(debug_assertions)]
 mod native_ui_probe;
 #[cfg(debug_assertions)]
+mod source_diagnostics;
+#[cfg(debug_assertions)]
 mod video_probe;
 mod updates;
 #[cfg(target_os = "macos")]
