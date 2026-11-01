@@ -5,6 +5,8 @@ use std::io::Write;
 fn response(url: &str, html: &str) -> CapturedResponse {
     CapturedResponse {
         generation: 0,
+        request_id: 0,
+        request_cursor_fingerprint: None,
         url: url.to_owned(),
         encoding: String::new(),
         bytes: html.as_bytes().to_vec(),

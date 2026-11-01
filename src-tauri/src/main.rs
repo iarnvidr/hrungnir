@@ -326,7 +326,7 @@ async fn search_reddit_page_operation(
     browser.record("search_queue", "complete", started.elapsed().as_millis() as u64, None);
     browser.record("search", "running", 0, None);
     let result = async {
-        let (mut ids, page_state) = if let Some(token) = cursor {
+        let (ids, page_state) = if let Some(token) = cursor {
             let (ids, state) = browser.fetch_search_page(&cursor_scope, token).await?;
             (ids, state)
         } else {
@@ -770,6 +770,8 @@ struct ThreadDownload {
     snapshot: Snapshot,
     media: Vec<reddit_offline::media::MediaAsset>,
     cache: CacheReuse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comment_pages: Option<Vec<reddit_offline::desktop::CommentPageState>>,
 }
 
 #[tauri::command]
@@ -870,6 +872,7 @@ async fn open_cached_thread(
             snapshot,
             media: assets.unwrap_or_default(),
             cache: reuse,
+            comment_pages: None,
         })
     })
     .await
@@ -1015,6 +1018,7 @@ async fn fetch_thread(
             snapshot,
             media: assets,
             cache: reuse,
+            comment_pages: Some(browser.comment_pages_for(&id)),
         })
     }
     .await;
@@ -1024,6 +1028,26 @@ async fn fetch_thread(
         started.elapsed().as_millis() as u64,
         result.as_ref().err().cloned(),
         serde_json::json!({"thread_id":id,"cache":result.as_ref().ok().map(|download|&download.cache)}),
+    );
+    result
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn fetch_comment_page(
+    browser: State<'_, Arc<browser::Browser>>,
+    id: String,
+    parent_id: String,
+    cursor: String,
+) -> Result<reddit_offline::desktop::CommentPageResponse, String> {
+    let started = std::time::Instant::now();
+    browser.record("comment_page", "running", 0, None);
+    let result = browser.fetch_comment_page(&id, &parent_id, &cursor).await;
+    browser.record_detail(
+        "comment_page",
+        if result.is_ok() { "complete" } else { "failed" },
+        started.elapsed().as_millis() as u64,
+        result.as_ref().err().cloned(),
+        serde_json::json!({"thread_id":id,"parent_id":parent_id,"returned_comments":result.as_ref().ok().map(|page|page.comments.len())}),
     );
     result
 }
@@ -1504,6 +1528,7 @@ fn main() {
             web_links::fetch_link_article,
             web_links::fetch_link_previews,
             fetch_thread,
+            fetch_comment_page,
             video_stream_candidate,
             app_diagnostics,
             trust_source_certificate,
@@ -1529,7 +1554,17 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("could not start Hrungnir");
-    app.run(|handle, event| {
+    app.run(move |handle, event| {
+        // Keep utility lifecycle evidence without preventing the user from
+        // closing a test app. An interrupted run must not be counted as passed.
+        if utility {
+            if let tauri::RunEvent::ExitRequested { code, .. } = &event {
+                diagnostics::event("utility.exit_requested", serde_json::json!({"code":code}));
+            }
+            if matches!(&event, tauri::RunEvent::Exit) {
+                diagnostics::event("utility.exit", serde_json::json!({}));
+            }
+        }
         #[cfg(target_os = "macos")]
         match event {
             tauri::RunEvent::Opened { urls } => {

@@ -3,6 +3,8 @@ use reddit_offline::{reddit_html, response_capture::CapturedResponse};
 fn response(path: &str, html: &str) -> CapturedResponse {
     CapturedResponse {
         generation: 0,
+        request_id: 0,
+        request_cursor_fingerprint: None,
         url: format!("https://www.reddit.com{path}"),
         encoding: String::new(),
         bytes: html.as_bytes().to_vec(),
@@ -80,6 +82,82 @@ fn native_comment_structure_keeps_only_route_paths_and_query_key_names() {
     assert_eq!(structure["more_controls"][0]["label"], "Continue this thread");
     let serialized = serde_json::to_string(&structure).unwrap();
     assert!(!serialized.contains("private-token"));
+}
+
+#[test]
+fn modern_comment_page_keeps_inline_descendants_and_nested_handles() {
+    let response = response(
+        "/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&startingDepth=1&seeker-session=true&commentParentPositions=25",
+        r#"<shreddit-comment thingid="t1_replya" parentid="t1_parent" postid="t3_fixture" author="alice">
+            <div slot="comment">Reply A</div>
+            <faceplate-partial slot="children" src="/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&amp;startingDepth=2&amp;seeker-session=true&amp;commentParentPositions=26"></faceplate-partial>
+            <shreddit-comment thingid="t1_nested" parentid="t1_replya" postid="t3_fixture" author="bob"><div slot="comment">Nested reply</div>
+                <faceplate-partial slot="children" src="/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&amp;startingDepth=3&amp;seeker-session=true&amp;commentParentPositions=27"></faceplate-partial>
+            </shreddit-comment>
+        </shreddit-comment>
+        <shreddit-comment thingid="t1_replyb" parentid="t1_parent" postid="t3_fixture"><div slot="comment">Reply B</div></shreddit-comment>
+        <faceplate-partial slot="load-after" src="/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&amp;startingDepth=1&amp;seeker-session=true&amp;commentParentPositions=26"></faceplate-partial>
+        <shreddit-comment thingid="t1_orphan" parentid="t1_missing" postid="t3_fixture"><div slot="comment">Unrelated branch</div></shreddit-comment>
+        <shreddit-comment thingid="t1_foreign" parentid="t3_other" postid="t3_other"><div slot="comment">Foreign thread</div></shreddit-comment>"#,
+    );
+    let page = reddit_html::parse_comment_page(
+        &response,
+        "t3_fixture",
+        "t1_parent",
+        "AskReddit",
+    )
+    .unwrap();
+    assert_eq!(
+        page.comments.iter().map(|comment| comment.id.as_str()).collect::<Vec<_>>(),
+        vec!["t1_replya", "t1_nested", "t1_replyb"]
+    );
+    assert_eq!(page.comments[0].body, "Reply A");
+    assert_eq!(page.continuation_parents, vec!["t1_replya", "t1_nested", "t1_parent"]);
+}
+
+#[test]
+fn initial_discussion_exposes_only_matching_comment_continuation_parents() {
+    let response = response(
+        "/r/AskReddit/comments/fixture/title/",
+        r#"<shreddit-comment thingid="t1_parent" parentid="t3_fixture" postid="t3_fixture">
+            <faceplate-partial slot="children" src="/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&amp;startingDepth=1&amp;seeker-session=true&amp;commentParentPositions=25"></faceplate-partial>
+        </shreddit-comment>
+        <faceplate-partial slot="children" src="/svc/shreddit/more-comments/soccer/t3_other?sort=CONFIDENCE&amp;startingDepth=1&amp;seeker-session=true&amp;commentParentPositions=26"></faceplate-partial>"#,
+    );
+    assert_eq!(
+        reddit_html::comment_page_parents(&response, "t3_fixture").unwrap(),
+        vec!["t1_parent"]
+    );
+}
+
+#[test]
+fn comment_page_parser_rejects_a_different_subreddit_scope() {
+    let response = response(
+        "/svc/shreddit/more-comments/soccer/t3_fixture?sort=CONFIDENCE&startingDepth=1&seeker-session=true&commentParentPositions=25",
+        r#"<shreddit-comment thingid="t1_reply" parentid="t1_parent" postid="t3_fixture"><div slot="comment">Reply</div></shreddit-comment>"#,
+    );
+    assert!(reddit_html::parse_comment_page(
+        &response,
+        "t3_fixture",
+        "t1_parent",
+        "AskReddit"
+    )
+    .is_err());
+}
+
+#[test]
+fn comment_page_parser_does_not_treat_an_unrelated_or_empty_branch_as_exhausted() {
+    let response = response(
+        "/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&startingDepth=1&seeker-session=true&commentParentPositions=25",
+        r#"<shreddit-comment thingid="t1_other" parentid="t1_elsewhere" postid="t3_fixture"><div slot="comment">Other branch</div></shreddit-comment>"#,
+    );
+    assert!(reddit_html::parse_comment_page(
+        &response,
+        "t3_fixture",
+        "t1_parent",
+        "AskReddit"
+    )
+    .is_err());
 }
 
 #[test]

@@ -74,6 +74,8 @@ fn post(link: &str, content: &str) -> Thread {
     );
     reddit_html::parse(CapturedResponse {
         generation: 0,
+        request_id: 0,
+        request_cursor_fingerprint: None,
         url: "https://www.reddit.com/r/soccer/comments/test/title/".into(),
         encoding: String::new(),
         bytes: html.into_bytes(),

@@ -30,6 +30,8 @@ const CAPTURE_LIMIT: usize = 4 * 1024 * 1024;
 
 pub struct CapturedResponse {
     pub generation: u64,
+    pub request_id: u64,
+    pub request_cursor_fingerprint: Option<[u8; 32]>,
     pub url: String,
     pub encoding: String,
     pub bytes: Vec<u8>,
@@ -181,64 +183,18 @@ impl CaptureForwarder {
         request: Request<Incoming>,
         generation: u64,
     ) -> Result<Response<ResponseBody>, Infallible> {
-        self.stats.requests.fetch_add(1, Ordering::Relaxed);
+        let request_id = self.stats.requests.fetch_add(1, Ordering::Relaxed) + 1;
         let (mut parts, body) = request.into_parts();
         let path = parts.uri.path();
-        if cfg!(debug_assertions)
-            && std::env::var_os("HRUNGNIR_NATIVE_COMMENT_PROBE").is_some()
-            && parts.method == Method::POST
-            && path.starts_with("/svc/shreddit/more-comments/")
-        {
-            let content_type = parts
+        let comment_post = parts.method == Method::POST
+            && crate::browsing::comment_more_partial_path(path, parts.uri.query())
+            && parts
                 .headers
                 .get(hyper::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
-                .unwrap_or("unknown")
-                .to_owned();
-            let declared_length = parts
-                .headers
-                .get(hyper::header::CONTENT_LENGTH)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<usize>().ok());
-            let mut request_body = body;
-            let mut bytes = Vec::new();
-            let mut truncated = false;
-            while let Some(frame) = request_body.frame().await {
-                let Ok(frame) = frame else { break };
-                if let Ok(data) = frame.into_data() {
-                    if bytes.len().saturating_add(data.len()) > 32 * 1024 {
-                        truncated = true;
-                        break;
-                    }
-                    bytes.extend_from_slice(&data);
-                }
-            }
-            let mut json_keys: Vec<String> = serde_json::from_slice::<serde_json::Value>(&bytes)
-                .ok()
-                .and_then(|value| value.as_object().cloned())
-                .map(|object| object.keys().cloned().collect())
-                .unwrap_or_default();
-            let mut form_keys: Vec<String> = url::form_urlencoded::parse(&bytes)
-                .map(|(key, _)| key.into_owned())
-                .collect();
-            json_keys.sort();
-            form_keys.sort();
-            form_keys.dedup();
-            eprintln!(
-                "native comment probe POST body: path={}, content_type={}, declared_length={:?}, observed_length={}, truncated={}, json_keys={:?}, form_keys={:?}",
-                path,
-                content_type,
-                declared_length,
-                bytes.len(),
-                truncated,
-                json_keys,
-                form_keys
-            );
-            return Ok(error_response(
-                StatusCode::FORBIDDEN,
-                "Only public community reads are enabled",
-            ));
-        }
+                .and_then(|value| value.split(';').next())
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/x-www-form-urlencoded"));
+        let mut request_cursor_fingerprint = None;
         if cfg!(debug_assertions)
             && std::env::var_os("HRUNGNIR_NATIVE_COMMENT_PROBE").is_some()
             && path.starts_with("/svc/shreddit/more-comments/")
@@ -268,12 +224,15 @@ impl CaptureForwarder {
                 }),
             );
         }
-        // An acquisition worker has no reason to sign in, post, or fetch private
-        // endpoints. A request's inner authority cannot change its CONNECT host.
-        if !matches!(parts.method, Method::GET | Method::HEAD)
+        // An acquisition worker has no reason to sign in or fetch private
+        // endpoints. The single observed comment continuation is a bounded
+        // public form POST; its values are forwarded transiently, never logged
+        // or stored. A request's authority cannot change its CONNECT host.
+        if !matches!(parts.method, Method::GET | Method::HEAD) && !comment_post
             || !(crate::browsing::public_content_path(path)
                 || crate::browsing::listing_partial_path(path, parts.uri.query())
-                || crate::browsing::search_partial_path(path, parts.uri.query()))
+                || crate::browsing::search_partial_path(path, parts.uri.query())
+                || comment_post)
             || parts
                 .uri
                 .authority()
@@ -284,6 +243,34 @@ impl CaptureForwarder {
                 "Only public community reads are enabled",
             ));
         }
+        let forwarded_body = if comment_post {
+            let mut request_body = body;
+            let mut bytes = Vec::new();
+            while let Some(frame) = request_body.frame().await {
+                let Ok(frame) = frame else {
+                    return Ok(error_response(StatusCode::BAD_REQUEST, "Invalid comment continuation body"));
+                };
+                if let Ok(data) = frame.into_data() {
+                    if bytes.len().saturating_add(data.len()) > 32 * 1024 {
+                        return Ok(error_response(StatusCode::BAD_REQUEST, "Comment continuation body is too large"));
+                    }
+                    bytes.extend_from_slice(&data);
+                }
+            }
+            if !crate::browsing::comment_more_form_body(&bytes) {
+                return Ok(error_response(StatusCode::FORBIDDEN, "Invalid public comment continuation"));
+            }
+            request_cursor_fingerprint =
+                crate::browsing::comment_more_form_cursor_fingerprint(&bytes);
+            if request_cursor_fingerprint.is_none() {
+                return Ok(error_response(StatusCode::FORBIDDEN, "Invalid public comment continuation"));
+            }
+            Full::new(Bytes::from(bytes))
+                .map_err(|never| match never {})
+                .boxed_unsync()
+        } else {
+            body.map_err(|error| Box::new(error) as BoxError).boxed_unsync()
+        };
         let started = std::time::Instant::now();
         crate::diagnostics::event(
             "proxy.request",
@@ -297,7 +284,7 @@ impl CaptureForwarder {
                 .map(|p| p.as_str())
                 .unwrap_or("/")
         );
-        let capture = parts.method == Method::GET;
+        let capture = parts.method == Method::GET || comment_post;
         strip_hop_headers(&mut parts.headers);
         parts.headers.insert(
             hyper::header::HOST,
@@ -311,10 +298,7 @@ impl CaptureForwarder {
         // content store empty after eviction. No credential/header copy is kept.
         parts.headers.remove(hyper::header::IF_NONE_MATCH);
         parts.headers.remove(hyper::header::IF_MODIFIED_SINCE);
-        let mut upstream = Request::from_parts(
-            parts,
-            body.map_err(|e| Box::new(e) as BoxError).boxed_unsync(),
-        );
+        let mut upstream = Request::from_parts(parts, forwarded_body);
         *upstream.uri_mut() = target.parse().expect("fixed public upstream URL");
         let response = match tokio::time::timeout(
             std::time::Duration::from_secs(25),
@@ -385,6 +369,8 @@ impl CaptureForwarder {
                     if sender
                         .try_send(CapturedResponse {
                             generation,
+                            request_id,
+                            request_cursor_fingerprint,
                             url: target,
                             encoding,
                             bytes,

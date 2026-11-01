@@ -7,7 +7,10 @@ use reddit_offline::{
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -45,6 +48,18 @@ fn normalize_listing_scope(input: &str) -> Result<String, String> {
         "day".to_owned()
     };
     listing_url(parts[1], sort, &period).map_err(|error| error.to_string())
+}
+
+fn post_id_from_permalink(input: &str) -> Option<String> {
+    let url = tauri::Url::parse(input).ok()?;
+    let parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
+    if parts.len() < 5 || parts[0] != "r" || parts[2] != "comments"
+        || !(3..=16).contains(&parts[3].len())
+        || !parts[3].bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(format!("t3_{}", parts[3]))
 }
 
 fn cursor_matches_scope(scope: &str, cursor: &str) -> bool {
@@ -129,6 +144,124 @@ mod listing_cursor_tests {
         assert!(normalize_listing_scope("https://www.reddit.com/r/rust/hot/?after=x").is_err());
         assert!(normalize_listing_scope("https://www.reddit.com/r/rust/hot/#fragment").is_err());
     }
+
+    #[test]
+    fn comment_cursor_opens_then_continues_only_its_live_session() {
+        assert_eq!(comment_session_action(None, None), CommentSessionAction::Open);
+        assert_eq!(comment_session_action(None, Some(4)), CommentSessionAction::Open);
+        assert_eq!(comment_session_action(Some(4), Some(4)), CommentSessionAction::Continue(4));
+        assert_eq!(comment_session_action(Some(4), None), CommentSessionAction::Expired);
+        assert_eq!(comment_session_action(Some(4), Some(5)), CommentSessionAction::Expired);
+    }
+
+    #[test]
+    fn comment_handles_are_bound_to_post_parent_permalink_and_expiry() {
+        let now = Instant::now();
+        let cursor = CommentCursor {
+            post_id: "t3_post".into(),
+            parent_id: "t1_parent".into(),
+            permalink: "https://www.reddit.com/r/AskReddit/comments/post/title/".into(),
+            session_id: Some(7),
+            expires_at: now + Duration::from_secs(60),
+            source_order: 0,
+        };
+        assert!(comment_cursor_matches(
+            &cursor,
+            "t3_post",
+            "t1_parent",
+            &cursor.permalink,
+            Some(7),
+            now,
+        ));
+        assert!(!comment_cursor_matches(&cursor, "t3_other", "t1_parent", &cursor.permalink, Some(7), now));
+        assert!(!comment_cursor_matches(&cursor, "t3_post", "t1_other", &cursor.permalink, Some(7), now));
+        assert!(!comment_cursor_matches(&cursor, "t3_post", "t1_parent", "https://www.reddit.com/r/AskReddit/comments/other/title/", Some(7), now));
+        assert!(!comment_cursor_matches(&cursor, "t3_post", "t1_parent", &cursor.permalink, Some(8), now));
+        assert!(!comment_cursor_matches(&cursor, "t3_post", "t1_parent", &cursor.permalink, Some(7), cursor.expires_at));
+    }
+
+    #[test]
+    fn comment_session_expiry_timer_is_armed_once_and_registry_replaces_bounds_handles() {
+        let now = Instant::now();
+        let mut session = CommentSession {
+            id: 1,
+            post_id: "t3_post".into(),
+            permalink: "https://www.reddit.com/r/AskReddit/comments/post/title/".into(),
+            generation: 1,
+            expires_at: now + Duration::from_secs(60),
+            source_cursors: BTreeMap::new(),
+            expiry_task_armed: false,
+        };
+        assert!(arm_comment_session_expiry(&mut session));
+        assert!(!arm_comment_session_expiry(&mut session));
+
+        let mut cursors = BTreeMap::new();
+        let make_cursor = |post: String, parent: String, order| CommentCursor {
+            post_id: post,
+            parent_id: parent,
+            permalink: "https://www.reddit.com/r/AskReddit/comments/post/title/".into(),
+            session_id: Some(1),
+            expires_at: now + Duration::from_secs(60),
+            source_order: order,
+        };
+        insert_comment_cursor(&mut cursors, "first".into(), make_cursor("t3_post".into(), "t1_parent".into(), 0));
+        insert_comment_cursor(&mut cursors, "replacement".into(), make_cursor("t3_post".into(), "t1_parent".into(), 0));
+        assert_eq!(cursors.len(), 1);
+        assert!(cursors.contains_key("replacement"));
+        for index in 0..COMMENT_CURSOR_LIMIT {
+            let parent = format!("t1_{index}");
+            insert_comment_cursor(
+                &mut cursors,
+                format!("cursor_{index}"),
+                make_cursor(format!("t3_post{index}"), parent, index),
+            );
+        }
+        insert_comment_cursor(
+            &mut cursors,
+            "newest".into(),
+            make_cursor("t3_newest".into(), "t1_newest".into(), COMMENT_CURSOR_LIMIT),
+        );
+        assert_eq!(cursors.len(), COMMENT_CURSOR_LIMIT);
+        assert!(cursors.contains_key("newest"));
+    }
+
+    #[test]
+    fn comment_response_must_be_newer_and_match_post_cursor_and_proxy_generation() {
+        let pending = PendingCommentPage {
+            request_cursor: "cp_handle".into(),
+            post_id: "t3_post".into(),
+            parent_id: "t1_parent".into(),
+            session_id: 7,
+            generation: Some(12),
+            after_request_id: 40,
+            result: None,
+        };
+        assert!(pending_matches_fragment(&pending, "cp_handle", "t3_post", 12, 41));
+        assert!(!pending_matches_fragment(&pending, "cp_handle", "t3_post", 12, 40));
+        assert!(!pending_matches_fragment(&pending, "cp_handle", "t3_post", 11, 41));
+        assert!(!pending_matches_fragment(&pending, "old_handle", "t3_post", 12, 41));
+        assert!(!pending_matches_fragment(&pending, "cp_handle", "t3_other", 12, 41));
+        // A later page snapshots the incremented request counter. The first
+        // page's late duplicate can no longer satisfy the second request.
+        let mut second_page = PendingCommentPage {
+            request_cursor: "cp_second".into(),
+            after_request_id: 41,
+            ..pending
+        };
+        second_page.generation = Some(12);
+        assert!(!pending_matches_fragment(&second_page, "cp_second", "t3_post", 12, 41));
+        assert!(pending_matches_fragment(&second_page, "cp_second", "t3_post", 12, 42));
+    }
+
+    #[test]
+    fn comment_continuation_rejects_a_repeated_source_cursor_even_with_a_new_local_handle() {
+        let first = [3; 32];
+        let advanced = [4; 32];
+        assert!(comment_source_cursor_advances(None, Some(first)));
+        assert!(!comment_source_cursor_advances(Some(first), Some(first)));
+        assert!(comment_source_cursor_advances(Some(first), Some(advanced)));
+        assert!(!comment_source_cursor_advances(Some(first), None));
+    }
 }
 
 struct Progress {
@@ -144,6 +277,7 @@ struct Progress {
     /// A listing's remaining posts arrive in a follow-up response; until this
     /// instant the acquisition keeps waiting for it.
     more_until: Option<Instant>,
+    requested_fragment_captured: bool,
     page_scope: String,
     requested_cursor: Option<String>,
     more_url: Option<String>,
@@ -173,12 +307,198 @@ struct SearchCursor {
     created_at: Instant,
 }
 
+#[derive(Clone)]
+struct CommentCursor {
+    post_id: String,
+    parent_id: String,
+    permalink: String,
+    session_id: Option<u64>,
+    expires_at: Instant,
+    source_order: usize,
+}
+
+#[derive(Clone)]
+struct CommentSession {
+    id: u64,
+    post_id: String,
+    permalink: String,
+    generation: u64,
+    expires_at: Instant,
+    source_cursors: BTreeMap<String, [u8; 32]>,
+    expiry_task_armed: bool,
+}
+
+struct PendingCommentPage {
+    request_cursor: String,
+    post_id: String,
+    parent_id: String,
+    session_id: u64,
+    generation: Option<u64>,
+    after_request_id: u64,
+    result: Option<std::result::Result<reddit_offline::desktop::CommentPageResponse, String>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CommentSessionAction {
+    Open,
+    Continue(u64),
+    Expired,
+}
+
+fn comment_session_action(cursor_session: Option<u64>, active_session: Option<u64>) -> CommentSessionAction {
+    match (cursor_session, active_session) {
+        (None, _) => CommentSessionAction::Open,
+        (Some(cursor), Some(active)) if cursor == active => CommentSessionAction::Continue(cursor),
+        (Some(_), _) => CommentSessionAction::Expired,
+    }
+}
+
+fn comment_cursor_matches(
+    cursor: &CommentCursor,
+    post_id: &str,
+    parent_id: &str,
+    permalink: &str,
+    session_id: Option<u64>,
+    now: Instant,
+) -> bool {
+    cursor.post_id == post_id
+        && cursor.parent_id == parent_id
+        && cursor.permalink == permalink
+        && cursor.session_id == session_id
+        && cursor.expires_at > now
+}
+
+fn comment_source_cursor_advances(
+    previous: Option<[u8; 32]>,
+    current: Option<[u8; 32]>,
+) -> bool {
+    match (previous, current) {
+        (_, None) => false,
+        (Some(previous), Some(current)) => previous != current,
+        (None, Some(_)) => true,
+    }
+}
+
+fn pending_matches_fragment(
+    pending: &PendingCommentPage,
+    cursor: &str,
+    post_id: &str,
+    generation: u64,
+    request_id: u64,
+) -> bool {
+    pending.request_cursor == cursor
+        && pending.post_id == post_id
+        && pending.generation == Some(generation)
+        && request_id > pending.after_request_id
+}
+
 const SEARCH_CURSOR_TTL: Duration = Duration::from_secs(15 * 60);
 const SEARCH_CURSOR_LIMIT: usize = 128;
 const SEARCH_SEEN_LIMIT: usize = 5000;
+const COMMENT_CURSOR_LIMIT: usize = 1024;
+
+fn insert_comment_cursor(
+    cursors: &mut BTreeMap<String, CommentCursor>,
+    token: String,
+    cursor: CommentCursor,
+) {
+    cursors.retain(|_, existing| {
+        existing.post_id != cursor.post_id || existing.parent_id != cursor.parent_id
+    });
+    while cursors.len() >= COMMENT_CURSOR_LIMIT {
+        let Some(oldest) = cursors
+            .iter()
+            .min_by_key(|(_, existing)| existing.expires_at)
+            .map(|(token, _)| token.clone())
+        else {
+            break;
+        };
+        cursors.remove(&oldest);
+    }
+    cursors.insert(token, cursor);
+}
+
+fn arm_comment_session_expiry(session: &mut CommentSession) -> bool {
+    if session.expiry_task_armed {
+        false
+    } else {
+        session.expiry_task_armed = true;
+        true
+    }
+}
 
 fn search_cursor_matches_scope(requested: &str, registered: &str) -> bool {
     requested == registered
+}
+
+fn search_response_matches_requested_cursor(requested: Option<&str>, response_url: &str) -> bool {
+    let Some(requested) = requested else { return true; };
+    let Ok(response) = tauri::Url::parse(response_url) else { return false; };
+    let Ok(target) = tauri::Url::parse(&format!("https://www.reddit.com{requested}")) else {
+        return false;
+    };
+    let normalize = |url: &tauri::Url| {
+        let mut pairs = url
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect::<Vec<_>>();
+        pairs.sort_unstable();
+        pairs
+    };
+    response.path() == target.path() && normalize(&response) == normalize(&target)
+}
+
+fn ignore_late_search_bootstrap(requested_search: bool, partial: bool, fragment_captured: bool) -> bool {
+    requested_search && !partial && fragment_captured
+}
+
+fn search_cursor_attempt(cursors: &BTreeMap<String, SearchCursor>, token: &str) -> Option<SearchCursor> {
+    cursors.get(token).cloned()
+}
+
+fn take_pending_search_ids(cursor: &mut SearchCursor, limit: usize) -> Vec<String> {
+    let mut ids = Vec::with_capacity(limit.min(cursor.pending_ids.len()));
+    while ids.len() < limit {
+        let Some(id) = cursor.pending_ids.pop_front() else { break; };
+        ids.push(id);
+    }
+    ids
+}
+
+fn mark_search_continuation_visited(cursor: &mut SearchCursor, url: &str) -> Result<(), String> {
+    if cursor.visited_urls.insert(url.to_owned()) {
+        Ok(())
+    } else {
+        Err("Search continuation repeated without advancing".into())
+    }
+}
+
+fn append_search_fragment(
+    cursor: &mut SearchCursor,
+    ids: impl IntoIterator<Item = String>,
+    next: Option<SearchContinuation>,
+) -> Result<(), String> {
+    for id in ids {
+        if cursor.seen_ids.len() >= SEARCH_SEEN_LIMIT {
+            cursor.continuations.clear();
+            break;
+        }
+        if cursor.seen_ids.insert(id.clone()) {
+            cursor.pending_ids.push_back(id);
+        }
+    }
+    if let Some(next) = next {
+        if cursor.visited_urls.contains(&next.url)
+            || cursor.continuations.iter().any(|entry| entry.url == next.url)
+        {
+            return Err("Search continuation repeated without advancing".into());
+        }
+        cursor.continuations.push_back(next);
+    }
+    if cursor.seen_ids.len() >= SEARCH_SEEN_LIMIT {
+        cursor.continuations.clear();
+    }
+    Ok(())
 }
 
 fn search_cursor_expired(cursor: &SearchCursor) -> bool {
@@ -264,6 +584,118 @@ mod search_cursor_tests {
         assert!(!cursors.contains_key("expired"));
         assert!(cursors.contains_key("other"));
     }
+
+    #[test]
+    fn requested_search_page_ignores_an_earlier_automatic_fragment() {
+        let requested = "/svc/shreddit/search/?cursor=next&q=rust&sort=relevance&t=all";
+        let automatic = "https://www.reddit.com/svc/shreddit/search/?cursor=first&q=rust&sort=relevance&t=all";
+        let target = format!("https://www.reddit.com{requested}");
+        let reordered = "https://www.reddit.com/svc/shreddit/search/?q=rust&t=all&cursor=next&sort=relevance";
+        assert!(!search_response_matches_requested_cursor(Some(requested), automatic));
+        assert!(search_response_matches_requested_cursor(Some(requested), &target));
+        assert!(search_response_matches_requested_cursor(Some(requested), reordered));
+        assert!(search_response_matches_requested_cursor(None, automatic));
+    }
+
+    #[test]
+    fn completed_search_fragment_cannot_be_overwritten_by_late_server_rendered_page() {
+        assert!(ignore_late_search_bootstrap(true, false, true));
+        assert!(!ignore_late_search_bootstrap(true, false, false));
+        assert!(!ignore_late_search_bootstrap(true, true, true));
+        assert!(!ignore_late_search_bootstrap(false, false, true));
+    }
+
+    #[test]
+    fn search_fragment_capture_sequence_ignores_auto_response_and_accepts_exact_cursor() {
+        let requested = "/svc/shreddit/search/?cursor=page2&q=rust&sort=relevance&t=all";
+        let automatic = "https://www.reddit.com/svc/shreddit/search/?cursor=page1&q=rust&sort=relevance&t=all";
+        assert!(!search_response_matches_requested_cursor(Some(requested), automatic));
+        let exact = format!("https://www.reddit.com{requested}");
+        assert!(search_response_matches_requested_cursor(Some(requested), &exact));
+        let captured = true;
+        assert!(ignore_late_search_bootstrap(true, false, captured));
+    }
+
+    #[test]
+    fn failed_search_page_attempt_keeps_same_opaque_cursor_retryable() {
+        let token = "opaque-token";
+        let scope = "https://www.reddit.com/search/?q=rust&sort=relevance&t=all|smart=true";
+        let continuation = SearchContinuation {
+            search_url: "https://www.reddit.com/search/?q=rust&sort=relevance&t=all".into(),
+            url: "/svc/shreddit/search/?cursor=page2&q=rust&sort=relevance&t=all".into(),
+        };
+        let original = SearchCursor {
+            scope: scope.into(),
+            continuations: VecDeque::from([continuation.clone()]),
+            pending_ids: VecDeque::from(["t3_cached".into()]),
+            seen_ids: BTreeSet::from(["t3_cached".into()]),
+            visited_urls: BTreeSet::new(),
+            created_at: Instant::now(),
+        };
+        let registered = BTreeMap::from([(token.into(), original)]);
+        let mut failed_attempt = search_cursor_attempt(&registered, token).unwrap();
+        let failed = failed_attempt.continuations.pop_front().unwrap();
+        mark_search_continuation_visited(&mut failed_attempt, &failed.url).unwrap();
+        // Dropping this attempt models an acquisition error before page commit.
+        let retry = search_cursor_attempt(&registered, token).unwrap();
+        assert_eq!(retry.continuations.front().unwrap().url, continuation.url);
+        assert!(retry.visited_urls.is_empty());
+        assert_eq!(retry.pending_ids.front().map(String::as_str), Some("t3_cached"));
+    }
+
+    #[test]
+    fn smart_pending_overflow_and_two_source_cursors_survive_each_page() {
+        let primary = SearchContinuation {
+            search_url: "https://www.reddit.com/search/?q=rust&sort=relevance&t=all".into(),
+            url: "/svc/shreddit/search/?cursor=primary1&q=rust&sort=relevance&t=all".into(),
+        };
+        let discovery = SearchContinuation {
+            search_url: "https://www.reddit.com/search/?q=%22rust%22&sort=relevance&t=all".into(),
+            url: "/svc/shreddit/search/?cursor=discovery1&q=%22rust%22&sort=relevance&t=all".into(),
+        };
+        let primary_next = SearchContinuation {
+            url: "/svc/shreddit/search/?cursor=primary2&q=rust&sort=relevance&t=all".into(),
+            ..primary.clone()
+        };
+        let discovery_next = SearchContinuation {
+            url: "/svc/shreddit/search/?cursor=discovery2&q=%22rust%22&sort=relevance&t=all".into(),
+            ..discovery.clone()
+        };
+        let mut cursor = SearchCursor {
+            scope: "smart-scope".into(),
+            continuations: VecDeque::from([primary.clone(), discovery.clone()]),
+            pending_ids: VecDeque::from(["t3_overflow_a".into(), "t3_overflow_b".into()]),
+            seen_ids: BTreeSet::from(["t3_seen".into(), "t3_duplicate".into()]),
+            visited_urls: BTreeSet::new(),
+            created_at: Instant::now(),
+        };
+
+        assert_eq!(take_pending_search_ids(&mut cursor, 1), ["t3_overflow_a"]);
+        let first = cursor.continuations.pop_front().unwrap();
+        assert_eq!(first.url, primary.url);
+        mark_search_continuation_visited(&mut cursor, &first.url).unwrap();
+        append_search_fragment(
+            &mut cursor,
+            ["t3_duplicate".into(), "t3_primary_new".into()],
+            Some(primary_next.clone()),
+        )
+        .unwrap();
+        assert_eq!(take_pending_search_ids(&mut cursor, 25), ["t3_overflow_b", "t3_primary_new"]);
+        assert_eq!(cursor.continuations.front().unwrap().url, discovery.url);
+        assert_eq!(cursor.continuations.back().unwrap().url, primary_next.url);
+
+        let second = cursor.continuations.pop_front().unwrap();
+        mark_search_continuation_visited(&mut cursor, &second.url).unwrap();
+        append_search_fragment(
+            &mut cursor,
+            ["t3_discovery_new".into()],
+            Some(discovery_next.clone()),
+        )
+        .unwrap();
+        assert_eq!(take_pending_search_ids(&mut cursor, 25), ["t3_discovery_new"]);
+        assert!(cursor.continuations.iter().any(|item| item.url == primary_next.url));
+        assert!(cursor.continuations.iter().any(|item| item.url == discovery_next.url));
+    }
 }
 pub struct Browser {
     app: AppHandle,
@@ -279,6 +711,11 @@ pub struct Browser {
     ready: tokio::sync::Notify,
     listing_cursors: Mutex<BTreeMap<String, ListingCursor>>,
     search_cursors: Mutex<BTreeMap<String, SearchCursor>>,
+    comment_cursors: Mutex<BTreeMap<String, CommentCursor>>,
+    comment_session: Mutex<Option<CommentSession>>,
+    next_comment_session: AtomicU64,
+    pending_comment_page: Mutex<Option<PendingCommentPage>>,
+    comment_page_ready: tokio::sync::Notify,
 }
 
 impl Browser {
@@ -307,6 +744,7 @@ impl Browser {
                 layout: None,
                 preference_present: false,
                 more_until: None,
+                requested_fragment_captured: false,
                 page_scope: String::new(),
                 requested_cursor: None,
                 more_url: None,
@@ -321,6 +759,11 @@ impl Browser {
             ready: tokio::sync::Notify::new(),
             listing_cursors: Mutex::new(BTreeMap::new()),
             search_cursors: Mutex::new(BTreeMap::new()),
+            comment_cursors: Mutex::new(BTreeMap::new()),
+            comment_session: Mutex::new(None),
+            next_comment_session: AtomicU64::new(1),
+            pending_comment_page: Mutex::new(None),
+            comment_page_ready: tokio::sync::Notify::new(),
         });
         if let Some(mut failures) = failures {
             let weak = Arc::downgrade(&browser);
@@ -353,6 +796,203 @@ impl Browser {
                     tauri::async_runtime::spawn_blocking(move || {
                         let generation = response.generation;
                         let started = Instant::now();
+                        let comment_partial = response
+                            .url
+                            .parse::<tauri::Url>()
+                            .is_ok_and(|url| {
+                                reddit_offline::browsing::comment_more_partial_path(
+                                    url.path(),
+                                    url.query(),
+                                )
+                            });
+                        if comment_partial {
+                            let pending = browser
+                                .pending_comment_page
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .as_ref()
+                                .filter(|pending| {
+                                    pending_matches_fragment(
+                                        pending,
+                                        &pending.request_cursor,
+                                        &pending.post_id,
+                                        response.generation,
+                                        response.request_id,
+                                    )
+                                })
+                                .map(|pending| (
+                                    pending.request_cursor.clone(),
+                                    pending.post_id.clone(),
+                                    pending.parent_id.clone(),
+                                    pending.session_id,
+                                ));
+                            if let Some((request_cursor, post_id, parent_id, session_id)) = pending {
+                                let previous_source_cursor = browser
+                                    .comment_session
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .as_ref()
+                                    .filter(|session| session.id == session_id)
+                                    .and_then(|session| session.source_cursors.get(&parent_id).copied());
+                                if !comment_source_cursor_advances(
+                                    previous_source_cursor,
+                                    response.request_cursor_fingerprint,
+                                ) {
+                                    browser.record_detail(
+                                        "comment_page_response",
+                                        "ignored",
+                                        started.elapsed().as_millis() as u64,
+                                        None,
+                                        serde_json::json!({"reason":"source_cursor_did_not_advance"}),
+                                    );
+                                    return;
+                                }
+                                let subreddit = browser
+                                    .store
+                                    .read(&post_id)
+                                    .map_err(|error| error.to_string())
+                                    .and_then(|thread| {
+                                        thread
+                                            .map(|thread| thread.subreddit)
+                                            .ok_or_else(|| "Post was evicted during comment update".to_owned())
+                                    });
+                                let result = subreddit
+                                .and_then(|subreddit| reddit_offline::reddit_html::parse_comment_page(
+                                    &response,
+                                    &post_id,
+                                    &parent_id,
+                                    &subreddit,
+                                ).map_err(|error| error.to_string()))
+                                .and_then(|page| {
+                                    let comments = page.comments.clone();
+                                    let loaded_count = browser
+                                        .store
+                                        .merge_comment_page(&post_id, &parent_id, page.comments)
+                                        .map_err(|error| error.to_string())?;
+                                    let thread = browser
+                                        .store
+                                        .read(&post_id)
+                                        .map_err(|error| error.to_string())?
+                                        .ok_or("Post was evicted during comment update")?;
+                                    if let Some(session) = browser
+                                        .comment_session
+                                        .lock()
+                                        .unwrap_or_else(|error| error.into_inner())
+                                        .as_mut()
+                                        .filter(|session| session.id == session_id)
+                                    {
+                                        session.expires_at = Instant::now() + Duration::from_secs(15 * 60);
+                                    }
+                                    let continuation_parents = page.continuation_parents;
+                                    {
+                                        let mut cursors = browser.comment_cursors.lock().unwrap_or_else(|error| error.into_inner());
+                                        let continued: BTreeSet<_> = continuation_parents.iter().cloned().collect();
+                                        cursors.retain(|token, cursor| {
+                                            cursor.post_id != post_id
+                                                || (token != &request_cursor
+                                                    && !continued.contains(&cursor.parent_id)
+                                                    && cursor.parent_id != parent_id)
+                                        });
+                                    }
+                                    let comment_pages = browser.refresh_comment_page_states(
+                                        &post_id,
+                                        thread.permalink.as_deref().unwrap_or_default(),
+                                        &continuation_parents,
+                                        false,
+                                    );
+                                    let next = comment_pages
+                                        .iter()
+                                        .find(|state| state.parent_id == parent_id);
+                                    Ok(reddit_offline::desktop::CommentPageResponse {
+                                        parent_id: parent_id.clone(),
+                                        comments,
+                                        cursor: next.and_then(|state| state.cursor.clone()),
+                                        exhausted: next.is_none(),
+                                        loaded_count,
+                                        source_total: thread.comment_count,
+                                        comment_pages,
+                                    })
+                                });
+                                if result.as_ref().is_err_and(|error| {
+                                    error == reddit_offline::reddit_html::COMMENT_PAGE_BRANCH_MISMATCH
+                                }) {
+                                    browser.record_detail(
+                                        "comment_page_response",
+                                        "ignored",
+                                        started.elapsed().as_millis() as u64,
+                                        None,
+                                        serde_json::json!({"reason":"outside_requested_comment_branch"}),
+                                    );
+                                    return;
+                                }
+                                let success = result.is_ok();
+                                if let Ok(page) = result.as_ref() {
+                                    let active_parents: BTreeSet<_> = page
+                                        .comment_pages
+                                        .iter()
+                                        .map(|state| state.parent_id.clone())
+                                        .collect();
+                                    if let Some(session) = browser
+                                        .comment_session
+                                        .lock()
+                                        .unwrap_or_else(|error| error.into_inner())
+                                        .as_mut()
+                                        .filter(|session| session.id == session_id)
+                                    {
+                                        session
+                                            .source_cursors
+                                            .retain(|parent, _| active_parents.contains(parent));
+                                        if active_parents.contains(&parent_id) {
+                                            if let Some(fingerprint) = response.request_cursor_fingerprint {
+                                                session.source_cursors.insert(parent_id.clone(), fingerprint);
+                                            }
+                                        }
+                                    }
+                                }
+                                if success {
+                                    browser
+                                        .comment_cursors
+                                        .lock()
+                                        .unwrap_or_else(|error| error.into_inner())
+                                        .remove(&request_cursor);
+                                }
+                                let mut pending = browser.pending_comment_page.lock().unwrap_or_else(|error| error.into_inner());
+                                if let Some(pending) = pending.as_mut().filter(|pending| pending.request_cursor == request_cursor) {
+                                    pending.result = Some(result);
+                                    browser.comment_page_ready.notify_one();
+                                }
+                                browser.record_detail(
+                                    "comment_page_response",
+                                    if success { "parsed" } else { "failed" },
+                                    started.elapsed().as_millis() as u64,
+                                    None,
+                                    serde_json::json!({"generation":generation}),
+                                );
+                            } else {
+                                match reddit_offline::reddit_html::comment_response_structure(&response) {
+                                    Ok(structure) => browser.record_detail(
+                                        "comment_page_response",
+                                        "observed",
+                                        started.elapsed().as_millis() as u64,
+                                        None,
+                                        structure,
+                                    ),
+                                    Err(error) => browser.record_detail(
+                                        "comment_page_response",
+                                        "failed",
+                                        started.elapsed().as_millis() as u64,
+                                        Some(error.to_string()),
+                                        serde_json::json!({"generation":generation}),
+                                    ),
+                                }
+                            }
+                            return;
+                        }
+                        let initial_comment_pages = post_id_from_permalink(&response.url).and_then(|post_id| {
+                            reddit_offline::reddit_html::comment_page_parents(&response, &post_id)
+                                .ok()
+                                .map(|parents| (post_id, parents))
+                        });
                         browser.record_detail("parse", "running", 0, None, serde_json::json!({"generation":generation,"compressed_bytes":response.bytes.len()}));
                         eprintln!(
                             "proxy capture: generation={generation}, compressed_bytes={}",
@@ -427,6 +1067,30 @@ impl Browser {
                         let search_partial = response.url.parse::<tauri::Url>().is_ok_and(|url| {
                             reddit_offline::browsing::search_partial_path(url.path(), url.query())
                         });
+                        if search_partial {
+                            let requested = browser
+                                .progress
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .requested_cursor
+                                .clone();
+                            if !search_response_matches_requested_cursor(
+                                requested.as_deref(),
+                                response.url.as_str(),
+                            ) {
+                                // A fresh search document can auto-request its
+                                // first fragment before the explicit cursor. It
+                                // must not satisfy a later page acquisition.
+                                browser.record_detail(
+                                    "search_continuation",
+                                    "ignored",
+                                    0,
+                                    None,
+                                    serde_json::json!({"reason":"not_requested_cursor"}),
+                                );
+                                return;
+                            }
+                        }
                         let partial = listing_partial || search_partial;
                         let parsed = if listing_partial {
                             let (listing, taken) = {
@@ -452,6 +1116,13 @@ impl Browser {
                                     .map_err(|error| error.to_string())?;
                                 let json = serde_json::to_string(&page)
                                     .map_err(|error| error.to_string())?;
+                                let capture_url = page.url.clone();
+                                let capture_permalink = page
+                                    .threads
+                                    .first()
+                                    .and_then(|thread| thread.permalink.clone())
+                                    .unwrap_or_else(|| capture_url.clone());
+                                let capture_post_id = page.threads.first().map(|thread| thread.id.clone());
                                 let page_more = page.more_url.clone();
                                 let more = if partial {
                                     page_more.clone()
@@ -460,6 +1131,23 @@ impl Browser {
                                     progress.requested_cursor.clone().or_else(|| page_more.clone())
                                 };
                                 let count = browser.capture_page(&json, actual, generation, partial, more.is_some(), page_more)?;
+                                let comment_request_pending = browser
+                                    .pending_comment_page
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .is_some();
+                                if !partial && !comment_request_pending {
+                                    if let Some((post_id, parents)) = initial_comment_pages.as_ref() {
+                                        if capture_post_id.as_deref() == Some(post_id.as_str()) {
+                                            browser.refresh_comment_page_states(
+                                                post_id,
+                                                &capture_permalink,
+                                                parents,
+                                                true,
+                                            );
+                                        }
+                                    }
+                                }
                                 let can_continue = {
                                     let progress = browser.progress.lock().unwrap_or_else(|e| e.into_inner());
                                     progress.generation == generation
@@ -523,6 +1211,18 @@ impl Browser {
         if progress.url != page.url || progress.generation != generation {
             return Err("Expired acquisition request".into());
         }
+        let requested_search = progress.requested_cursor.is_some()
+            && reddit_offline::browsing::search_path(actual.path());
+        if ignore_late_search_bootstrap(
+            requested_search,
+            partial,
+            progress.requested_fragment_captured,
+        ) {
+            // The requested continuation completed before a slower duplicate
+            // server-rendered page. Keep that full page from clearing its IDs or
+            // replacing the next cursor.
+            return Ok(0);
+        }
         let started = Instant::now();
         let count = self.store.capture_page(json).map_err(|e| e.to_string())?;
         self.record_detail("cache_commit", "complete", started.elapsed().as_millis() as u64,None,serde_json::json!({"generation":generation,"posts":page.threads.len(),"comments":page.threads.iter().map(|t|t.comments.len()).sum::<usize>()}));
@@ -533,6 +1233,10 @@ impl Browser {
             progress.preference_present
         );
         if partial {
+            if requested_search {
+                progress.requested_fragment_captured = true;
+                progress.captured = true;
+            }
             for thread in &page.threads {
                 if !progress.ids.contains(&thread.id) {
                     progress.ids.push(thread.id.clone());
@@ -604,6 +1308,36 @@ impl Browser {
     fn start(self: &Arc<Self>, url: String, requested_cursor: Option<String>) -> Result<(), String> {
         let generation = self.proxy.begin_acquisition();
         self.proxy.set_online(true);
+        let post_id = post_id_from_permalink(&url);
+        let pending_session = self
+            .pending_comment_page
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .filter(|pending| Some(pending.post_id.as_str()) == post_id.as_deref())
+            .map(|pending| pending.session_id);
+        let active_pending_session = {
+            let mut active = self.comment_session.lock().unwrap_or_else(|error| error.into_inner());
+            active
+                .as_mut()
+                .filter(|session| Some(session.id) == pending_session)
+                .map(|session| {
+                    session.generation = generation;
+                    session.id
+                })
+        };
+        if let Some(session_id) = active_pending_session {
+            if let Some(pending) = self
+                .pending_comment_page
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_mut()
+                .filter(|pending| pending.session_id == session_id)
+            {
+                pending.generation = Some(generation);
+                pending.after_request_id = self.proxy.capture_request_count();
+            }
+        }
         *self.progress.lock().unwrap_or_else(|e| e.into_inner()) = Progress {
             generation,
             url: url.clone(),
@@ -615,6 +1349,7 @@ impl Browser {
             layout: None,
             preference_present: false,
             more_until: None,
+            requested_fragment_captured: false,
             page_scope: url.clone(),
             requested_cursor,
             more_url: None,
@@ -910,6 +1645,365 @@ impl Browser {
         self.acquire_page(url, post, None).await
     }
 
+    pub fn comment_pages_for(&self, post_id: &str) -> Vec<reddit_offline::desktop::CommentPageState> {
+        let now = Instant::now();
+        let mut cursors = self.comment_cursors.lock().unwrap_or_else(|error| error.into_inner());
+        cursors.retain(|_, cursor| cursor.expires_at > now);
+        let mut states: Vec<_> = cursors
+            .iter()
+            .filter(|(_, cursor)| cursor.post_id == post_id)
+            .map(|(token, cursor)| {
+                (
+                    cursor.source_order,
+                    reddit_offline::desktop::CommentPageState {
+                        parent_id: cursor.parent_id.clone(),
+                        cursor: Some(token.clone()),
+                        exhausted: false,
+                    },
+                )
+            })
+            .collect();
+        states.sort_by_key(|(order, _)| *order);
+        states.into_iter().map(|(_, state)| state).collect()
+    }
+
+    async fn close_comment_session(self: &Arc<Self>, session_id: u64) {
+        let closed = {
+            let mut session = self.comment_session.lock().unwrap_or_else(|error| error.into_inner());
+            if session.as_ref().is_some_and(|session| session.id == session_id) {
+                *session = None;
+                true
+            } else {
+                false
+            }
+        };
+        if closed {
+            self.comment_cursors
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .retain(|_, cursor| cursor.session_id != Some(session_id));
+            let _ = self.stop().await;
+        }
+    }
+
+    fn schedule_comment_session_expiry(self: &Arc<Self>, session_id: u64) {
+        let weak = Arc::downgrade(self);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let Some(browser) = weak.upgrade() else {
+                    break;
+                };
+                let expires_at = browser
+                    .comment_session
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_ref()
+                    .filter(|session| session.id == session_id)
+                    .map(|session| session.expires_at);
+                drop(browser);
+                let Some(expires_at) = expires_at else {
+                    break;
+                };
+                let now = Instant::now();
+                if expires_at <= now {
+                    let Some(browser) = weak.upgrade() else {
+                        break;
+                    };
+                    let gate = browser.gate.lock().await;
+                    let latest_expiry = browser
+                        .comment_session
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .as_ref()
+                        .filter(|session| session.id == session_id)
+                        .map(|session| session.expires_at);
+                    match latest_expiry {
+                        Some(expiry) if expiry <= Instant::now() => {
+                            browser.close_comment_session(session_id).await;
+                            break;
+                        }
+                        Some(expiry) => {
+                            drop(gate);
+                            tokio::time::sleep(expiry.saturating_duration_since(Instant::now())).await;
+                            continue;
+                        }
+                        None => break,
+                    }
+                }
+                tokio::time::sleep(expires_at.duration_since(now)).await;
+            }
+        });
+    }
+
+    fn refresh_comment_page_states(
+        &self,
+        post_id: &str,
+        permalink: &str,
+        parents: &[String],
+        replace_post: bool,
+    ) -> Vec<reddit_offline::desktop::CommentPageState> {
+        let Ok(Some(thread)) = self.store.read(post_id) else {
+            return Vec::new();
+        };
+        if thread.permalink.as_deref() != Some(permalink) {
+            return Vec::new();
+        }
+        let mut known: BTreeSet<String> = thread
+            .comments
+            .iter()
+            .map(|comment| comment.id.clone())
+            .collect();
+        known.insert(thread.id.clone());
+        let now = Instant::now();
+        let session_id = self
+            .comment_session
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .filter(|session| {
+                session.post_id == post_id
+                    && session.permalink == permalink
+                    && session.expires_at > now
+            })
+            .map(|session| session.id);
+        let mut cursors = self.comment_cursors.lock().unwrap_or_else(|error| error.into_inner());
+        cursors.retain(|_, cursor| cursor.expires_at > now);
+        if replace_post {
+            cursors.retain(|_, cursor| cursor.post_id != post_id);
+        }
+        let mut states = Vec::new();
+        let mut unique = std::collections::HashSet::new();
+        for parent_id in parents
+            .iter()
+            .filter(|parent| known.contains(*parent))
+            .filter(|parent| unique.insert((*parent).clone()))
+        {
+            // This handle contains no Reddit cursor, CSRF token, or URL. It is
+            // an unguessable in-memory binding to one cached post and parent.
+            let mut entropy = [0u8; 16];
+            if getrandom::fill(&mut entropy).is_err() {
+                continue;
+            }
+            let token = format!(
+                "cp_{}",
+                entropy.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+            );
+            if cursors.contains_key(&token) {
+                continue;
+            }
+            let source_order = if parent_id == post_id {
+                0
+            } else {
+                thread
+                    .comments
+                    .iter()
+                    .position(|comment| comment.id == *parent_id)
+                    .unwrap_or(thread.comments.len())
+                    .saturating_add(1)
+            };
+            insert_comment_cursor(
+                &mut cursors,
+                token.clone(),
+                CommentCursor {
+                    post_id: post_id.to_owned(),
+                    parent_id: parent_id.clone(),
+                    permalink: permalink.to_owned(),
+                    session_id,
+                    expires_at: now + Duration::from_secs(15 * 60),
+                    source_order,
+                },
+            );
+            states.push(reddit_offline::desktop::CommentPageState {
+                parent_id: parent_id.clone(),
+                cursor: Some(token),
+                exhausted: false,
+            });
+        }
+        states
+    }
+
+    pub async fn fetch_comment_page(
+        self: &Arc<Self>,
+        post_id: &str,
+        parent_id: &str,
+        cursor: &str,
+    ) -> Result<reddit_offline::desktop::CommentPageResponse, String> {
+        let now = Instant::now();
+        let state = self
+            .comment_cursors
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(cursor)
+            .cloned()
+            .ok_or("Comment continuation expired; refresh the discussion")?;
+        if state.expires_at <= Instant::now()
+            || state.post_id != post_id
+            || state.parent_id != parent_id
+        {
+            return Err("Comment continuation does not match this discussion; refresh it".into());
+        }
+        let thread = self
+            .store
+            .read(post_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("Post is no longer cached; refresh the subreddit")?;
+        if !matches!(thread.source.as_deref(), Some("proxy" | "browser"))
+            || thread.permalink.as_deref() != Some(state.permalink.as_str())
+        {
+            return Err("Comment continuation no longer matches the cached post".into());
+        }
+        let _gate = self.gate.lock().await;
+        let state = self
+            .comment_cursors
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(cursor)
+            .filter(|current| comment_cursor_matches(
+                current,
+                post_id,
+                parent_id,
+                &state.permalink,
+                state.session_id,
+                now,
+            ))
+            .cloned()
+            .ok_or("Comment continuation expired while waiting; refresh the discussion")?;
+        let thread = self
+            .store
+            .read(post_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("Post was evicted while waiting; refresh the discussion")?;
+        if !matches!(thread.source.as_deref(), Some("proxy" | "browser"))
+            || thread.permalink.as_deref() != Some(state.permalink.as_str())
+        {
+            return Err("Cached post changed while waiting; refresh the discussion".into());
+        }
+        let current_session = self
+            .comment_session
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let action = comment_session_action(
+            state.session_id,
+            current_session.as_ref().map(|session| session.id),
+        );
+        let arm_expiry_task = matches!(&action, CommentSessionAction::Open);
+        let session_id = match action {
+            CommentSessionAction::Continue(session_id) => {
+                let active = current_session.as_ref().filter(|session| {
+                    session.id == session_id
+                        && session.post_id == post_id
+                        && session.permalink == state.permalink
+                        && session.expires_at > Instant::now()
+                });
+                let Some(active) = active else {
+                    self.close_comment_session(session_id).await;
+                    return Err("Comment continuation expired; refresh the discussion".into());
+                };
+                active.id
+            }
+            CommentSessionAction::Open => {
+                if let Some(active) = current_session.as_ref() {
+                    self.close_comment_session(active.id).await;
+                }
+                let session_id = self.next_comment_session.fetch_add(1, Ordering::Relaxed);
+                *self.comment_session.lock().unwrap_or_else(|error| error.into_inner()) =
+                    Some(CommentSession {
+                        id: session_id,
+                        post_id: post_id.to_owned(),
+                        permalink: state.permalink.clone(),
+                        generation: 0,
+                        expires_at: Instant::now() + Duration::from_secs(15 * 60),
+                        source_cursors: BTreeMap::new(),
+                        expiry_task_armed: false,
+                    });
+                session_id
+            }
+            CommentSessionAction::Expired => {
+                return Err("Comment continuation expired; refresh the discussion".into());
+            }
+        };
+        if arm_expiry_task {
+            let should_arm = self
+                .comment_session
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_mut()
+                .filter(|session| session.id == session_id)
+                .is_some_and(arm_comment_session_expiry);
+            if should_arm {
+                self.schedule_comment_session_expiry(session_id);
+            }
+        }
+        {
+            let mut pending = self.pending_comment_page.lock().unwrap_or_else(|error| error.into_inner());
+            *pending = Some(PendingCommentPage {
+                request_cursor: cursor.to_owned(),
+                post_id: post_id.to_owned(),
+                parent_id: parent_id.to_owned(),
+                session_id,
+                generation: current_session
+                    .as_ref()
+                    .filter(|session| session.id == session_id)
+                    .map(|session| session.generation),
+                after_request_id: self.proxy.capture_request_count(),
+                result: None,
+            });
+        }
+        if state.session_id.is_some() {
+            if let Err(error) = self.prepare_pending_comment_request() {
+                self.pending_comment_page.lock().unwrap_or_else(|poison| poison.into_inner()).take();
+                return Err(error);
+            }
+            if let Err(error) = self.click_comment_continuation(post_id, parent_id).await {
+                self.pending_comment_page.lock().unwrap_or_else(|poison| poison.into_inner()).take();
+                return Err(error);
+            }
+            if let Err(error) = self.wait_for_comment_page(cursor).await {
+                self.pending_comment_page.lock().unwrap_or_else(|poison| poison.into_inner()).take();
+                return Err(error);
+            }
+        } else if let Err(error) = self.acquire_page(state.permalink, true, None).await {
+            self.pending_comment_page.lock().unwrap_or_else(|poison| poison.into_inner()).take();
+            self.close_comment_session(session_id).await;
+            return Err(error);
+        }
+        let result = self
+            .pending_comment_page
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .and_then(|pending| pending.result)
+            .ok_or_else(|| "Reddit did not return a comment page; cached comments are preserved".to_owned())?;
+        if result.is_ok() {
+            self.comment_cursors
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(cursor);
+            let has_more = self.comment_pages_for(post_id).iter().any(|state| {
+                self.comment_cursors
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(state.cursor.as_deref().unwrap_or_default())
+                    .is_some_and(|cursor| cursor.session_id == Some(session_id))
+            });
+            if has_more {
+                if let Some(session) = self
+                    .comment_session
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_mut()
+                    .filter(|session| session.id == session_id)
+                {
+                    session.expires_at = Instant::now() + Duration::from_secs(15 * 60);
+                }
+            } else {
+                self.close_comment_session(session_id).await;
+            }
+        }
+        result
+    }
+
     async fn probe_one_more_replies_control(&self) -> Result<(), String> {
         if !cfg!(debug_assertions)
             || std::env::var_os("HRUNGNIR_NATIVE_COMMENT_PROBE").is_none()
@@ -945,6 +2039,106 @@ impl Browser {
         Ok(())
     }
 
+    async fn click_comment_continuation(&self, post_id: &str, parent_id: &str) -> Result<(), String> {
+        let post = serde_json::to_string(post_id).map_err(|error| error.to_string())?;
+        let parent = serde_json::to_string(parent_id).map_err(|error| error.to_string())?;
+        let app = self.app.clone();
+        super::on_main(app.clone(), move || {
+            let view = app
+                .get_webview_window(WORKER)
+                .ok_or("Comment source page is not open")?;
+            view.eval(&format!(
+                r#"(()=>{{
+                    const postId={post};
+                    const parentId={parent};
+                    const root=parentId===postId;
+                    const scope=root
+                        ? document.querySelector('shreddit-comment-tree')
+                        : [...document.querySelectorAll('shreddit-comment[thingid]')]
+                            .find(node=>node.getAttribute('thingid')===parentId);
+                    if(!scope)return;
+                    const visible=(node)=>{{const style=getComputedStyle(node);return style.display!=='none'&&style.visibility!=='hidden'&&node.getClientRects().length>0;}};
+                    const button=[...scope.querySelectorAll('button')].find(node=>{{
+                        const label=(node.getAttribute('aria-label')||node.textContent||'').trim();
+                        const owner=node.closest('shreddit-comment[thingid]');
+                        const belongsToRequestedParent=root
+                            ? !owner
+                            : owner&&owner.getAttribute('thingid')===parentId;
+                        return belongsToRequestedParent&&visible(node)&&(root?/more comments|load more/i:/more replies/i).test(label);
+                    }});
+                    if(button){{window.__hrungnirCommentPageClickedFor=parentId;button.click();}}
+                }})()"#
+            ))
+            .map_err(|error| error.to_string())
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn wait_for_comment_page(&self, request_cursor: &str) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let ready = self
+                .pending_comment_page
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+                .is_some_and(|pending| {
+                    pending.request_cursor == request_cursor && pending.result.is_some()
+                });
+            if ready {
+                return Ok(());
+            }
+            tokio::time::timeout_at(deadline, self.comment_page_ready.notified())
+                .await
+                .map_err(|_| "Reddit did not return a comment page; cached comments are preserved".to_owned())?;
+        }
+    }
+
+    fn prepare_pending_comment_request(&self) -> Result<String, String> {
+        let (session_id, request_cursor) = {
+            let pending = self.pending_comment_page.lock().unwrap_or_else(|error| error.into_inner());
+            let pending = pending.as_ref().ok_or("No comment page request is pending")?;
+            (pending.session_id, pending.request_cursor.clone())
+        };
+        let session = self
+            .comment_session
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .filter(|session| session.id == session_id)
+            .cloned()
+            .ok_or("Comment source session expired; refresh the discussion")?;
+        let now = Instant::now();
+        self.comment_cursors
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values_mut()
+            .filter(|cursor| {
+                cursor.post_id == session.post_id
+                    && cursor.permalink == session.permalink
+                    && cursor.expires_at > now
+            })
+            .for_each(|cursor| {
+                cursor.session_id = Some(session_id);
+                cursor.expires_at = session.expires_at;
+            });
+        let after_request_id = self.proxy.capture_request_count();
+        if let Some(pending) = self
+            .pending_comment_page
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_mut()
+            .filter(|pending| pending.request_cursor == request_cursor && pending.session_id == session_id)
+        {
+            pending.generation = Some(session.generation);
+            pending.after_request_id = after_request_id;
+        } else {
+            return Err("Comment page request was superseded".into());
+        }
+        Ok(request_cursor)
+    }
+
     async fn acquire_page(
         self: &Arc<Self>,
         url: String,
@@ -955,6 +2149,27 @@ impl Browser {
             || !reddit_offline::browsing::public_content_path(url.parse::<tauri::Url>().map_err(|e|e.to_string())?.path())
         {
             return Err("Only public Reddit listing, post or search content can be acquired".into());
+        }
+        let requested_post = post_id_from_permalink(&url);
+        let pending_session = self
+            .pending_comment_page
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .filter(|pending| Some(pending.post_id.as_str()) == requested_post.as_deref())
+            .map(|pending| pending.session_id);
+        let active_session = self
+            .comment_session
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|session| session.id);
+        if let Some(active_id) = active_session.filter(|active_id| Some(*active_id) != pending_session) {
+            self.close_comment_session(active_id).await;
+            self.pending_comment_page
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
         }
         // The layout preference cookie is still set on www, but Reddit now
         // serves its current layout there and old.reddit.com redirects away.
@@ -981,7 +2196,7 @@ impl Browser {
             setup.elapsed().as_millis() as u64,
             None,
         );
-        let result = loop {
+        let mut result = loop {
             let mut deadline = started + Duration::from_secs(25);
             {
                 let progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
@@ -993,9 +2208,20 @@ impl Browser {
                 if progress.captured {
                     // The posts are stored; only a pending listing continuation
                     // is worth a short extra wait.
-                    match progress.more_until {
-                        Some(until) if Instant::now() < until => deadline = deadline.min(until),
-                        _ => break Ok(()),
+                    let requested_search = progress.requested_cursor.is_some()
+                        && progress.url.parse::<tauri::Url>().is_ok_and(|url| {
+                            reddit_offline::browsing::search_path(url.path())
+                        });
+                    if requested_search && !progress.requested_fragment_captured {
+                        match progress.more_until {
+                            Some(until) if Instant::now() < until => deadline = deadline.min(until),
+                            _ => break Err("Requested search continuation did not arrive; cached content is preserved".into()),
+                        }
+                    } else {
+                        match progress.more_until {
+                            Some(until) if Instant::now() < until => deadline = deadline.min(until),
+                            _ => break Ok(()),
+                        }
                     }
                 }
             }
@@ -1014,10 +2240,38 @@ impl Browser {
                 );
             }
         };
+        let pending_comment = self
+            .pending_comment_page
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .filter(|pending| Some(pending.post_id.as_str()) == post_id_from_permalink(&url).as_deref())
+            .map(|pending| (
+                pending.request_cursor.clone(),
+                pending.post_id.clone(),
+                pending.parent_id.clone(),
+                pending.session_id,
+            ));
+        let has_pending_comment = pending_comment.is_some();
+        if result.is_ok() {
+            if let Some((request_cursor, post_id, parent_id, _session_id)) = pending_comment.as_ref() {
+                if let Err(error) = self.prepare_pending_comment_request() {
+                    self.pending_comment_page.lock().unwrap_or_else(|poison| poison.into_inner()).take();
+                    result = Err(error);
+                } else if let Err(error) = self.click_comment_continuation(post_id, parent_id).await {
+                    self.pending_comment_page.lock().unwrap_or_else(|poison| poison.into_inner()).take();
+                    result = Err(error);
+                } else if let Err(error) = self.wait_for_comment_page(request_cursor).await {
+                    self.pending_comment_page.lock().unwrap_or_else(|poison| poison.into_inner()).take();
+                    result = Err(error);
+                }
+            }
+        }
         if result.is_ok()
             && url.contains("/comments/")
             && cfg!(debug_assertions)
             && std::env::var_os("HRUNGNIR_NATIVE_COMMENT_PROBE").is_some()
+            && !has_pending_comment
         {
             if let Err(error) = self.probe_one_more_replies_control().await {
                 self.record_detail(
@@ -1029,7 +2283,23 @@ impl Browser {
                 );
             }
         }
-        let cleanup = self.stop().await;
+        let keep_comment_session = result.is_ok()
+            && pending_comment.as_ref().is_some_and(|(request_cursor, _, _, session_id)| {
+                self.pending_comment_page
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_ref()
+                    .filter(|pending| pending.request_cursor == request_cursor.as_str() && pending.session_id == *session_id)
+                    .is_some_and(|pending| pending.result.as_ref().is_some_and(|result| result.is_ok()))
+            });
+        let cleanup = if keep_comment_session {
+            Ok(())
+        } else if let Some((_, _, _, session_id)) = pending_comment {
+            self.close_comment_session(session_id).await;
+            Ok(())
+        } else {
+            self.stop().await
+        };
         let result = result.and(cleanup);
         eprintln!(
             "acquisition: classic www source, elapsed_ms={}, success={}",
@@ -1284,13 +2554,11 @@ impl Browser {
         scope: &str,
         token: &str,
     ) -> Result<(Vec<String>, reddit_offline::desktop::SearchPageState), String> {
-        let mut cursor = self
-            .search_cursors
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(token)
-            .cloned()
-            .ok_or("Search cursor expired; start the search again")?;
+        let mut cursor = {
+            let cursors = self.search_cursors.lock().unwrap_or_else(|error| error.into_inner());
+            search_cursor_attempt(&cursors, token)
+                .ok_or("Search cursor expired; start the search again")?
+        };
         if search_cursor_expired(&cursor) {
             self.search_cursors.lock().unwrap_or_else(|error| error.into_inner()).remove(token);
             return Err("Search cursor expired; start the search again".into());
@@ -1299,20 +2567,11 @@ impl Browser {
             return Err("Search cursor does not match this query and options".into());
         }
 
-        let mut posts = Vec::with_capacity(25);
-        for _ in 0..25 {
-            if let Some(id) = cursor.pending_ids.pop_front() {
-                posts.push(id);
-            } else {
-                break;
-            }
-        }
+        let mut posts = take_pending_search_ids(&mut cursor, 25);
         let mut fetched = 0;
         while posts.len() < 25 && fetched < 4 && !cursor.continuations.is_empty() {
             let continuation = cursor.continuations.pop_front().unwrap();
-            if !cursor.visited_urls.insert(continuation.url.clone()) {
-                return Err("Search continuation repeated without advancing".into());
-            }
+            mark_search_continuation_visited(&mut cursor, &continuation.url)?;
             let search = tauri::Url::parse(&continuation.search_url).map_err(|_| "Invalid search scope")?;
             let target = tauri::Url::parse(&format!("https://www.reddit.com{}", continuation.url))
                 .map_err(|_| "Invalid search continuation")?;
@@ -1329,40 +2588,17 @@ impl Browser {
                 let progress = self.progress.lock().unwrap_or_else(|error| error.into_inner());
                 (progress.ids.clone(), progress.more_url.clone())
             };
-            for id in ids {
-                if cursor.seen_ids.len() >= SEARCH_SEEN_LIMIT {
-                    cursor.continuations.clear();
-                    break;
-                }
-                if cursor.seen_ids.insert(id.clone()) {
-                    cursor.pending_ids.push_back(id);
-                }
-            }
-            if let Some(url) = next {
+            let next = if let Some(url) = next {
                 let next_target = tauri::Url::parse(&format!("https://www.reddit.com{url}"))
                     .map_err(|_| "Invalid next search continuation")?;
                 if !reddit_offline::browsing::search_partial_matches(&search, &next_target) {
                     return Err("Source returned a search continuation outside its query scope".into());
                 }
-                if cursor.visited_urls.contains(&url)
-                    || cursor.continuations.iter().any(|entry| entry.url == url)
-                {
-                    return Err("Search continuation repeated without advancing".into());
-                } else {
-                    cursor.continuations.push_back(SearchContinuation {
-                        search_url: continuation.search_url,
-                        url,
-                    });
-                }
-            }
+                Some(SearchContinuation { search_url: continuation.search_url.clone(), url })
+            } else { None };
+            append_search_fragment(&mut cursor, ids, next)?;
             fetched += 1;
-            while posts.len() < 25 {
-                let Some(id) = cursor.pending_ids.pop_front() else { break };
-                posts.push(id);
-            }
-            if cursor.seen_ids.len() >= SEARCH_SEEN_LIMIT {
-                cursor.continuations.clear();
-            }
+            posts.extend(take_pending_search_ids(&mut cursor, 25 - posts.len()));
         }
         let state = self.store_search_cursor(
             scope,

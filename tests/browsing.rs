@@ -1,6 +1,6 @@
 use reddit_offline::{
     browsing::{
-        classic_url, is_listing_partial_url, listing_partial_path, listing_url, search_partial_matches, search_partial_path, search_url,
+        classic_url, comment_more_form_body, comment_more_form_cursor_fingerprint, comment_more_partial_path, is_listing_partial_url, listing_partial_path, listing_url, search_partial_matches, search_partial_path, search_url,
         public_content_path, reddit_url, select_listing_threads, subreddit_url,
         without_challenge_params,
     },
@@ -242,6 +242,51 @@ fn only_the_listing_continuation_is_allowed_beyond_public_pages() {
     assert!(!is_listing_partial_url(
         "https://example.com/svc/shreddit/community-more-posts/hot/?name=soccer"
     ));
+}
+
+#[test]
+fn comment_continuations_require_the_observed_scoped_route_query_and_form() {
+    let child_path = "/svc/shreddit/more-comments/AskReddit/t3_1xkbciw";
+    let child_query = "sort=CONFIDENCE&startingDepth=1&seeker-session=true&commentParentPositions=25";
+    let top_query = "top-level=1&comments-remaining=2100&commentPositionOffset=25";
+    assert!(comment_more_partial_path(child_path, Some(child_query)));
+    assert!(comment_more_partial_path(child_path, Some(top_query)));
+    assert!(comment_more_form_body(b"csrf_token=synthetic&cursor=synthetic"));
+    assert!(comment_more_form_body(b"cursor=synthetic&csrf_token=synthetic"));
+    assert!(comment_more_form_body(b"csrf_token=&cursor=synthetic"));
+    let first_cursor = comment_more_form_cursor_fingerprint(b"csrf_token=token-one&cursor=source-page-one").unwrap();
+    let repeated_cursor = comment_more_form_cursor_fingerprint(b"csrf_token=rotated&cursor=source-page-one").unwrap();
+    let advanced_cursor = comment_more_form_cursor_fingerprint(b"csrf_token=rotated&cursor=source-page-two").unwrap();
+    assert_eq!(first_cursor, repeated_cursor, "CSRF rotation does not imply source pagination advanced");
+    assert_ne!(first_cursor, advanced_cursor);
+    assert!(comment_more_form_cursor_fingerprint(b"csrf_token=x&cursor=").is_none());
+
+    for (path, query) in [
+        (child_path, None),
+        (child_path, Some("sort=CONFIDENCE&startingDepth=1&seeker-session=true")),
+        (child_path, Some("sort=NEW&startingDepth=1&seeker-session=true&commentParentPositions=25")),
+        (child_path, Some("sort=CONFIDENCE&startingDepth=999&seeker-session=true&commentParentPositions=25")),
+        (child_path, Some("sort=CONFIDENCE&startingDepth=1&seeker-session=false&commentParentPositions=25")),
+        (child_path, Some("sort=CONFIDENCE&startingDepth=1&seeker-session=true&commentParentPositions=25&extra=x")),
+        ("/svc/shreddit/more-comments/AskReddit/t3_1xkbciw/extra", Some(child_query)),
+        ("/svc/shreddit/more-comments/AskReddit/t3_../", Some(child_query)),
+        ("/svc/shreddit/more-comments/AskReddit/t3_t3_1xkbciw", Some(child_query)),
+        ("/svc/shreddit/graphql", Some(child_query)),
+        ("/svc/shreddit/more-comments/AskReddit/t3_1xkbciw", Some("top-level=0&comments-remaining=1&commentPositionOffset=25")),
+        ("/svc/shreddit/more-comments/AskReddit/t3_1xkbciw", Some("top-level=1&comments-remaining=1&commentPositionOffset=25&extra=1")),
+    ] {
+        assert!(!comment_more_partial_path(path, query), "{path}?{query:?}");
+    }
+    for body in [
+        b"csrf_token=x".as_slice(),
+        b"csrf_token=x&cursor=y&extra=z",
+        b"csrf_token=x&cursor=y&cursor=z",
+        b"csrf_token=x&cursor=",
+        b"csrf_token=x&cursor=bad%0Avalue",
+    ] {
+        assert!(!comment_more_form_body(body), "{body:?}");
+    }
+    assert!(!comment_more_form_body(&vec![b'x'; 32 * 1024 + 1]));
 }
 
 #[test]

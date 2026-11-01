@@ -255,6 +255,207 @@ pub fn comment_response_structure(
     }))
 }
 
+/// Return only the parent identities that have a validated continuation in a
+/// rendered public discussion page or comment fragment. Source URLs and their
+/// transient request tokens never leave the acquisition process.
+pub fn comment_page_parents(
+    response: &crate::response_capture::CapturedResponse,
+    thread_id: &str,
+) -> Result<Vec<String>> {
+    if !thread_id.starts_with("t3_")
+        || !(3..=16).contains(&thread_id[3..].len())
+        || !thread_id[3..].bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err("Invalid post identity for comment continuation".into());
+    }
+    let base = Url::parse(&response.url)?;
+    let base_parts: Vec<_> = base.path().trim_matches('/').split('/').collect();
+    if !crate::browsing::reddit_url(&response.url) {
+        return Err("Comment page source is not a public discussion".into());
+    }
+    let expected_post_suffix = thread_id.strip_prefix("t3_").unwrap_or_default();
+    let expected_subreddit = if base_parts.len() >= 4
+        && base_parts[0] == "r"
+        && base_parts[2] == "comments"
+        && base_parts[3] == expected_post_suffix
+    {
+        base_parts[1]
+    } else if base_parts.len() == 5
+        && base_parts[..3] == ["svc", "shreddit", "more-comments"]
+        && base_parts[4] == thread_id
+    {
+        base_parts[3]
+    } else {
+        return Err("Comment page source is not scoped to the requested post".into());
+    };
+    let html = decode(response)?;
+    let document = Html::parse_document(&html);
+    let mut parents = Vec::new();
+    let mut seen_parents = std::collections::HashSet::new();
+    for partial in document.select(&selector("faceplate-partial[src]")) {
+        let Some(src) = partial.value().attr("src") else {
+            continue;
+        };
+        let Ok(url) = base.join(src) else {
+            continue;
+        };
+        let route_parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
+        if !crate::browsing::comment_more_partial_path(url.path(), url.query())
+            || route_parts.get(3).is_none_or(|subreddit| !subreddit.eq_ignore_ascii_case(expected_subreddit))
+            || route_parts.get(4).is_none_or(|post| *post != thread_id)
+        {
+            continue;
+        }
+        let parent = partial
+            .ancestors()
+            .filter_map(ElementRef::wrap)
+            .find(|ancestor| ancestor.value().name() == "shreddit-comment")
+            .and_then(|comment| comment.value().attr("thingid"))
+            .unwrap_or(thread_id);
+        if parent == thread_id
+            || (parent.starts_with("t1_")
+                && (3..=16).contains(&parent[3..].len())
+                && parent[3..].bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        {
+            if seen_parents.insert(parent.to_owned()) {
+                parents.push(parent.to_owned());
+            }
+        }
+    }
+    Ok(parents)
+}
+
+#[derive(Debug)]
+pub struct CommentPageFragment {
+    pub comments: Vec<Comment>,
+    pub continuation_parents: Vec<String>,
+}
+
+pub const COMMENT_PAGE_BRANCH_MISMATCH: &str =
+    "Comment response contained no replies for the requested branch";
+
+/// Parse the returned branch for the parent whose validated continuation was
+/// requested. Reddit can inline nested replies in the same fragment; retain
+/// those descendants so their own continuations remain reachable.
+pub fn parse_comment_page(
+    response: &crate::response_capture::CapturedResponse,
+    thread_id: &str,
+    parent_id: &str,
+    subreddit: &str,
+) -> Result<CommentPageFragment> {
+    let url = Url::parse(&response.url)?;
+    let route_parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
+    if !crate::browsing::comment_more_partial_path(url.path(), url.query())
+        || route_parts.get(3).is_none_or(|community| !community.eq_ignore_ascii_case(subreddit))
+        || route_parts.get(4).is_none_or(|post| *post != thread_id)
+    {
+        return Err("Comment response did not match the requested public post".into());
+    }
+    let html = decode(response)?;
+    let document = Html::parse_document(&html);
+    let mut candidates = Vec::new();
+    let mut known_ids = std::collections::HashSet::new();
+    let mut body_bytes = 0usize;
+    for element in document.select(&selector("shreddit-comment[thingid][parentid]")) {
+        let value = element.value();
+        let Some(id) = value
+            .attr("thingid")
+            .filter(|id| id.starts_with("t1_") && id.len() <= 32)
+        else {
+            continue;
+        };
+        let Some(actual_parent) = value.attr("parentid") else {
+            continue;
+        };
+        if value.attr("postid").is_some_and(|post| post != thread_id)
+            || !id[3..].bytes().all(|byte| byte.is_ascii_alphanumeric())
+            || !known_ids.insert(id.to_owned())
+        {
+            continue;
+        }
+        let body = element
+            .select(&selector("[slot=\"comment\"]"))
+            .find(|body| {
+                body.ancestors()
+                    .filter_map(ElementRef::wrap)
+                    .find(|owner| owner.value().name() == "shreddit-comment")
+                    .and_then(|owner| owner.value().attr("thingid"))
+                    == Some(id)
+            })
+            .map(|body| text(body, 3000))
+            .unwrap_or_default();
+        if body.is_empty() {
+            continue;
+        }
+        body_bytes = body_bytes.saturating_add(body.len());
+        if body_bytes > 350_000 || candidates.len() == 300 {
+            return Err("Comment response exceeded its page budget".into());
+        }
+        candidates.push(Comment {
+            id: id.to_owned(),
+            parent_id: actual_parent.to_owned(),
+            body,
+            author: value
+                .attr("author")
+                .map(|author| author.chars().take(100).collect::<String>())
+                .filter(|author| !author.is_empty()),
+            author_flair: None,
+        });
+    }
+    // Keep only the requested parent and comments whose complete ancestor
+    // chain is represented in this fragment. This excludes unrelated branches
+    // while preserving inline grandchildren and deeper replies.
+    fn append_children(
+        parent: &str,
+        candidates: &[Comment],
+        children: &std::collections::BTreeMap<String, Vec<usize>>,
+        included: &mut std::collections::HashSet<String>,
+        output: &mut Vec<Comment>,
+    ) {
+        if let Some(indices) = children.get(parent) {
+            for index in indices {
+                let comment = &candidates[*index];
+                if included.insert(comment.id.clone()) {
+                    output.push(comment.clone());
+                    append_children(&comment.id, candidates, children, included, output);
+                }
+            }
+        }
+    }
+    let mut children = std::collections::BTreeMap::<String, Vec<usize>>::new();
+    for (index, comment) in candidates.iter().enumerate() {
+        children.entry(comment.parent_id.clone()).or_default().push(index);
+    }
+    let mut included_ids = std::collections::HashSet::new();
+    let mut comments = Vec::new();
+    append_children(parent_id, &candidates, &children, &mut included_ids, &mut comments);
+    if comments.is_empty() {
+        return Err(COMMENT_PAGE_BRANCH_MISMATCH.into());
+    }
+    let source_parents = comment_page_parents(response, thread_id)?;
+    let mut continuation_parents = Vec::new();
+    let mut seen_continuations = std::collections::HashSet::new();
+    for source_parent in source_parents {
+        // A fragment-level continuation has no enclosing comment element. In
+        // this parser its scope is the branch the caller explicitly requested,
+        // not the whole thread's top-level feed.
+        let parent = if source_parent == thread_id && parent_id != thread_id {
+            parent_id
+        } else {
+            source_parent.as_str()
+        };
+        if (parent == parent_id || included_ids.contains(parent))
+            && seen_continuations.insert(parent.to_owned())
+        {
+            continuation_parents.push(parent.to_owned());
+        }
+    }
+    Ok(CommentPageFragment {
+        comments,
+        continuation_parents,
+    })
+}
+
 fn interim_page(document: &Html, post: bool) -> Option<&'static str> {
     if document
         .select(&selector("form input[name=\"js_challenge\"]"))

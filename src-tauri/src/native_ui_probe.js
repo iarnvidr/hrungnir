@@ -9,7 +9,8 @@
   let stage = 'startup';
   const $ = selector => document.querySelector(selector);
   const rows = () => [...document.querySelectorAll('#thread-list .thread-item')];
-  const ids = () => rows().map(row => row.dataset.threadId);
+  const cachedRows = () => [...document.querySelectorAll('#thread-list .cache-search-hit')];
+  const ids = () => [...document.querySelectorAll('#thread-list [data-thread-id]')].map(row => row.dataset.threadId);
   const clean = value => String(value).replace(/https?:\/\/\S+/g, '[url]').slice(0, 500);
   const emit = payload => window.__TAURI__.event.emit('hrungnir-native-ui-probe', {
     name: 'native-ui', run_id: config.run_id,
@@ -61,6 +62,7 @@
     await begin(`search:${scope}`);
     clearSearch();
     setScope(scope);
+    $('#top-period').value = 'all';
     $('#search-smart').checked = false;
     $('#search-smart').dispatchEvent(new Event('change', { bubbles: true }));
     const before = mark(await diagnostics());
@@ -115,7 +117,7 @@
       const stored = await window.__TAURI__.core.invoke('snapshot');
       const post = stored.threads?.find(thread => thread.id === selectedId);
       return post && post.comments_status !== 'not_loaded' && post.comments?.length > 0
-        && !$('#reader-panel').hidden && $('#discussion-comments .comment')
+        && !$('#reader-panel').hidden && !$('#thread-view').hidden && $('#discussion-comments .comment')
         && !$('#discussion-comments .cached-listing-note');
     },
       'real selected-post discussion', 60000);
@@ -136,9 +138,11 @@
       && $('#cache-search-input').value === localQuery
       && $('#current-subreddit').textContent.toLowerCase().includes('downloaded'),
     'downloaded result in real cache');
-    const cachedRow = rows().find(row => row.dataset.threadId === selectedId);
-    cachedRow.querySelector('.thread-open').click();
-    await wait(() => !$('#reader-panel').hidden && $('#discussion-comments .comments-header'),
+    const cachedRow = cachedRows().find(row => row.dataset.threadId === selectedId);
+    assert(cachedRow, 'Downloaded search omitted the cached post button');
+    cachedRow.click();
+    await wait(() => !$('#reader-panel').hidden && !$('#thread-view').hidden
+      && $('#discussion-comments .comment') && !$('#discussion-comments .cached-listing-note'),
       'native local-only cached reopen');
     const afterLocal = await diagnostics();
     assert(requests(afterLocal) === requests(beforeLocal), 'Downloaded search or cached reopen made a Reddit request');

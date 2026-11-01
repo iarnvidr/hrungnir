@@ -7,6 +7,8 @@ use reddit_offline::{
 fn parse(url: &str, html: &str) -> reddit_offline::Result<reddit_offline::browsing::PageCapture> {
     reddit_html::parse(CapturedResponse {
         generation: 0,
+        request_id: 0,
+        request_cursor_fingerprint: None,
         url: url.into(),
         encoding: String::new(),
         bytes: html.as_bytes().to_vec(),

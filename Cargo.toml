@@ -12,6 +12,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "process", "fs"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 getrandom = "0.3"
+sha2 = "0.10"
 url = "2"
 bytes = "1"
 hyper = { version = "1", features = ["http1", "server", "client"] }

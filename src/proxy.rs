@@ -123,6 +123,15 @@ impl BrowserProxy {
         generation
     }
 
+    /// Monotonic request count used to correlate a single in-page comment
+    /// continuation without rotating the TLS generation or losing WebKit state.
+    pub fn capture_request_count(&self) -> u64 {
+        self.forwarder
+            .as_ref()
+            .map(|forwarder| forwarder.stats.requests.load(Ordering::Relaxed))
+            .unwrap_or_default()
+    }
+
     pub fn ca(&self) -> Option<Arc<crate::ca::Ca>> {
         self.ca.clone()
     }

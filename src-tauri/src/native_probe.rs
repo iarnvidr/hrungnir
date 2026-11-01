@@ -134,7 +134,12 @@ pub async fn run(app: AppHandle, browser: Arc<Browser>, output: PathBuf, data_di
     let verify_offline_video = std::env::var("HRUNGNIR_NATIVE_PROBE_OFFLINE_VIDEO")
         .is_ok_and(|value| value == "1");
     let mode = std::env::var("HRUNGNIR_NATIVE_PROBE_MODE").unwrap_or_default();
-    let cases = if mode == "ui" {
+    let cases = if mode == "reader" {
+        vec![
+            crate::native_ui_probe::run(&app).await,
+            crate::comment_probe::run(&browser).await,
+        ]
+    } else if mode == "ui" {
         vec![crate::native_ui_probe::run(&app).await]
     } else if mode == "comments" {
         vec![crate::comment_probe::run(&browser).await]

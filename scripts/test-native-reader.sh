@@ -23,8 +23,11 @@ cargo tauri build --debug --no-bundle --config src-tauri/tauri.test.conf.json
 python3 scripts/native-test-window.py --claim
 HRUNGNIR_DATA_DIR="$test_root/data"
 HRUNGNIR_NATIVE_PROBE="$test_root/result.json"
-HRUNGNIR_NATIVE_PROBE_MODE=ui
+HRUNGNIR_NATIVE_PROBE_MODE=reader
 HRUNGNIR_NATIVE_UI_REQUIRE_PAGING=1
 export HRUNGNIR_DATA_DIR HRUNGNIR_NATIVE_PROBE HRUNGNIR_NATIVE_PROBE_MODE HRUNGNIR_NATIVE_UI_REQUIRE_PAGING
 printf 'Native reader report: %s\n' "$HRUNGNIR_NATIVE_PROBE"
-exec "$CARGO_TARGET_DIR/debug/offline-reader-desktop"
+native_exit=0
+"$CARGO_TARGET_DIR/debug/offline-reader-desktop" || native_exit=$?
+python3 scripts/native-reader-report.py "$HRUNGNIR_NATIVE_PROBE"
+exit "$native_exit"

@@ -1,5 +1,6 @@
 use crate::{Result, Thread};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use url::Url;
 
 pub fn comments_ready(thread: &Thread) -> bool {
@@ -274,6 +275,135 @@ pub fn listing_partial_path(path: &str, query: Option<&str>) -> bool {
             })
             .unwrap_or(false);
     community_partial || popular_feed_partial_path(path, query)
+}
+
+/// Reddit's server-rendered public discussion uses this bounded POST
+/// continuation for more comments/replies. The route is tied to one community
+/// and one post, and the query grammar is limited to the two observed public
+/// pagination shapes. The caller separately validates the form body.
+pub fn comment_more_partial_path(path: &str, query: Option<&str>) -> bool {
+    let parts: Vec<_> = path.trim_matches('/').split('/').collect();
+    let Some(post_suffix) = parts.get(4).and_then(|part| part.strip_prefix("t3_")) else {
+        return false;
+    };
+    if parts.len() != 5
+        || parts[..3] != ["svc", "shreddit", "more-comments"]
+        || subreddit_url(parts[3]).is_err()
+        || !(3..=16).contains(&post_suffix.len())
+        || !post_suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return false;
+    }
+    let Some(query) = query.filter(|query| !query.is_empty() && query.len() <= 2048) else {
+        return false;
+    };
+    let mut fields = std::collections::BTreeMap::new();
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if value.len() > 512
+            || value.chars().any(char::is_control)
+            || fields.insert(key.into_owned(), value.into_owned()).is_some()
+        {
+            return false;
+        }
+    }
+    if fields.len() == 4
+        && fields.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "sort" | "startingDepth" | "seeker-session" | "commentParentPositions"
+            )
+        })
+    {
+        let Some(depth) = fields
+            .get("startingDepth")
+            .and_then(|value| value.parse::<u16>().ok())
+        else {
+            return false;
+        };
+        let Some(position) = fields
+            .get("commentParentPositions")
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            return false;
+        };
+        return fields
+            .get("sort")
+            .is_some_and(|value| value.eq_ignore_ascii_case("CONFIDENCE"))
+            && (1..=128).contains(&depth)
+            && position <= 10_000
+            && fields.get("seeker-session").is_some_and(|value| value == "true");
+    }
+    if fields.len() == 3
+        && fields.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "top-level" | "comments-remaining" | "commentPositionOffset"
+            )
+        })
+    {
+        let Some(top_level) = fields
+            .get("top-level")
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            return false;
+        };
+        let Some(remaining) = fields
+            .get("comments-remaining")
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            return false;
+        };
+        let Some(offset) = fields
+            .get("commentPositionOffset")
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            return false;
+        };
+        return top_level == 1 && remaining <= 10_000 && offset <= 10_000;
+    }
+    false
+}
+
+/// Validate the bounded form body used by Reddit's observed public comment
+/// continuation. Callers must forward the original values only for this exact
+/// request; they must never persist or log either field.
+pub fn comment_more_form_body(body: &[u8]) -> bool {
+    if body.is_empty() || body.len() > 32 * 1024 {
+        return false;
+    }
+    let mut fields = std::collections::BTreeMap::new();
+    for (key, value) in url::form_urlencoded::parse(body) {
+        let key = key.into_owned();
+        let max_value_len = match key.as_str() {
+            "csrf_token" => 512,
+            "cursor" => 16 * 1024,
+            _ => return false,
+        };
+        if value.len() > max_value_len
+            || value.chars().any(char::is_control)
+            || fields.insert(key, value.into_owned()).is_some()
+        {
+            return false;
+        }
+    }
+    fields.len() == 2
+        && fields.contains_key("csrf_token")
+        && fields.get("cursor").is_some_and(|cursor| !cursor.is_empty())
+}
+
+/// A memory-only identity for the source cursor used by Reddit's continuation.
+/// The opaque cursor itself must never cross into UI state, reports, or storage.
+pub fn comment_more_form_cursor_fingerprint(body: &[u8]) -> Option<[u8; 32]> {
+    if !comment_more_form_body(body) {
+        return None;
+    }
+    let cursor = url::form_urlencoded::parse(body)
+        .find(|(key, _)| key == "cursor")
+        .map(|(_, value)| value.into_owned())?;
+    let mut digest = Sha256::new();
+    digest.update(b"hrungnir reddit comment cursor v1\0");
+    digest.update(cursor.as_bytes());
+    Some(digest.finalize().into())
 }
 
 /// Reddit's rendered /r/popular page currently names this read-only feed
