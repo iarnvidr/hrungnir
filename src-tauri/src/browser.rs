@@ -396,6 +396,7 @@ const SEARCH_CURSOR_TTL: Duration = Duration::from_secs(15 * 60);
 const SEARCH_CURSOR_LIMIT: usize = 128;
 const SEARCH_SEEN_LIMIT: usize = 5000;
 const COMMENT_CURSOR_LIMIT: usize = 1024;
+const COMMENT_CONTROL_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn insert_comment_cursor(
     cursors: &mut BTreeMap<String, CommentCursor>,
@@ -1955,7 +1956,7 @@ impl Browser {
                 self.pending_comment_page.lock().unwrap_or_else(|poison| poison.into_inner()).take();
                 return Err(error);
             }
-            if let Err(error) = self.click_comment_continuation(post_id, parent_id).await {
+            if let Err(error) = self.click_comment_continuation(post_id, parent_id, cursor).await {
                 self.pending_comment_page.lock().unwrap_or_else(|poison| poison.into_inner()).take();
                 return Err(error);
             }
@@ -2039,35 +2040,27 @@ impl Browser {
         Ok(())
     }
 
-    async fn click_comment_continuation(&self, post_id: &str, parent_id: &str) -> Result<(), String> {
+    async fn click_comment_continuation(
+        &self,
+        post_id: &str,
+        parent_id: &str,
+        activation_id: &str,
+    ) -> Result<(), String> {
         let post = serde_json::to_string(post_id).map_err(|error| error.to_string())?;
         let parent = serde_json::to_string(parent_id).map_err(|error| error.to_string())?;
+        let activation = serde_json::to_string(activation_id).map_err(|error| error.to_string())?;
         let app = self.app.clone();
         super::on_main(app.clone(), move || {
             let view = app
                 .get_webview_window(WORKER)
                 .ok_or("Comment source page is not open")?;
             view.eval(&format!(
-                r#"(()=>{{
-                    const postId={post};
-                    const parentId={parent};
-                    const root=parentId===postId;
-                    const scope=root
-                        ? document.querySelector('shreddit-comment-tree')
-                        : [...document.querySelectorAll('shreddit-comment[thingid]')]
-                            .find(node=>node.getAttribute('thingid')===parentId);
-                    if(!scope)return;
-                    const visible=(node)=>{{const style=getComputedStyle(node);return style.display!=='none'&&style.visibility!=='hidden'&&node.getClientRects().length>0;}};
-                    const button=[...scope.querySelectorAll('button')].find(node=>{{
-                        const label=(node.getAttribute('aria-label')||node.textContent||'').trim();
-                        const owner=node.closest('shreddit-comment[thingid]');
-                        const belongsToRequestedParent=root
-                            ? !owner
-                            : owner&&owner.getAttribute('thingid')===parentId;
-                        return belongsToRequestedParent&&visible(node)&&(root?/more comments|load more/i:/more replies/i).test(label);
-                    }});
-                    if(button){{window.__hrungnirCommentPageClickedFor=parentId;button.click();}}
-                }})()"#
+                "({})({}, {}, {}, {});",
+                include_str!("comment_activation.js"),
+                post,
+                parent,
+                activation,
+                COMMENT_CONTROL_READY_TIMEOUT.as_millis(),
             ))
             .map_err(|error| error.to_string())
         })
@@ -2258,7 +2251,10 @@ impl Browser {
                 if let Err(error) = self.prepare_pending_comment_request() {
                     self.pending_comment_page.lock().unwrap_or_else(|poison| poison.into_inner()).take();
                     result = Err(error);
-                } else if let Err(error) = self.click_comment_continuation(post_id, parent_id).await {
+                } else if let Err(error) = self
+                    .click_comment_continuation(post_id, parent_id, request_cursor)
+                    .await
+                {
                     self.pending_comment_page.lock().unwrap_or_else(|poison| poison.into_inner()).take();
                     result = Err(error);
                 } else if let Err(error) = self.wait_for_comment_page(request_cursor).await {
