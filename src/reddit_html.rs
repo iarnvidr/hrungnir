@@ -301,11 +301,16 @@ pub fn comment_page_parents(
             continue;
         };
         let route_parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
-        if !crate::browsing::comment_more_partial_path(url.path(), url.query())
-            || route_parts.get(3).is_none_or(|subreddit| !subreddit.eq_ignore_ascii_case(expected_subreddit))
-            || route_parts.get(4).is_none_or(|post| *post != thread_id)
-        {
+        let same_origin = url.origin() == base.origin();
+        let same_scope = route_parts.len() == 5
+            && route_parts[..3] == ["svc", "shreddit", "more-comments"]
+            && route_parts[3].eq_ignore_ascii_case(expected_subreddit)
+            && route_parts[4] == thread_id;
+        if !same_origin || !same_scope {
             continue;
+        }
+        if !crate::browsing::comment_more_partial_path(url.path(), url.query()) {
+            return Err("Unsupported public comment continuation query shape".into());
         }
         let parent = partial
             .ancestors()

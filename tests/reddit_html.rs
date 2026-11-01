@@ -92,9 +92,9 @@ fn modern_comment_page_keeps_inline_descendants_and_nested_handles() {
         "/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&startingDepth=1&seeker-session=true&commentParentPositions=25",
         r#"<shreddit-comment thingid="t1_replya" parentid="t1_parent" postid="t3_fixture" author="alice">
             <div slot="comment">Reply A</div>
-            <faceplate-partial slot="children" src="/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&amp;startingDepth=2&amp;seeker-session=true&amp;commentParentPositions=26"></faceplate-partial>
+            <faceplate-partial slot="children" src="/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&amp;startingDepth=2&amp;seeker-session=true&amp;commentParentPositions=27,0"></faceplate-partial>
             <shreddit-comment thingid="t1_nested" parentid="t1_replya" postid="t3_fixture" author="bob"><div slot="comment">Nested reply</div>
-                <faceplate-partial slot="children" src="/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&amp;startingDepth=3&amp;seeker-session=true&amp;commentParentPositions=27"></faceplate-partial>
+                <faceplate-partial slot="children" src="/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&amp;startingDepth=3&amp;seeker-session=true&amp;commentParentPositions=27,0,0"></faceplate-partial>
             </shreddit-comment>
         </shreddit-comment>
         <shreddit-comment thingid="t1_replyb" parentid="t1_parent" postid="t3_fixture"><div slot="comment">Reply B</div></shreddit-comment>
@@ -168,7 +168,7 @@ fn modern_comment_page_does_not_infer_missing_nested_or_reply_parents() {
     .is_err());
 
     let reply = response(
-        "/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&startingDepth=2&seeker-session=true&commentParentPositions=26",
+        "/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&startingDepth=2&seeker-session=true&commentParentPositions=26,0",
         r#"<shreddit-comment thingid="t1_nested" postid="t3_fixture"><div slot="comment">Missing requested reply parent</div></shreddit-comment>"#,
     );
     assert!(reddit_html::parse_comment_page(&reply, "t3_fixture", "t1_parent", "AskReddit").is_err());
@@ -243,11 +243,25 @@ fn initial_discussion_exposes_only_matching_comment_continuation_parents() {
         r#"<shreddit-comment thingid="t1_parent" parentid="t3_fixture" postid="t3_fixture">
             <faceplate-partial slot="children" src="/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&amp;startingDepth=1&amp;seeker-session=true&amp;commentParentPositions=25"></faceplate-partial>
         </shreddit-comment>
+        <faceplate-partial slot="load-after" src="/svc/shreddit/more-comments/AskReddit/t3_fixture?top-level=1&amp;rootCommentOffset=7&amp;commentPositionOffset=32"></faceplate-partial>
+        <faceplate-partial slot="load-after" src="https://example.invalid/svc/shreddit/more-comments/AskReddit/t3_fixture?unknown=1"></faceplate-partial>
         <faceplate-partial slot="children" src="/svc/shreddit/more-comments/soccer/t3_other?sort=CONFIDENCE&amp;startingDepth=1&amp;seeker-session=true&amp;commentParentPositions=26"></faceplate-partial>"#,
     );
     assert_eq!(
         reddit_html::comment_page_parents(&response, "t3_fixture").unwrap(),
-        vec!["t1_parent"]
+        vec!["t1_parent", "t3_fixture"]
+    );
+}
+
+#[test]
+fn same_post_comment_continuation_with_unknown_query_is_not_silently_exhausted() {
+    let response = response(
+        "/r/AskReddit/comments/fixture/title/",
+        r#"<faceplate-partial slot="load-after" src="/svc/shreddit/more-comments/AskReddit/t3_fixture?startingDepth=1&amp;commentParentPositions=0&amp;unknown=1"></faceplate-partial>"#,
+    );
+    assert_eq!(
+        reddit_html::comment_page_parents(&response, "t3_fixture").unwrap_err().to_string(),
+        "Unsupported public comment continuation query shape"
     );
 }
 

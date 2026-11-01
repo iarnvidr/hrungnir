@@ -248,9 +248,20 @@ fn only_the_listing_continuation_is_allowed_beyond_public_pages() {
 fn comment_continuations_require_the_observed_scoped_route_query_and_form() {
     let child_path = "/svc/shreddit/more-comments/AskReddit/t3_1xkbciw";
     let child_query = "sort=CONFIDENCE&startingDepth=1&seeker-session=true&commentParentPositions=25";
-    let top_query = "top-level=1&comments-remaining=2100&commentPositionOffset=25";
+    let top_query = "top-level=1&rootCommentOffset=7&commentPositionOffset=32";
+    let legacy_top_query = "top-level=1&comments-remaining=2100&commentPositionOffset=25";
     assert!(comment_more_partial_path(child_path, Some(child_query)));
     assert!(comment_more_partial_path(child_path, Some(top_query)));
+    assert!(comment_more_partial_path(child_path, Some(legacy_top_query)));
+    for observed in [
+        "startingDepth=1&commentPositionOffset=1&commentParentPositions=26",
+        "startingDepth=2&commentParentPositions=27,0",
+        "top-level=1&rootCommentOffset=7&commentPositionOffset=32",
+        "sort=CONFIDENCE&startingDepth=3&seeker-session=true&commentParentPositions=0,0,0",
+        "sort=CONFIDENCE&startingDepth=1&seeker-session=true&commentPositionOffset=5&commentParentPositions=0",
+    ] {
+        assert!(comment_more_partial_path(child_path, Some(observed)), "{observed}");
+    }
     assert!(comment_more_form_body(b"csrf_token=synthetic&cursor=synthetic"));
     assert!(comment_more_form_body(b"cursor=synthetic&csrf_token=synthetic"));
     assert!(comment_more_form_body(b"csrf_token=&cursor=synthetic"));
@@ -265,13 +276,26 @@ fn comment_continuations_require_the_observed_scoped_route_query_and_form() {
         (child_path, None),
         (child_path, Some("sort=CONFIDENCE&startingDepth=1&seeker-session=true")),
         (child_path, Some("sort=NEW&startingDepth=1&seeker-session=true&commentParentPositions=25")),
+        (child_path, Some("sort=CONFIDENCE&startingDepth=1&commentParentPositions=25")),
         (child_path, Some("sort=CONFIDENCE&startingDepth=999&seeker-session=true&commentParentPositions=25")),
         (child_path, Some("sort=CONFIDENCE&startingDepth=1&seeker-session=false&commentParentPositions=25")),
         (child_path, Some("sort=CONFIDENCE&startingDepth=1&seeker-session=true&commentParentPositions=25&extra=x")),
+        (child_path, Some("startingDepth=2&commentParentPositions=27")),
+        (child_path, Some("startingDepth=2&commentParentPositions=27,0,1")),
+        (child_path, Some("startingDepth=2&commentParentPositions=27,,0")),
+        (child_path, Some("startingDepth=1&commentParentPositions=10001")),
+        (child_path, Some("startingDepth=129&commentParentPositions=0")),
+        (child_path, Some("startingDepth=1&commentPositionOffset=-1&commentParentPositions=0")),
+        (child_path, Some("startingDepth=1&commentParentPositions=0&commentParentPositions=1")),
+        (child_path, Some("top-level=1&rootCommentOffset=7&comments-remaining=8&commentPositionOffset=32")),
+        (child_path, Some("top-level=1&rootCommentOffset=7&commentPositionOffset=32&sort=CONFIDENCE&seeker-session=true")),
+        ("/svc/shreddit/more-comments/AskReddit/t3_1xkbciw/", Some(child_query)),
         ("/svc/shreddit/more-comments/AskReddit/t3_1xkbciw/extra", Some(child_query)),
         ("/svc/shreddit/more-comments/AskReddit/t3_../", Some(child_query)),
         ("/svc/shreddit/more-comments/AskReddit/t3_t3_1xkbciw", Some(child_query)),
         ("/svc/shreddit/graphql", Some(child_query)),
+        ("/svc/shreddit/more-comments/AskReddit/t3_1xkbciw", Some("top-level=0&rootCommentOffset=1&commentPositionOffset=25")),
+        ("/svc/shreddit/more-comments/AskReddit/t3_1xkbciw", Some("top-level=1&rootCommentOffset=1&commentPositionOffset=25&extra=1")),
         ("/svc/shreddit/more-comments/AskReddit/t3_1xkbciw", Some("top-level=0&comments-remaining=1&commentPositionOffset=25")),
         ("/svc/shreddit/more-comments/AskReddit/t3_1xkbciw", Some("top-level=1&comments-remaining=1&commentPositionOffset=25&extra=1")),
     ] {

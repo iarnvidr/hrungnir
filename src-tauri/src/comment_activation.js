@@ -96,7 +96,7 @@
                 return owner && owner.getAttribute("thingid") === parentId
                     && visible(node)
                     && enabled(node)
-                    && /more replies/i.test(label);
+                    && /\bmore replies?\b/i.test(label);
             });
 
             // Reddit's top-level continuation is rendered as a lazy

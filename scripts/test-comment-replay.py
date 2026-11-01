@@ -18,9 +18,9 @@ URL = "https://www.reddit.com/svc/shreddit/more-comments/AskReddit/t3_fixture?so
 HTML = """<shreddit-comment thingid="t1_fixturea" parentid="t3_fixture" depth="0" postid="t3_fixture">
 <div slot="comment">private-body</div>
 <shreddit-comment thingid="t1_fixtureb" parentid="t1_fixturea" depth="1" postid="t3_fixture"><div slot="comment">private-body child</div></shreddit-comment>
-<faceplate-partial src="/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&amp;startingDepth=2&amp;seeker-session=true&amp;commentParentPositions=25" data-cursor="private-cursor"></faceplate-partial>
+<faceplate-partial src="/svc/shreddit/more-comments/AskReddit/t3_fixture?startingDepth=2&amp;commentParentPositions=25,0" data-cursor="private-cursor"></faceplate-partial>
 </shreddit-comment>
-<faceplate-partial src="/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&amp;startingDepth=1&amp;seeker-session=true&amp;commentParentPositions=25"></faceplate-partial>"""
+<faceplate-partial src="/svc/shreddit/more-comments/AskReddit/t3_fixture?top-level=1&amp;rootCommentOffset=7&amp;commentPositionOffset=32"></faceplate-partial>"""
 
 
 class ReplayTests(unittest.TestCase):

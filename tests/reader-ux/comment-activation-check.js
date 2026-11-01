@@ -59,6 +59,11 @@ async (page) => {
   await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'owner-delayed' && window.__hrungnirCommentPageActivationStatus.status === 'clicked');
   assert(await page.evaluate(() => window.__commentActivationClicks.join(',') === 'parent'), 'delayed parent continuation did not activate exactly its own control');
 
+  await reset('<shreddit-comment thingid="t1_parent"><shreddit-comment thingid="t1_nested"><button data-click-id="nested-singular">More reply</button></shreddit-comment><button data-click-id="parent-singular">More reply</button></shreddit-comment>');
+  await start('t3_post', 't1_parent', 'singular-parent');
+  await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'singular-parent' && window.__hrungnirCommentPageActivationStatus.status === 'clicked');
+  assert(await page.evaluate(() => window.__commentActivationClicks.join(',') === 'parent-singular'), 'singular parent control was not selected after rejecting a nested singular control');
+
   await reset('<shreddit-comment-tree><shreddit-comment thingid="t1_parent"><button data-click-id="nested-root">Load more comments</button></shreddit-comment></shreddit-comment-tree>');
   await start('t3_post', 't3_post', 'root-owner', 260);
   await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'root-owner' && window.__hrungnirCommentPageActivationStatus.status === 'timed_out');
@@ -220,6 +225,7 @@ async (page) => {
   return {passed:[
     'native UI probe source parses in the browser without running its native journey',
     'delayed reply control activates only its requested parent, not a nested child',
+    'singular reply control activates only its requested parent, not a nested child',
     'thread-level load-more control ignores nested comment buttons',
     'public load activates exactly one validated same-post root partial',
     'root activation scrolls only the same-post top-level lazy partial into IntersectionObserver view',

@@ -277,11 +277,21 @@ pub fn listing_partial_path(path: &str, query: Option<&str>) -> bool {
     community_partial || popular_feed_partial_path(path, query)
 }
 
+fn bounded_comment_position(value: &str) -> Option<u32> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse::<u32>().ok().filter(|position| *position <= 10_000)
+}
+
 /// Reddit's server-rendered public discussion uses this bounded POST
 /// continuation for more comments/replies. The route is tied to one community
-/// and one post, and the query grammar is limited to the two observed public
-/// pagination shapes. The caller separately validates the form body.
+/// and one post, and the query grammar is limited to observed public pagination
+/// shapes. The caller separately validates the form body.
 pub fn comment_more_partial_path(path: &str, query: Option<&str>) -> bool {
+    if !path.starts_with('/') || path.ends_with('/') || path.contains("//") {
+        return false;
+    }
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
     let Some(post_suffix) = parts.get(4).and_then(|part| part.strip_prefix("t3_")) else {
         return false;
@@ -306,60 +316,64 @@ pub fn comment_more_partial_path(path: &str, query: Option<&str>) -> bool {
             return false;
         }
     }
-    if fields.len() == 4
-        && fields.keys().all(|key| {
-            matches!(
-                key.as_str(),
-                "sort" | "startingDepth" | "seeker-session" | "commentParentPositions"
-            )
-        })
+    if fields.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "startingDepth" | "commentParentPositions" | "commentPositionOffset"
+                | "sort" | "seeker-session"
+        )
+    }) && fields.contains_key("startingDepth")
+        && fields.contains_key("commentParentPositions")
     {
         let Some(depth) = fields
             .get("startingDepth")
-            .and_then(|value| value.parse::<u16>().ok())
+            .and_then(|value| bounded_comment_position(value))
+            .filter(|depth| (1..=128).contains(depth))
         else {
             return false;
         };
-        let Some(position) = fields
-            .get("commentParentPositions")
-            .and_then(|value| value.parse::<u32>().ok())
-        else {
+        let Some(positions) = fields.get("commentParentPositions") else {
             return false;
         };
-        return fields
-            .get("sort")
-            .is_some_and(|value| value.eq_ignore_ascii_case("CONFIDENCE"))
-            && (1..=128).contains(&depth)
-            && position <= 10_000
-            && fields.get("seeker-session").is_some_and(|value| value == "true");
+        let parent_positions: Vec<_> = positions.split(',').collect();
+        if parent_positions.len() != depth as usize
+            || parent_positions.len() > 128
+            || parent_positions
+                .iter()
+                .any(|position| bounded_comment_position(position).is_none())
+        {
+            return false;
+        }
+        if fields
+            .get("commentPositionOffset")
+            .is_some_and(|value| bounded_comment_position(value).is_none())
+        {
+            return false;
+        }
+        let has_sort = fields.contains_key("sort");
+        let has_seeker = fields.contains_key("seeker-session");
+        return has_sort == has_seeker
+            && (!has_sort
+                || fields.get("sort").is_some_and(|value| value == "CONFIDENCE")
+                    && fields.get("seeker-session").is_some_and(|value| value == "true"));
     }
     if fields.len() == 3
-        && fields.keys().all(|key| {
-            matches!(
-                key.as_str(),
-                "top-level" | "comments-remaining" | "commentPositionOffset"
-            )
-        })
-    {
-        let Some(top_level) = fields
-            .get("top-level")
-            .and_then(|value| value.parse::<u32>().ok())
-        else {
-            return false;
-        };
-        let Some(remaining) = fields
-            .get("comments-remaining")
-            .and_then(|value| value.parse::<u32>().ok())
-        else {
-            return false;
-        };
-        let Some(offset) = fields
+        && fields.get("top-level").is_some_and(|value| value == "1")
+        && fields
             .get("commentPositionOffset")
-            .and_then(|value| value.parse::<u32>().ok())
-        else {
-            return false;
-        };
-        return top_level == 1 && remaining <= 10_000 && offset <= 10_000;
+            .and_then(|value| bounded_comment_position(value))
+            .is_some()
+    {
+        let root_offset = fields
+            .get("rootCommentOffset")
+            .and_then(|value| bounded_comment_position(value));
+        let remaining = fields
+            .get("comments-remaining")
+            .and_then(|value| bounded_comment_position(value));
+        let only_known_keys = fields.keys().all(|key| {
+            matches!(key.as_str(), "top-level" | "commentPositionOffset" | "rootCommentOffset" | "comments-remaining")
+        });
+        return only_known_keys && (root_offset.is_some() ^ remaining.is_some());
     }
     false
 }
