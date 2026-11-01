@@ -9,6 +9,8 @@ fn parse(url: &str, html: &str) -> reddit_offline::Result<reddit_offline::browsi
         generation: 0,
         request_id: 0,
         request_cursor_fingerprint: None,
+        status_code: 200,
+        content_type_kind: "html",
         url: url.into(),
         encoding: String::new(),
         bytes: html.as_bytes().to_vec(),

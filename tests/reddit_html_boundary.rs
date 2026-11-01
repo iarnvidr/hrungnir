@@ -7,6 +7,8 @@ fn response(url: &str, html: &str) -> CapturedResponse {
         generation: 0,
         request_id: 0,
         request_cursor_fingerprint: None,
+        status_code: 200,
+        content_type_kind: "html",
         url: url.to_owned(),
         encoding: String::new(),
         bytes: html.as_bytes().to_vec(),

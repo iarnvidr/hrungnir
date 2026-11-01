@@ -1188,12 +1188,21 @@ impl Browser {
                                 if result.as_ref().is_err_and(|error| {
                                     error == reddit_offline::reddit_html::COMMENT_PAGE_BRANCH_MISMATCH
                                 }) {
+                                    let shape = reddit_offline::reddit_html::comment_page_shape(
+                                        &response,
+                                        &post_id,
+                                        &parent_id,
+                                    )
+                                    .unwrap_or_else(|_| serde_json::json!({"available":false}));
                                     browser.record_detail(
                                         "comment_page_response",
                                         "ignored",
                                         started.elapsed().as_millis() as u64,
                                         None,
-                                        serde_json::json!({"reason":"outside_requested_comment_branch"}),
+                                        serde_json::json!({
+                                            "reason":"outside_requested_comment_branch",
+                                            "shape":shape,
+                                        }),
                                     );
                                     return;
                                 }

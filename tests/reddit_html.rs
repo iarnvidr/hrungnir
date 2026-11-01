@@ -5,6 +5,8 @@ fn response(path: &str, html: &str) -> CapturedResponse {
         generation: 0,
         request_id: 0,
         request_cursor_fingerprint: None,
+        status_code: 200,
+        content_type_kind: "html",
         url: format!("https://www.reddit.com{path}"),
         encoding: String::new(),
         bytes: html.as_bytes().to_vec(),
@@ -113,6 +115,125 @@ fn modern_comment_page_keeps_inline_descendants_and_nested_handles() {
     );
     assert_eq!(page.comments[0].body, "Reply A");
     assert_eq!(page.continuation_parents, vec!["t1_replya", "t1_nested", "t1_parent"]);
+}
+
+#[test]
+fn modern_top_level_comment_page_normalizes_only_depth_zero_missing_parents() {
+    let response = response(
+        "/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&startingDepth=1&seeker-session=true&commentParentPositions=25",
+        r#"<shreddit-comment thingid="t1_topa" depth="0" postid="t3_fixture">
+                <div slot="comment">Top A</div>
+                <shreddit-comment thingid="t1_nested" depth="1" parentid="t1_topa" postid="t3_fixture"><div slot="comment">Nested reply</div></shreddit-comment>
+            </shreddit-comment>
+            <shreddit-comment thingid="t1_topb" depth="0" parentid="" postid="t3_fixture"><div slot="comment">Top B</div></shreddit-comment>
+            <shreddit-comment thingid="t1_foreign" depth="0" postid="t3_other"><div slot="comment">Foreign post</div></shreddit-comment>"#,
+    );
+    let page = reddit_html::parse_comment_page(
+        &response,
+        "t3_fixture",
+        "t3_fixture",
+        "AskReddit",
+    )
+    .unwrap();
+    assert_eq!(
+        page.comments.iter().map(|comment| comment.id.as_str()).collect::<Vec<_>>(),
+        vec!["t1_topa", "t1_nested", "t1_topb"]
+    );
+    assert_eq!(page.comments[0].parent_id, "t3_fixture");
+    assert_eq!(page.comments[1].parent_id, "t1_topa");
+}
+
+#[test]
+fn modern_comment_page_does_not_infer_missing_nested_or_reply_parents() {
+    let root = response(
+        "/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&startingDepth=1&seeker-session=true&commentParentPositions=25",
+        r#"<shreddit-comment thingid="t1_top" depth="0" parentid="t3_fixture" postid="t3_fixture">
+                <div slot="comment">Top-level comment</div>
+                <shreddit-comment thingid="t1_nested" depth="2" postid="t3_fixture"><div slot="comment">Missing nested parent</div></shreddit-comment>
+            </shreddit-comment>"#,
+    );
+    let page = reddit_html::parse_comment_page(&root, "t3_fixture", "t3_fixture", "AskReddit").unwrap();
+    assert_eq!(page.comments.iter().map(|comment| comment.id.as_str()).collect::<Vec<_>>(), vec!["t1_top"]);
+
+    let standalone_nested = response(
+        "/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&startingDepth=1&seeker-session=true&commentParentPositions=25",
+        r#"<shreddit-comment thingid="t1_standalone" depth="2" postid="t3_fixture"><div slot="comment">Standalone nested source depth</div></shreddit-comment>"#,
+    );
+    assert!(reddit_html::parse_comment_page(
+        &standalone_nested,
+        "t3_fixture",
+        "t3_fixture",
+        "AskReddit"
+    )
+    .is_err());
+
+    let reply = response(
+        "/svc/shreddit/more-comments/AskReddit/t3_fixture?sort=CONFIDENCE&startingDepth=2&seeker-session=true&commentParentPositions=26",
+        r#"<shreddit-comment thingid="t1_nested" postid="t3_fixture"><div slot="comment">Missing requested reply parent</div></shreddit-comment>"#,
+    );
+    assert!(reddit_html::parse_comment_page(&reply, "t3_fixture", "t1_parent", "AskReddit").is_err());
+}
+
+#[test]
+fn comment_page_shape_reports_only_bounded_structure_counts() {
+    let captured = response(
+        "/svc/shreddit/more-comments/AskReddit/t3_fixture?cursor=private-cursor",
+        r#"<shreddit-comment thingid="t1_top" depth="0" postid="t3_fixture"><div slot="comment">Private comment text</div>
+                <shreddit-comment thingid="t1_nested" depth="2" postid="t3_fixture"><div slot="comment">Nested body</div></shreddit-comment>
+            </shreddit-comment>
+            <shreddit-comment thingid="t1_foreign" depth="0" postid="t3_other"><div slot="comment">Foreign body</div></shreddit-comment>"#,
+    );
+    let shape = reddit_html::comment_page_shape(&captured, "t3_fixture", "t3_fixture").unwrap();
+    assert_eq!(shape["status_code"], 200);
+    assert_eq!(shape["content_type"], "html");
+    assert_eq!(shape["response_bytes"], captured.bytes.len());
+    assert_eq!(shape["comment_nodes_total"], 3);
+    assert_eq!(shape["comment_nodes_missing_parent"], 3);
+    assert_eq!(shape["comment_nodes_with_own_body"], 3);
+    assert_eq!(shape["comment_nodes_usable"], 1);
+    assert_eq!(shape["requested_parent_usable"], 1);
+    assert_eq!(shape["dom_depth_zero_missing_parent"], 2);
+    assert_eq!(shape["dom_depth_zero_usable"], 1);
+    assert_eq!(shape["dom_depth_zero_nodes"], 2);
+    assert_eq!(shape["dom_depth_nonzero_nodes"], 1);
+    assert_eq!(shape["dom_nested_missing_parent"], 1);
+    assert_eq!(shape["source_depth_zero_nodes"], 2);
+    assert_eq!(shape["source_depth_missing_nodes"], 0);
+    assert_eq!(shape["source_depth_zero_missing_parent"], 2);
+    assert_eq!(shape["source_depth_nonzero_nodes"], 1);
+    assert_eq!(shape["foreign_post_nodes"], 1);
+    assert_eq!(shape["raw_comment_markers"], 3);
+    assert_eq!(shape["template_nodes"], 0);
+    assert_eq!(shape["script_nodes"], 0);
+    assert_eq!(shape["body_starts_json"], false);
+    let serialized = serde_json::to_string(&shape).unwrap();
+    for private in [
+        "t1_top",
+        "t1_nested",
+        "t1_foreign",
+        "private-cursor",
+        "Private comment text",
+        "Nested body",
+        "svc/shreddit",
+    ] {
+        assert!(!serialized.contains(private));
+    }
+
+    let mut json_response = response(
+        "/svc/shreddit/more-comments/AskReddit/t3_fixture?cursor=another-private-cursor",
+        r#"{"error":"not html"}"#,
+    );
+    json_response.content_type_kind = "json";
+    let json_shape = reddit_html::comment_page_shape(
+        &json_response,
+        "t3_fixture",
+        "t3_fixture",
+    )
+    .unwrap();
+    assert_eq!(json_shape["body_starts_json"], true);
+    assert_eq!(json_shape["content_type"], "json");
+    assert_eq!(json_shape["raw_comment_markers"], 0);
+    assert!(!serde_json::to_string(&json_shape).unwrap().contains("not html"));
 }
 
 #[test]

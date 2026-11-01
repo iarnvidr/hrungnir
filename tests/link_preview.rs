@@ -39,6 +39,8 @@ fn classic_thumbnail_is_separate_from_media_and_promoted_posts_are_ignored() {
         generation: 0,
         request_id: 0,
         request_cursor_fingerprint: None,
+        status_code: 200,
+        content_type_kind: "html",
         url: "https://www.reddit.com/r/news/hot/".into(),
         encoding: String::new(),
         bytes: html.as_bytes().to_vec(),

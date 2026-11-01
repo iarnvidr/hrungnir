@@ -100,6 +100,8 @@ pub struct CapturedResponse {
     pub generation: u64,
     pub request_id: u64,
     pub request_cursor_fingerprint: Option<[u8; 32]>,
+    pub status_code: u16,
+    pub content_type_kind: &'static str,
     pub url: String,
     pub encoding: String,
     pub bytes: Vec<u8>,
@@ -418,15 +420,22 @@ impl CaptureForwarder {
             "proxy source response: status={}, generation={generation}",
             parts.status.as_u16()
         );
-        let html = parts
+        let content_type_kind = parts
             .headers
             .get(hyper::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| {
-                let v = v.to_ascii_lowercase();
-                // The listing continuation is served as an HTML fragment.
-                v.contains("text/html") || v.contains("text/vnd.reddit.partial+html")
-            });
+            .map(|value| value.split(';').next().unwrap_or_default().trim().to_ascii_lowercase())
+            .map(|value| match value.as_str() {
+                "text/html" => "html",
+                "text/vnd.reddit.partial+html" => "reddit_partial_html",
+                "application/json" => "json",
+                "" => "missing",
+                _ if value.ends_with("+json") => "json",
+                _ => "other",
+            })
+            .unwrap_or("missing");
+        let html = matches!(content_type_kind, "html" | "reddit_partial_html");
+        let status_code = parts.status.as_u16();
         let encoding = parts
             .headers
             .get(hyper::header::CONTENT_ENCODING)
@@ -459,6 +468,8 @@ impl CaptureForwarder {
                             generation,
                             request_id,
                             request_cursor_fingerprint,
+                            status_code,
+                            content_type_kind,
                             url: target,
                             encoding,
                             bytes,

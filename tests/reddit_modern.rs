@@ -5,6 +5,8 @@ fn response(url: &str, html: &str) -> CapturedResponse {
         generation: 0,
         request_id: 0,
         request_cursor_fingerprint: None,
+        status_code: 200,
+        content_type_kind: "html",
         url: format!("https://www.reddit.com{url}"),
         encoding: String::new(),
         bytes: html.as_bytes().to_vec(),

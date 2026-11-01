@@ -198,8 +198,7 @@ pub async fn run(browser: &Arc<Browser>) -> Value {
     } else {
         json!({"status":"no_nested_handle"})
     };
-    let nested_succeeded = nested.is_none()
-        || nested_result.get("status").and_then(Value::as_str) == Some("ok");
+    let nested_succeeded = nested_result.get("status").and_then(Value::as_str) == Some("ok");
     let reopened = match browser.store.read(&initial.id) {
         Ok(Some(thread)) => thread,
         Ok(None) => return json!({"name":"comments:reopen","status":"failed","error":"Post missing on cached reopen"}),
@@ -208,6 +207,9 @@ pub async fn run(browser: &Arc<Browser>) -> Value {
     let reopened_ids: std::collections::BTreeSet<_> =
         reopened.comments.iter().map(|comment| comment.id.clone()).collect();
     let persisted_new = second_new.iter().filter(|id| reopened_ids.contains(*id)).count();
+    let initial_preserved = initial_ids.is_subset(&reopened_ids);
+    let first_page_preserved = after_first.comments.iter().all(|comment| reopened_ids.contains(&comment.id));
+    let second_page_preserved = all_ids.is_subset(&reopened_ids);
     json!({
         "name":"comments:continuation",
         "status":if first_new.is_empty()
@@ -217,6 +219,9 @@ pub async fn run(browser: &Arc<Browser>) -> Value {
             || second.source_total != after_second.comment_count
             || reopened.comment_count != after_second.comment_count
             || !nested_succeeded
+            || !initial_preserved
+            || !first_page_preserved
+            || !second_page_preserved
         { "incomplete" } else { "ok" },
         "post_id":after_second.id,
         "source_total_before":initial.comment_count,
@@ -231,6 +236,9 @@ pub async fn run(browser: &Arc<Browser>) -> Value {
         "nested_page":nested_result,
         "reopened_count":reopened.comments.len(),
         "persisted_new_count":persisted_new,
+        "initial_comments_preserved":initial_preserved,
+        "first_page_comments_preserved":first_page_preserved,
+        "second_page_comments_preserved":second_page_preserved,
         "comments_status":reopened.comments_status,
         "missing_ids":reopened.missing.len(),
         "comment_structure":last_comment_structure(browser),

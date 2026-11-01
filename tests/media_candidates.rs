@@ -76,6 +76,8 @@ fn post(link: &str, content: &str) -> Thread {
         generation: 0,
         request_id: 0,
         request_cursor_fingerprint: None,
+        status_code: 200,
+        content_type_kind: "html",
         url: "https://www.reddit.com/r/soccer/comments/test/title/".into(),
         encoding: String::new(),
         bytes: html.into_bytes(),

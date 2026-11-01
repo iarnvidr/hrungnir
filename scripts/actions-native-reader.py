@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Run the native reader probe only from a verified GitHub Actions artifact."""
+"""Run the native reader probe only from a verified GitHub Actions artifact.
+
+Keep the scratch directory until ``status`` reports a terminal state and the
+global runner lock is free. A caller timeout does not mean the native app exited.
+"""
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import os
@@ -24,6 +30,8 @@ TARGET = "darwin-aarch64"
 WORKFLOW = ".github/workflows/macos.yml"
 SCHEMA = 1
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
+RUN_LOCK = "native-reader-run.lock"
+RUN_STATUS = "native-reader-run-status.json"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -34,6 +42,90 @@ class ValidationError(ValueError):
 
 def _fail(message: str) -> None:
     raise ValidationError(message)
+
+
+def _status_paths(root: Path) -> tuple[Path, Path]:
+    state_dir = root / "var"
+    return state_dir / RUN_LOCK, state_dir / RUN_STATUS
+
+
+def _write_run_status(path: Path, *, phase: str, run_id: int, attempt: int,
+                      scratch: Path | None = None, report: Path | None = None,
+                      native_log: Path | None = None, child_pid: int | None = None,
+                      terminal_state: str | None = None) -> None:
+    value = {
+        "schema": 1,
+        "phase": phase,
+        "runner_pid": os.getpid(),
+        "child_pid": child_pid,
+        "run_id": run_id,
+        "run_attempt": attempt,
+        "scratch": str(scratch) if scratch else None,
+        "report": str(report) if report else None,
+        "native_log": str(native_log) if native_log else None,
+        "terminal_state": terminal_state,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(value, separators=(",", ":")) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _progress(path: Path, state: dict, phase: str, *, terminal_state: str | None = None) -> None:
+    state["phase"] = phase
+    state["terminal_state"] = terminal_state
+    _write_run_status(
+        path, phase=phase, run_id=state["run_id"], attempt=state["attempt"],
+        scratch=state.get("scratch"), report=state.get("report"),
+        native_log=state.get("native_log"), child_pid=state.get("child_pid"),
+        terminal_state=terminal_state)
+    child = state.get("child_pid")
+    child_text = f" child_pid={child}" if isinstance(child, int) else ""
+    print(f"Native reader: phase={phase} runner_pid={os.getpid()}{child_text}", flush=True)
+
+
+def _acquire_run_lock(root: Path) -> tuple[int, Path, Path]:
+    lock_path, status_path = _status_paths(root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(descriptor)
+        previous = _read_status(status_path)
+        pid = previous.get("child_pid") or previous.get("runner_pid")
+        detail = f" (last recorded PID {pid})" if isinstance(pid, int) else ""
+        _fail(f"a native reader run is already active{detail}; inspect `status` before retrying")
+    return descriptor, lock_path, status_path
+
+
+def _read_status(path: Path) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def runner_status(root: Path = ROOT) -> dict:
+    lock_path, status_path = _status_paths(root)
+    status = _read_status(status_path)
+    if not lock_path.exists():
+        return {"state": "idle", "last_run": status or None}
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"state": "running", "run": status or None}
+        if not status:
+            return {"state": "idle", "last_run": None}
+        if status.get("terminal_state") in {"success", "failed"}:
+            return {"state": status["terminal_state"], "run": status}
+        return {"state": "interrupted_or_stopped", "last_run": status}
+    finally:
+        os.close(descriptor)
 
 
 def _json_file(path: Path) -> dict:
@@ -367,6 +459,28 @@ def run_artifact(run_id: int, *, repo: str, root: Path = ROOT,
         _fail("invalid run id or repository")
     if platform.system() != "Darwin" or platform.machine().lower() not in {"arm64", "aarch64"}:
         _fail("native test artifacts may only be launched on Apple Silicon macOS")
+    descriptor, _, status_path = _acquire_run_lock(root)
+    state = {"run_id": run_id, "attempt": 0}
+    try:
+        _progress(status_path, state, "starting")
+        result = _run_artifact_locked(run_id, repo=repo, root=root,
+                                      output_dir=output_dir, lock_fd=descriptor,
+                                      status_path=status_path, state=state)
+        _progress(status_path, state, "completed", terminal_state="success")
+        return result
+    except BaseException:
+        _progress(status_path, state, "failed", terminal_state="failed")
+        raise
+    finally:
+        # Do not explicitly unlock: the native child inherits this open file
+        # description and keeps the global lock if this runner is terminated.
+        os.close(descriptor)
+
+
+def _run_artifact_locked(run_id: int, *, repo: str, root: Path,
+                         output_dir: Path | None, lock_fd: int,
+                         status_path: Path, state: dict) -> Path:
+    _progress(status_path, state, "checking_repository")
     require_clean_checkout(root)
     try:
         local_repo = json.loads(run_command(["gh", "repo", "view", "--json", "nameWithOwner"], cwd=root))
@@ -375,12 +489,15 @@ def run_artifact(run_id: int, *, repo: str, root: Path = ROOT,
     if local_repo.get("nameWithOwner", "").lower() != repo.lower():
         _fail("gh repository context does not match the requested repository")
 
+    _progress(status_path, state, "querying_actions")
     run = gh_json([f"repos/{repo}/actions/runs/{run_id}"])
     attempt = run.get("run_attempt")
     if not isinstance(attempt, int) or attempt < 1:
         _fail("GitHub run has no valid attempt number")
     run = gh_json([f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}"])
     validate_run(run, repo=repo, run_id=run_id, run_attempt=attempt)
+    state["attempt"] = attempt
+    _progress(status_path, state, "validating_artifact")
 
     artifact_name = f"hrungnir-native-reader-test-{run_id}-{attempt}"
     listing = gh_json([f"repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100"])
@@ -397,6 +514,8 @@ def run_artifact(run_id: int, *, repo: str, root: Path = ROOT,
                 else root / "var" / "native-reader-artifacts")
     run_root.mkdir(parents=True, exist_ok=True)
     scratch = Path(tempfile.mkdtemp(prefix=f"run-{run_id}-{attempt}-", dir=run_root))
+    state["scratch"] = scratch
+    _progress(status_path, state, "downloading_artifact")
     download = scratch / "download"
     download.mkdir()
     outer_zip = scratch / "github-artifact.zip"
@@ -427,12 +546,14 @@ def run_artifact(run_id: int, *, repo: str, root: Path = ROOT,
     app = extraction / app_name
     executable = validate_bundle(app, version=version)
     run_command(["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)])
+    _progress(status_path, state, "artifact_verified")
 
     # Claim only after every provenance, archive, bundle, and signature check passes.
     run_command([sys.executable, str(root / "scripts" / "native-test-window.py"), "--claim"], cwd=root)
     data_root = scratch / "data"
     data_root.mkdir()
     report = scratch / "native-reader-report.json"
+    state["report"] = report
     env = os.environ.copy()
     for name in ("HRUNGNIR_NATIVE_COMMENT_PROBE", "HRUNGNIR_NATIVE_THREAD_PROBE",
                  "HRUNGNIR_NATIVE_COMMENT_THREAD", "HRUNGNIR_NATIVE_PROBE_OFFLINE_VIDEO"):
@@ -444,18 +565,29 @@ def run_artifact(run_id: int, *, repo: str, root: Path = ROOT,
         "HRUNGNIR_NATIVE_UI_REQUIRE_PAGING": "1",
     })
     native_log = scratch / "native.log"
-    print(f"Native reader report: {report}\nNative app log: {native_log}", flush=True)
+    state["native_log"] = native_log
+    print(f"Native reader report: {report}\nNative app log: {native_log}\n"
+          f"Runner status: {status_path}", flush=True)
     with native_log.open("wb") as log:
-        result = subprocess.run([str(executable)], cwd=scratch, env=env, check=False,
-                                stdout=log, stderr=subprocess.STDOUT)
-    if result.returncode != 0:
-        _fail(f"downloaded native test app exited with status {result.returncode}; see native.log")
+        child = subprocess.Popen([str(executable)], cwd=scratch, env=env,
+                                 stdout=log, stderr=subprocess.STDOUT,
+                                 pass_fds=(lock_fd,))
+        state["child_pid"] = child.pid
+        _progress(status_path, state, "native_app_running")
+        result_code = child.wait()
+    _progress(status_path, state, "native_app_exited")
+    if result_code != 0:
+        _fail(f"downloaded native test app exited with status {result_code}; see native.log")
+    _progress(status_path, state, "validating_native_report")
     run_command([sys.executable, str(root / "scripts" / "native-reader-report.py"), str(report)], cwd=root)
     return report
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog="Do not retry or remove runner scratch while status is running. "
+               "A timeout from the calling shell is not proof of completion.")
     sub = parser.add_subparsers(dest="command", required=True)
     receipt = sub.add_parser("receipt", help="write the CI provenance receipt")
     receipt.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", DEFAULT_REPO))
@@ -471,6 +603,7 @@ def build_parser() -> argparse.ArgumentParser:
     runner.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", DEFAULT_REPO))
     runner.add_argument("--output-dir", type=Path,
                         help="directory for isolated data, downloads, and the native report")
+    sub.add_parser("status", help="inspect the active or most recent native reader run")
     return parser
 
 
@@ -485,6 +618,10 @@ def main() -> int:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
             print(args.output)
+            return 0
+        if args.command == "status":
+            value = runner_status()
+            print(json.dumps(value, indent=2))
             return 0
         report = run_artifact(args.run_id, repo=args.repo, output_dir=args.output_dir)
         return 0

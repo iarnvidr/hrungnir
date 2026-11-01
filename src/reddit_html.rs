@@ -335,6 +335,167 @@ pub struct CommentPageFragment {
 pub const COMMENT_PAGE_BRANCH_MISMATCH: &str =
     "Comment response contained no replies for the requested branch";
 
+fn comment_depth(comment: ElementRef<'_>) -> usize {
+    comment
+        .ancestors()
+        .filter_map(ElementRef::wrap)
+        .filter(|ancestor| ancestor.value().name() == "shreddit-comment")
+        .count()
+}
+
+fn own_comment_body(comment: ElementRef<'_>, id: &str) -> Option<String> {
+    comment
+        .select(&selector("[slot=\"comment\"]"))
+        .find(|body| {
+            body.ancestors()
+                .filter_map(ElementRef::wrap)
+                .find(|owner| owner.value().name() == "shreddit-comment")
+                .and_then(|owner| owner.value().attr("thingid"))
+                == Some(id)
+        })
+        .map(|body| text(body, 3000))
+        .filter(|body| !body.is_empty())
+}
+
+fn valid_comment_id(id: &str) -> bool {
+    id.starts_with("t1_")
+        && id.len() <= 32
+        && id[3..].bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+/// Return bounded, value-free structure counts for a comment-page parser
+/// mismatch. This intentionally never emits comment text, identities, URLs, or
+/// continuation cursor values.
+pub fn comment_page_shape(
+    response: &crate::response_capture::CapturedResponse,
+    thread_id: &str,
+    requested_parent: &str,
+) -> Result<serde_json::Value> {
+    let html = decode(response)?;
+    let document = Html::parse_document(&html);
+    let total_comment_nodes = document
+        .select(&selector("shreddit-comment[thingid]"))
+        .count();
+    let mut scanned = 0usize;
+    let mut with_parent = 0usize;
+    let mut missing_parent = 0usize;
+    let mut with_body = 0usize;
+    let mut usable = 0usize;
+    let mut requested_parent_usable = 0usize;
+    let mut root_depth_zero = 0usize;
+    let mut dom_depth_nonzero = 0usize;
+    let mut root_depth_zero_missing_parent = 0usize;
+    let mut root_depth_zero_usable = 0usize;
+    let mut dom_nested_missing_parent = 0usize;
+    let mut foreign_post = 0usize;
+    let mut source_depth_zero = 0usize;
+    let mut source_depth_missing = 0usize;
+    let mut source_depth_nonzero = 0usize;
+    let mut source_depth_zero_missing_parent = 0usize;
+    let mut source_depth_zero_usable = 0usize;
+    for comment in document
+        .select(&selector("shreddit-comment[thingid]"))
+        .take(1000)
+    {
+        scanned += 1;
+        let value = comment.value();
+        let depth = comment_depth(comment);
+        let id = value.attr("thingid").unwrap_or_default();
+        let depth_attr = value.attr("depth").map(str::trim);
+        let has_source_depth_zero = depth_attr == Some("0");
+        if has_source_depth_zero {
+            source_depth_zero += 1;
+        } else if depth_attr.is_some() {
+            source_depth_nonzero += 1;
+        } else {
+            source_depth_missing += 1;
+        }
+        let parent = value
+            .attr("parentid")
+            .map(str::trim)
+            .filter(|parent| !parent.is_empty());
+        if parent.is_some() {
+            with_parent += 1;
+        } else {
+            missing_parent += 1;
+            if depth == 0 {
+                root_depth_zero_missing_parent += 1;
+            } else {
+                dom_nested_missing_parent += 1;
+            }
+            if has_source_depth_zero {
+                source_depth_zero_missing_parent += 1;
+            }
+        }
+        if depth == 0 {
+            root_depth_zero += 1;
+        } else {
+            dom_depth_nonzero += 1;
+        }
+        let body = own_comment_body(comment, id);
+        if body.is_some() {
+            with_body += 1;
+        }
+        let post_matches = value
+            .attr("postid")
+            .is_none_or(|post_id| post_id == thread_id);
+        if !post_matches {
+            foreign_post += 1;
+        }
+        let fallback_root_parent = parent.is_none()
+            && requested_parent == thread_id
+            && depth == 0
+            && has_source_depth_zero;
+        let normalized_parent = parent.or_else(|| fallback_root_parent.then_some(thread_id));
+        let is_usable = valid_comment_id(id) && post_matches && body.is_some()
+            && normalized_parent.is_some();
+        if is_usable {
+            usable += 1;
+            if depth == 0 {
+                root_depth_zero_usable += 1;
+            }
+            if has_source_depth_zero {
+                source_depth_zero_usable += 1;
+            }
+            if normalized_parent == Some(requested_parent) {
+                requested_parent_usable += 1;
+            }
+        }
+    }
+    let trimmed_html = html.trim_start();
+    let body_starts_json = trimmed_html.starts_with('{') || trimmed_html.starts_with('[');
+    let raw_comment_markers = html.to_ascii_lowercase().matches("<shreddit-comment").count();
+    Ok(serde_json::json!({
+        "status_code": response.status_code,
+        "content_type": response.content_type_kind,
+        "response_bytes": response.bytes.len(),
+        "request_parent_is_root": requested_parent == thread_id,
+        "comment_nodes_total": total_comment_nodes,
+        "comment_nodes_scanned": scanned,
+        "comment_nodes_truncated": total_comment_nodes > scanned,
+        "comment_nodes_with_parent": with_parent,
+        "comment_nodes_missing_parent": missing_parent,
+        "comment_nodes_with_own_body": with_body,
+        "comment_nodes_usable": usable,
+        "requested_parent_usable": requested_parent_usable,
+        "dom_depth_zero_nodes": root_depth_zero,
+        "dom_depth_nonzero_nodes": dom_depth_nonzero,
+        "dom_depth_zero_missing_parent": root_depth_zero_missing_parent,
+        "dom_depth_zero_usable": root_depth_zero_usable,
+        "dom_nested_missing_parent": dom_nested_missing_parent,
+        "foreign_post_nodes": foreign_post,
+        "source_depth_zero_nodes": source_depth_zero,
+        "source_depth_missing_nodes": source_depth_missing,
+        "source_depth_nonzero_nodes": source_depth_nonzero,
+        "source_depth_zero_missing_parent": source_depth_zero_missing_parent,
+        "source_depth_zero_usable": source_depth_zero_usable,
+        "raw_comment_markers": raw_comment_markers,
+        "template_nodes": document.select(&selector("template")).count(),
+        "script_nodes": document.select(&selector("script")).count(),
+        "body_starts_json": body_starts_json,
+    }))
+}
+
 /// Parse the returned branch for the parent whose validated continuation was
 /// requested. Reddit can inline nested replies in the same fragment; retain
 /// those descendants so their own continuations remain reachable.
@@ -357,37 +518,31 @@ pub fn parse_comment_page(
     let mut candidates = Vec::new();
     let mut known_ids = std::collections::HashSet::new();
     let mut body_bytes = 0usize;
-    for element in document.select(&selector("shreddit-comment[thingid][parentid]")) {
+    for element in document.select(&selector("shreddit-comment[thingid]")) {
         let value = element.value();
-        let Some(id) = value
-            .attr("thingid")
-            .filter(|id| id.starts_with("t1_") && id.len() <= 32)
-        else {
-            continue;
-        };
-        let Some(actual_parent) = value.attr("parentid") else {
+        let Some(id) = value.attr("thingid").filter(|id| valid_comment_id(id)) else {
             continue;
         };
         if value.attr("postid").is_some_and(|post| post != thread_id)
-            || !id[3..].bytes().all(|byte| byte.is_ascii_alphanumeric())
-            || !known_ids.insert(id.to_owned())
-        {
+            || !known_ids.insert(id.to_owned()) {
             continue;
         }
-        let body = element
-            .select(&selector("[slot=\"comment\"]"))
-            .find(|body| {
-                body.ancestors()
-                    .filter_map(ElementRef::wrap)
-                    .find(|owner| owner.value().name() == "shreddit-comment")
-                    .and_then(|owner| owner.value().attr("thingid"))
-                    == Some(id)
-            })
-            .map(|body| text(body, 3000))
-            .unwrap_or_default();
-        if body.is_empty() {
+        let dom_depth = comment_depth(element);
+        let source_depth_zero = value.attr("depth").map(str::trim) == Some("0");
+        let actual_parent = value
+            .attr("parentid")
+            .map(str::trim)
+            .filter(|parent| !parent.is_empty())
+            .or_else(|| {
+                (parent_id == thread_id && dom_depth == 0 && source_depth_zero)
+                    .then_some(thread_id)
+            });
+        let Some(actual_parent) = actual_parent else {
             continue;
-        }
+        };
+        let Some(body) = own_comment_body(element, id) else {
+            continue;
+        };
         body_bytes = body_bytes.saturating_add(body.len());
         if body_bytes > 350_000 || candidates.len() == 300 {
             return Err("Comment response exceeded its page budget".into());
@@ -1096,6 +1251,8 @@ mod search_structure_tests {
             generation: 4,
             request_id: 12,
             request_cursor_fingerprint: None,
+            status_code: 200,
+            content_type_kind: "html",
             url: response_url.into(),
             encoding: "identity".into(),
             bytes: html.as_bytes().to_vec(),

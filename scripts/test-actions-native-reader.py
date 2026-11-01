@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Headless integrity tests for the GitHub-built native reader artifact runner."""
 import importlib.util
+import os
 from pathlib import Path
 import plistlib
+import subprocess
+import sys
 import tempfile
 import unittest
 import warnings
@@ -234,6 +237,43 @@ class ReceiptTests(unittest.TestCase):
         info_path.write_bytes(plistlib.dumps(info))
         with self.assertRaises(runner.ValidationError):
             runner.validate_bundle(app, version=VERSION)
+
+
+class RunnerSupervisionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_status_uses_lock_and_duplicate_run_is_rejected(self):
+        lock_fd, _, status_path = runner._acquire_run_lock(self.root)
+        try:
+            runner._write_run_status(status_path, phase="downloading_artifact",
+                                     run_id=RUN_ID, attempt=ATTEMPT)
+            self.assertEqual(runner.runner_status(self.root)["state"], "running")
+            with self.assertRaisesRegex(runner.ValidationError, "already active"):
+                runner._acquire_run_lock(self.root)
+        finally:
+            os.close(lock_fd)
+        state = runner.runner_status(self.root)
+        self.assertEqual(state["state"], "interrupted_or_stopped")
+        self.assertEqual(state["last_run"]["phase"], "downloading_artifact")
+
+    def test_inherited_lock_remains_held_after_runner_descriptor_closes(self):
+        lock_fd, _, status_path = runner._acquire_run_lock(self.root)
+        runner._write_run_status(status_path, phase="native_app_running",
+                                 run_id=RUN_ID, attempt=ATTEMPT, child_pid=4321)
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.2)"],
+                                 pass_fds=(lock_fd,))
+        os.close(lock_fd)
+        try:
+            self.assertEqual(runner.runner_status(self.root)["state"], "running")
+            self.assertEqual(runner.runner_status(self.root)["run"]["child_pid"], 4321)
+        finally:
+            child.wait(timeout=3)
+        self.assertEqual(runner.runner_status(self.root)["state"], "interrupted_or_stopped")
 
 
 if __name__ == "__main__":
