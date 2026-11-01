@@ -77,6 +77,11 @@ pub async fn run(app: &AppHandle) -> Value {
                         let acknowledged = !progress.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
                         if !acknowledged {
                             let _ = window.eval(&script);
+                        } else {
+                            // Hidden WebKit pages can throttle their timer
+                            // queue. Wake only this debug test harness's
+                            // pending predicate wait; production UI is untouched.
+                            let _ = window.eval("window.__hrungnirUiProbePulse?.()");
                         }
                     }
                 }

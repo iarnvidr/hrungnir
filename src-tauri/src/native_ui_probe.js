@@ -9,12 +9,21 @@
   const continuationFailures = [];
   let stage = 'startup';
   const probeState = window.__hrungnirUiProbeState = {
-    stage, native_request: null, heartbeat: 0, cancelled: false,
+    stage, native_request: null, heartbeat: 0, cancelled: false, wait_wake: null,
   };
-  const heartbeat = setInterval(() => { probeState.heartbeat++; }, 500);
+  // The test window intentionally stays hidden. WebKit may throttle its timer
+  // queue, so the Rust harness supplies bounded native eval pulses instead.
+  window.__hrungnirUiProbePulse = () => {
+    probeState.heartbeat++;
+    const wake = probeState.wait_wake;
+    probeState.wait_wake = null;
+    if (wake) wake();
+  };
   window.__hrungnirUiProbeCancel = () => {
     probeState.cancelled = true;
-    clearInterval(heartbeat);
+    const wake = probeState.wait_wake;
+    probeState.wait_wake = null;
+    if (wake) wake();
   };
   const $ = selector => document.querySelector(selector);
   const rows = () => [...document.querySelectorAll('#thread-list .thread-item')];
@@ -33,7 +42,7 @@
       const matched = await predicate();
       if (probeState.cancelled) throw new Error('Native UI journey cancelled');
       if (matched) return;
-      await new Promise(resolve => setTimeout(resolve, 80));
+      await new Promise(resolve => { probeState.wait_wake = resolve; });
     }
     throw new Error(`Timed out: ${description}`);
   };
@@ -184,5 +193,5 @@
   run().then(result => emit(result)).catch(error => emit({
     status: 'failed', finished: true, stage, error: clean(error), checks,
     continuation_failures: continuationFailures, state: snapshot(),
-  })).finally(() => clearInterval(heartbeat));
+  }));
 })();

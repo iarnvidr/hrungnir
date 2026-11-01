@@ -46,22 +46,49 @@ pub async fn run(browser: &Arc<Browser>) -> Value {
             }
         }
     } else {
-        let ids = match browser.subreddit("AskReddit", "hot", "day").await {
+        let scope = match reddit_offline::browsing::listing_url("AskReddit", "hot", "day") {
+            Ok(scope) => scope,
+            Err(error) => return json!({"name":"comments:discovery","status":"failed","error":error.to_string()}),
+        };
+        let mut ids = match browser.listing_at_url(scope.clone()).await {
             Ok(ids) => ids,
             Err(error) => {
                 return json!({"name":"comments:discovery","status":"failed","error":error})
             }
         };
-        let mut candidates: Vec<_> = ids
-            .into_iter()
-            .filter_map(|id| browser.store.read(&id).ok().flatten())
-            .filter(|thread| thread.comment_count.is_some_and(|count| count > 500))
-            .collect();
-        candidates.sort_by_key(|thread| std::cmp::Reverse(thread.comment_count.unwrap_or_default()));
-        let Some(thread) = candidates.into_iter().next() else {
-            return json!({"name":"comments:discovery","status":"no_candidate","community":"AskReddit","minimum_source_total":501});
+        let mut page_state = match browser.listing_page_state(&scope, &ids) {
+            Ok(state) => state,
+            Err(error) => return json!({"name":"comments:discovery","status":"failed","error":error}),
         };
-        thread
+        // The initial source document can contain only a few highlights. Use
+        // the same bounded public feed continuation as the reader before
+        // concluding that no sufficiently large discussion is available.
+        let mut listing_pages = 1;
+        loop {
+            let mut candidates: Vec<_> = ids
+                .iter()
+                .filter_map(|id| browser.store.read(id).ok().flatten())
+                .filter(|thread| thread.comment_count.is_some_and(|count| count > 500))
+                .collect();
+            candidates.sort_by_key(|thread| std::cmp::Reverse(thread.comment_count.unwrap_or_default()));
+            if let Some(thread) = candidates.into_iter().next() {
+                break thread;
+            }
+            let Some(cursor) = page_state.cursor.filter(|_| listing_pages < 3) else {
+                return json!({"name":"comments:discovery","status":"no_candidate","community":"AskReddit","minimum_source_total":501,"listing_pages":listing_pages,"posts_checked":ids.len()});
+            };
+            let page = match browser.fetch_listing_page(&scope, &cursor).await {
+                Ok(page) => page,
+                Err(error) => return json!({"name":"comments:discovery","status":"failed","error":error,"listing_pages":listing_pages}),
+            };
+            for post in page.posts {
+                if !ids.contains(&post.id) {
+                    ids.push(post.id);
+                }
+            }
+            page_state = page.listing_page;
+            listing_pages += 1;
+        }
     };
 
     if !valid_post_id(&thread.id) || thread.source.as_deref() != Some("proxy") {
