@@ -48,10 +48,10 @@
   };
   // Use actual controls and rendered native results. Rust separately observes
   // source request counters; avoid polling heavyweight diagnostics through IPC.
-  const nativeRead = async (command) => {
+  const nativeRead = async (command, args = {}) => {
     if (probeState.cancelled) throw new Error('Native UI journey cancelled');
     probeState.native_request = command;
-    try { return await window.__TAURI__.core.invoke(command); }
+    try { return await window.__TAURI__.core.invoke(command, args); }
     finally { probeState.native_request = null; }
   };
   const snapshot = () => ({
@@ -155,14 +155,18 @@
     const selectedId = selected.dataset.threadId;
     const title = selected.querySelector('.thread-title')?.textContent || 'borrow checker';
     selected.querySelector('.thread-open').click();
-    await wait(async () => {
-      const stored = await nativeRead('snapshot');
-      const post = stored.threads?.find(thread => thread.id === selectedId);
-      return post && post.comments_status !== 'not_loaded' && post.comments?.length > 0
-        && !$('#reader-panel').hidden && !$('#thread-view').hidden && $('#discussion-comments .comment')
-        && !$('#discussion-comments .cached-listing-note');
-    },
+    await wait(() => !$('#reader-panel').hidden && !$('#thread-view').hidden
+        && $('#thread-view h1')?.textContent === title
+        && document.querySelectorAll('#discussion-comments .comment').length > 0
+        && !$('#discussion-comments .cached-listing-note'),
       'real selected-post discussion', 60000);
+    // `snapshot` deliberately omits comment bodies for lightweight browsing.
+    // Verify persistence via this exact post's local-only cache read instead;
+    // it does not drive or populate the UI being tested.
+    const stored = await nativeRead('open_cached_thread', { id: selectedId });
+    const post = stored.snapshot?.threads?.find(thread => thread.id === selectedId);
+    assert(post && post.title === title && post.comments_status !== 'not_loaded'
+      && post.comments?.length > 0, 'Selected post comments were not persisted in the local cache');
     checks.push({ name: 'open-search-result', post_id: selectedId,
       downloaded_comments: document.querySelectorAll('#discussion-comments .comment').length });
     $('#tab-browse').click();

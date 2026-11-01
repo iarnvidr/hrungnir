@@ -17,6 +17,12 @@
     const isCurrent = () => window.__hrungnirCommentPageActivation === activationId;
     const deadline = performance.now() + Math.max(0, Math.min(timeoutMs, 15000));
     const root = parentId === postId;
+    const publicLoadErrorName = error => {
+        const name = error && typeof error.name === "string" ? error.name : "";
+        return ["TypeError", "NetworkError", "SecurityError", "AbortError", "Error"].includes(name)
+            ? name
+            : "other";
+    };
 
     const signature = (scope, target) => JSON.stringify([
         [...scope.querySelectorAll("shreddit-comment[thingid]")]
@@ -110,7 +116,7 @@
                     : document.visibilityState === "visible" ? "visible" : "hidden";
                 diagnostics.rootPartialDefined = typeof customElements !== "undefined"
                     && Boolean(customElements.get("faceplate-partial"));
-                diagnostics.rootPartialHasLoadMethod = typeof rootPartial.load === "function";
+                diagnostics.rootPartialHasLoadContent = typeof rootPartial.loadContent === "function";
             }
 
             const targetCanActivate = root
@@ -142,25 +148,30 @@
                     if (controlKeys.length > 128) {
                         delete window.__hrungnirCommentPageControls[controlKeys[0]];
                     }
-                    const publicLoad = root && typeof target.load === "function";
+                    const publicLoad = root && typeof target.loadContent === "function";
                     diagnostics.activationMode = root
-                        ? publicLoad ? "public_load" : "scroll_fallback"
+                        ? publicLoad ? "public_load_content" : "scroll_fallback"
                         : "reply_button_click";
+                    diagnostics.chosenMethod = root ? publicLoad ? "loadContent" : "scroll" : "click";
                     if (publicLoad) diagnostics.publicLoadRejected = false;
                     publish(root ? "activated_root_partial" : "clicked");
                     if (root) {
                         if (publicLoad) {
                             try {
-                                const loading = target.load();
+                                const loading = target.loadContent();
                                 if (loading && typeof loading.then === "function") {
-                                    Promise.resolve(loading).catch(() => {
+                                    Promise.resolve(loading).catch(error => {
                                         if (!isCurrent()) return;
                                         diagnostics.publicLoadRejected = true;
+                                        diagnostics.publicLoadFailureName = publicLoadErrorName(error);
+                                        diagnostics.publicLoadFailurePhase = "async";
                                         publish("activated_root_partial");
                                     });
                                 }
                             } catch (_) {
                                 diagnostics.publicLoadRejected = true;
+                                diagnostics.publicLoadFailureName = publicLoadErrorName(_);
+                                diagnostics.publicLoadFailurePhase = "sync";
                                 publish("activated_root_partial");
                             }
                         } else {

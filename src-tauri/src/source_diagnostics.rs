@@ -20,15 +20,24 @@ fn sanitize(value: Value) -> Value {
     if let Some(visibility) = input["pageVisibility"].as_str().filter(|s| ["visible", "hidden", "prerender"].contains(s)) {
         details.insert("pageVisibility".into(), json!(visibility));
     }
-    if let Some(mode) = input["activationMode"].as_str().filter(|s| ["public_load", "scroll_fallback", "reply_button_click"].contains(s)) {
+    if let Some(mode) = input["activationMode"].as_str().filter(|s| ["public_load", "public_load_content", "scroll_fallback", "reply_button_click"].contains(s)) {
         details.insert("activationMode".into(), json!(mode));
+    }
+    if let Some(method) = input["chosenMethod"].as_str().filter(|s| ["loadContent", "scroll", "click"].contains(s)) {
+        details.insert("chosenMethod".into(), json!(method));
+    }
+    if let Some(name) = input["publicLoadFailureName"].as_str().filter(|s| ["TypeError", "NetworkError", "SecurityError", "AbortError", "Error", "other"].contains(s)) {
+        details.insert("publicLoadFailureName".into(), json!(name));
+    }
+    if let Some(phase) = input["publicLoadFailurePhase"].as_str().filter(|s| ["sync", "async"].contains(s)) {
+        details.insert("publicLoadFailurePhase".into(), json!(phase));
     }
     for key in ["rootPartialCount", "matchingRootPartialCount"] {
         if let Some(count) = input[key].as_u64().filter(|n| *n <= 100_000) {
             details.insert(key.into(), json!(count));
         }
     }
-    for key in ["requestedCommentScopeFound", "parentOwnedReplyButtonFound", "previousTargetStillConnected", "previousTargetChanged", "rootPartialDefined", "rootPartialHasLoadMethod", "publicLoadRejected"] {
+    for key in ["requestedCommentScopeFound", "parentOwnedReplyButtonFound", "previousTargetStillConnected", "previousTargetChanged", "rootPartialDefined", "rootPartialHasLoadMethod", "rootPartialHasLoadContent", "publicLoadRejected"] {
         if let Some(flag) = input[key].as_bool() {
             details.insert(key.into(), json!(flag));
         }
@@ -51,7 +60,7 @@ fn sanitize(value: Value) -> Value {
 fn sanitize_ui(value: Value) -> Value {
     let ready = value["ready_state"].as_str().filter(|s| ["loading", "interactive", "complete"].contains(s));
     let visibility = value["visibility"].as_str().filter(|s| ["visible", "hidden", "prerender"].contains(s));
-    let request = value["native_request"].as_str().filter(|s| ["app_diagnostics", "snapshot"].contains(s));
+    let request = value["native_request"].as_str().filter(|s| ["app_diagnostics", "snapshot", "open_cached_thread"].contains(s));
     let heartbeat = value["heartbeat"].as_u64().filter(|n| *n <= 10_000);
     let rows = value["rows"].as_u64().filter(|n| *n <= 10_000);
     let comments = value["comments"].as_u64().filter(|n| *n <= 10_000);
@@ -143,5 +152,17 @@ mod tests {
         for value in ["private", "secret", "reddit.com", "cursor", "html"] {
             assert!(!encoded.contains(value));
         }
+    }
+
+    #[test]
+    fn loader_diagnostics_accept_only_known_methods_and_failure_classes() {
+        let output = sanitize(json!({"status":"activated_root_partial","diagnostics":{"chosenMethod":"loadContent","rootPartialHasLoadContent":true,"publicLoadFailureName":"TypeError","publicLoadFailurePhase":"async","errorMessage":"private source text"}}));
+        assert_eq!(output["diagnostics"]["chosenMethod"], "loadContent");
+        assert_eq!(output["diagnostics"]["rootPartialHasLoadContent"], true);
+        assert_eq!(output["diagnostics"]["publicLoadFailureName"], "TypeError");
+        assert_eq!(output["diagnostics"]["publicLoadFailurePhase"], "async");
+        assert!(!output.to_string().contains("private"));
+        let rejected = sanitize(json!({"status":"activated_root_partial","diagnostics":{"chosenMethod":"https://private.invalid","publicLoadFailureName":"private exception text","publicLoadFailurePhase":"private token"}}));
+        assert_eq!(rejected["diagnostics"], json!({}));
     }
 }

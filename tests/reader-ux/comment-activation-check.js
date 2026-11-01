@@ -25,6 +25,7 @@ async (page) => {
     host.append(content);
     document.body.append(host);
     window.__commentActivationClicks = [];
+    window.__commentActivationLegacyLoads = [];
     window.__hrungnirCommentPageControls = Object.create(null);
     window.__hrungnirCommentPageActivation = null;
     window.__hrungnirCommentPageActivationStatus = null;
@@ -68,6 +69,10 @@ async (page) => {
     window.__commentActivationRootLoads = [];
     document.querySelectorAll('faceplate-partial[data-lazy-id]').forEach(partial => {
       partial.load = () => {
+        window.__commentActivationLegacyLoads.push(partial.dataset.lazyId);
+        return Promise.resolve();
+      };
+      partial.loadContent = () => {
         window.__commentActivationRootLoads.push(partial.dataset.lazyId);
         partial.dataset.loadResult = 'requested';
         return Promise.resolve();
@@ -79,8 +84,11 @@ async (page) => {
   assert(await page.evaluate(() => {
     const status = window.__hrungnirCommentPageActivationStatus;
     const partial = document.querySelector('faceplate-partial[data-lazy-id="requested-root"]');
-    return status.diagnostics.activationMode === 'public_load'
+    return status.diagnostics.activationMode === 'public_load_content'
+      && status.diagnostics.rootPartialHasLoadContent === true
+      && status.diagnostics.chosenMethod === 'loadContent'
       && status.diagnostics.publicLoadRejected === false
+      && window.__commentActivationLegacyLoads.length === 0
       && window.__commentActivationRootLoads.join(',') === 'requested-root'
       && partial.dataset.loadResult === 'requested';
   }), 'public load activated anything other than the exact validated same-post root partial');
@@ -90,6 +98,10 @@ async (page) => {
     window.__commentActivationRootLoads = [];
     const partial = document.querySelector('faceplate-partial[data-lazy-id="rejected-root"]');
     partial.load = () => {
+      window.__commentActivationLegacyLoads.push(partial.dataset.lazyId);
+      return Promise.resolve();
+    };
+    partial.loadContent = () => {
       window.__commentActivationRootLoads.push(partial.dataset.lazyId);
       return Promise.reject(new Error('fixture rejection'));
     };
@@ -97,7 +109,10 @@ async (page) => {
   await start('t3_post', 't3_post', 'root-public-load-rejected', 1800);
   await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'root-public-load-rejected' && window.__hrungnirCommentPageActivationStatus.diagnostics.publicLoadRejected === true);
   assert(await page.evaluate(() => window.__commentActivationRootLoads.join(',') === 'rejected-root'
-    && window.__hrungnirCommentPageActivationStatus.diagnostics.activationMode === 'public_load'), 'rejected public load was not recorded without retrying or exposing an error event');
+    && window.__commentActivationLegacyLoads.length === 0
+    && window.__hrungnirCommentPageActivationStatus.diagnostics.activationMode === 'public_load_content'
+    && window.__hrungnirCommentPageActivationStatus.diagnostics.publicLoadFailureName === 'Error'
+    && window.__hrungnirCommentPageActivationStatus.diagnostics.publicLoadFailurePhase === 'async'), 'rejected public loadContent was not recorded without retrying or exposing an error event');
 
   await reset('<div style="height:900px"></div><shreddit-comment-tree><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="wrong-post" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_other"></faceplate-partial><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="unrelated-host" src="https://example.invalid/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial><shreddit-comment thingid="t1_nested-owner"><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="comment-owned" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial></shreddit-comment><faceplate-partial data-lazy-id="requested-root" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial></shreddit-comment-tree>');
   await page.evaluate(() => {
