@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${GITHUB_ACTIONS:-}" != "true" ]]; then
+  printf '%s\n' 'Local compilation is disabled. PR pushes build in GitHub Actions; use gh workflow run macos.yml --ref main for an explicit main build.' >&2
+  exit 2
+fi
 cd "$(dirname "$0")/.."
 product_name="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["productName"])')"
 # Cross-build from Linux in a disposable container, without mounts, profiles or

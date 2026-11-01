@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Portable security-policy guards; synthetic packaging is not a Mac launch test."""
 import json
+import os
 import pathlib
 import plistlib
 import shutil
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -29,6 +31,15 @@ def assert_scoped_policy(test, info):
 
 
 class MacPolicyTests(unittest.TestCase):
+    def test_legacy_build_entries_refuse_local_compilation(self):
+        environment = os.environ.copy()
+        environment.pop("GITHUB_ACTIONS", None)
+        for shell, script in [("sh", "scripts/dev.sh"), ("bash", "scripts/build-macos.sh")]:
+            with self.subTest(script=script):
+                result = subprocess.run([shell, str(ROOT / script)], env=environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("Local compilation is disabled", result.stderr)
+
     def test_shared_policy_allows_custom_trust_for_only_the_exact_source_host(self):
         info = plistlib.loads((ROOT / "src-tauri/Info.plist").read_bytes())
         assert_scoped_policy(self, info)
@@ -75,6 +86,30 @@ class MacPolicyTests(unittest.TestCase):
             self.assertEqual(info["CFBundleURLTypes"][0]["CFBundleURLName"], "io.github.iarnvidr.hrungnir.open")
             self.assertEqual(info["LSMinimumSystemVersion"], config["bundle"]["macOS"]["minimumSystemVersion"])
             self.assertTrue((bundle / "Contents/MacOS" / info["CFBundleExecutable"]).is_file())
+
+            shutil.copy2(ROOT / "src-tauri/tauri.test.conf.json", staging / "src-tauri/tauri.test.conf.json")
+            test_binary = staging / "src-tauri/target/aarch64-apple-darwin/debug/offline-reader-desktop"
+            test_binary.parent.mkdir(parents=True)
+            test_binary.write_bytes(struct.pack("<II", 0xFEEDFACF, 0x0100000C))
+            subprocess.run([sys.executable, str(script), "--test"], check=True, capture_output=True, text=True)
+            test_bundle = staging / "artifacts/native-test/Hrungnir Test.app"
+            test_info = plistlib.loads((test_bundle / "Contents/Info.plist").read_bytes())
+            assert_scoped_policy(self, test_info)
+            self.assertEqual(test_info["CFBundleIdentifier"], "io.github.iarnvidr.hrungnir.dev.test")
+            self.assertEqual(test_info["CFBundleDisplayName"], "Hrungnir Test")
+            self.assertEqual(test_info["CFBundleShortVersionString"], config["version"])
+            self.assertTrue(test_info["LSUIElement"])
+            self.assertNotIn("CFBundleURLTypes", test_info)
+            self.assertTrue((test_bundle / "Contents/MacOS" / test_info["CFBundleExecutable"]).is_file())
+            self.assertTrue(bundle.is_dir(), "Test packaging must preserve the normal release bundle")
+            archive_script = staging / "scripts/archive-macos.py"
+            shutil.copy2(ROOT / "scripts/archive-macos.py", archive_script)
+            subprocess.run([sys.executable, str(archive_script), "--test"], check=True, capture_output=True, text=True)
+            archive = staging / f"artifacts/native-test/Hrungnir-Test-{config['version']}-macos-arm64.zip"
+            with zipfile.ZipFile(archive) as zipped:
+                entry = zipped.getinfo("Hrungnir Test.app/Contents/MacOS/offline-reader-desktop")
+                self.assertTrue((entry.external_attr >> 16) & 0o111)
+                self.assertTrue(all(name.startswith("Hrungnir Test.app/") for name in zipped.namelist()))
 
 
 if __name__ == "__main__":

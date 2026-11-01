@@ -5,6 +5,7 @@ Sign the resulting app with rcodesign before archiving. No signing identity need
 for the local ad-hoc signature; this is not Developer ID signing/notarization.
 """
 import pathlib
+import argparse
 import plistlib
 import json
 import shutil
@@ -12,14 +13,24 @@ import struct
 import sys
 
 root = pathlib.Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--test", action="store_true", help="Package the Actions-built isolated native test app")
+args = parser.parse_args()
 config = json.loads((root / "src-tauri/tauri.conf.json").read_text())
-binary = root / "src-tauri/target/aarch64-apple-darwin/release/offline-reader-desktop"
+if args.test:
+    overlay = json.loads((root / "src-tauri/tauri.test.conf.json").read_text())
+    config.update({key: overlay[key] for key in ("productName", "identifier")})
+    if config["identifier"] != "io.github.iarnvidr.hrungnir.dev.test":
+        sys.exit("Native test packaging requires the separate test app identity")
+profile = "debug" if args.test else "release"
+binary = root / f"src-tauri/target/aarch64-apple-darwin/{profile}/offline-reader-desktop"
 magic, cpu = struct.unpack("<II", binary.read_bytes()[:8])
 if (magic, cpu) != (0xFEEDFACF, 0x0100000C):
     sys.exit("Expected a 64-bit Apple Silicon Mach-O executable")
 product_name = config["productName"]
 version = config["version"]
-app = root / "artifacts" / f"{product_name}.app"
+destination = root / "artifacts" / "native-test" if args.test else root / "artifacts"
+app = destination / f"{product_name}.app"
 if app.exists():
     shutil.rmtree(app)
 (app / "Contents/MacOS").mkdir(parents=True)
@@ -45,7 +56,7 @@ with (app / "Contents/Info.plist").open("wb") as out:
         "CFBundleExecutable": "offline-reader-desktop",
         "CFBundleIconFile": "icon.icns",
         "CFBundlePackageType": "APPL",
-        "CFBundleURLTypes": plistlib.loads((root / "src-tauri/Info.plist").read_bytes())["CFBundleURLTypes"],
+        **({"LSUIElement": True} if args.test else {"CFBundleURLTypes": plistlib.loads((root / "src-tauri/Info.plist").read_bytes())["CFBundleURLTypes"]}),
         "CFBundleShortVersionString": version,
         "CFBundleVersion": version,
         "CFBundleSupportedPlatforms": ["MacOSX"],
