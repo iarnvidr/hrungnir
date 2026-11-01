@@ -1860,6 +1860,9 @@ impl Browser {
         .title("Background acquisition")
         .visible(false)
         .focused(false)
+        // This worker must finish source requests and control updates while
+        // hidden; WebKit's default inactive policy can suspend those tasks.
+        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
         .skip_taskbar(true)
         .inner_size(1000.0, 900.0)
         .proxy_url(
