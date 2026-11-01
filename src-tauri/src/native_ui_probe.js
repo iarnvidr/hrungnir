@@ -8,6 +8,10 @@
   const checks = [];
   const continuationFailures = [];
   let stage = 'startup';
+  const probeState = window.__hrungnirUiProbeState = {
+    stage, native_request: null, heartbeat: 0,
+  };
+  const heartbeat = setInterval(() => { probeState.heartbeat++; }, 500);
   const $ = selector => document.querySelector(selector);
   const rows = () => [...document.querySelectorAll('#thread-list .thread-item')];
   const cachedRows = () => [...document.querySelectorAll('#thread-list .cache-search-hit')];
@@ -26,13 +30,13 @@
     }
     throw new Error(`Timed out: ${description}`);
   };
-  // The reader captures its bound invoke function at startup. Observe actual
-  // native receipts instead of replacing or mocking that function.
-  const diagnostics = () => window.__TAURI__.core.invoke('app_diagnostics');
-  const mark = report => Math.max(0, ...(report.operations || []).map(op => op.timestamp_ms || 0));
-  const completed = (report, name, after) => (report.operations || []).some(op =>
-    op.stage === name && op.status === 'complete' && op.timestamp_ms > after);
-  const requests = report => report.proxy?.response_stats?.requests || 0;
+  // Use actual controls and rendered native results. Rust separately observes
+  // source request counters; avoid polling heavyweight diagnostics through IPC.
+  const nativeRead = async (command) => {
+    probeState.native_request = command;
+    try { return await window.__TAURI__.core.invoke(command); }
+    finally { probeState.native_request = null; }
+  };
   const snapshot = () => ({
     heading: $('#current-subreddit')?.textContent,
     query: $('#cache-search-input')?.value, scope: $('#search-scope')?.value,
@@ -57,7 +61,7 @@
     if (button && !button.hidden && !button.disabled) button.click();
     else setInput('#cache-search-input', '');
   };
-  const begin = async name => { stage = name; await emit({ stage, finished: false }); };
+  const begin = async name => { stage = name; probeState.stage = name; await emit({ stage, finished: false }); };
 
   async function search(query, scope) {
     await begin(`search:${scope}`);
@@ -66,11 +70,10 @@
     $('#top-period').value = 'all';
     $('#search-smart').checked = false;
     $('#search-smart').dispatchEvent(new Event('change', { bubbles: true }));
-    const before = mark(await diagnostics());
     setInput('#cache-search-input', query);
     $('#header-search-form').requestSubmit();
-    await wait(async () => completed(await diagnostics(), 'search', before)
-      && !$('#header-search-submit').disabled && rows().length > 0,
+    await wait(() => !$('#header-search-submit').disabled && rows().length > 0
+      && $('#current-subreddit').textContent.includes(query),
     `real ${scope} search results`);
     const firstCount = rows().length;
     const firstRow = rows()[0];
@@ -110,12 +113,11 @@
     await wait(() => window.__TAURI__?.core && $('#browse-submit')
       && !$('#browse-submit').disabled, 'native reader startup');
     await begin('browse:rust');
-    const beforeBrowse = mark(await diagnostics());
     $('#tab-browse').click();
     setInput('#subreddit-input', '/r/rust');
     $('#browse-form').requestSubmit();
-    await wait(async () => completed(await diagnostics(), 'listing', beforeBrowse)
-      && !$('#browse-submit').disabled && rows().length > 0, 'live subreddit UI rows');
+    await wait(() => !$('#browse-submit').disabled && rows().length > 0
+      && $('#current-subreddit').textContent.includes('Posts in r/rust'), 'live subreddit UI rows');
     const firstBrowseCount = rows().length;
     const firstBrowseRow = rows()[0];
     const browseMore = $('#listing-load-more');
@@ -134,7 +136,7 @@
     const title = selected.querySelector('.thread-title')?.textContent || 'borrow checker';
     selected.querySelector('.thread-open').click();
     await wait(async () => {
-      const stored = await window.__TAURI__.core.invoke('snapshot');
+      const stored = await nativeRead('snapshot');
       const post = stored.threads?.find(thread => thread.id === selectedId);
       return post && post.comments_status !== 'not_loaded' && post.comments?.length > 0
         && !$('#reader-panel').hidden && !$('#thread-view').hidden && $('#discussion-comments .comment')
@@ -151,7 +153,6 @@
     clearSearch();
     setScope('cache');
     const localQuery = (title.match(/[A-Za-z0-9]{3,}/g) || ['borrow', 'checker']).slice(0, 4).join(' ');
-    const beforeLocal = await diagnostics();
     setInput('#cache-search-input', localQuery);
     $('#header-search-form').requestSubmit();
     await wait(() => !$('#header-search-submit').disabled && ids().includes(selectedId)
@@ -164,11 +165,7 @@
     await wait(() => !$('#reader-panel').hidden && !$('#thread-view').hidden
       && $('#discussion-comments .comment') && !$('#discussion-comments .cached-listing-note'),
       'native local-only cached reopen');
-    const afterLocal = await diagnostics();
-    assert(requests(afterLocal) === requests(beforeLocal), 'Downloaded search or cached reopen made a Reddit request');
-    assert(!completed(afterLocal, 'search', mark(beforeLocal)), 'Downloaded search started Reddit search');
-    checks.push({ name: 'downloaded-search-and-reopen', post_id: selectedId,
-      reddit_requests: requests(afterLocal) - requests(beforeLocal) });
+    checks.push({ name: 'downloaded-search-and-reopen', post_id: selectedId });
     return { name: 'native-ui', status: continuationFailures.length ? 'failed' : 'ok',
       finished: true, checks, continuation_failures: continuationFailures, state: snapshot() };
   }
@@ -176,5 +173,5 @@
   run().then(result => emit(result)).catch(error => emit({
     status: 'failed', finished: true, stage, error: clean(error), checks,
     continuation_failures: continuationFailures, state: snapshot(),
-  }));
+  })).finally(() => clearInterval(heartbeat));
 })();

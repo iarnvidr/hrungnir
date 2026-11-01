@@ -797,6 +797,11 @@ pub struct Browser {
 }
 
 impl Browser {
+    #[cfg(debug_assertions)]
+    pub fn native_probe_request_count(&self) -> u64 {
+        self.proxy.capture_request_count()
+    }
+
     pub fn new(
         app: AppHandle,
         store: DesktopStore,

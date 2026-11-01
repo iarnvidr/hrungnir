@@ -63,6 +63,42 @@ async (page) => {
   await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'root-owner' && window.__hrungnirCommentPageActivationStatus.status === 'timed_out');
   assert(await page.evaluate(() => window.__commentActivationClicks.length === 0), 'thread-level continuation activated a nested reply button instead of a root partial');
 
+  await reset('<shreddit-comment-tree><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="wrong-post" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_other"></faceplate-partial><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="unrelated-host" src="https://example.invalid/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial><shreddit-comment thingid="t1_nested-owner"><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="comment-owned" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial></shreddit-comment><faceplate-partial data-lazy-id="requested-root" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial></shreddit-comment-tree>');
+  await page.evaluate(() => {
+    window.__commentActivationRootLoads = [];
+    document.querySelectorAll('faceplate-partial[data-lazy-id]').forEach(partial => {
+      partial.load = () => {
+        window.__commentActivationRootLoads.push(partial.dataset.lazyId);
+        partial.dataset.loadResult = 'requested';
+        return Promise.resolve();
+      };
+    });
+  });
+  await start('t3_post', 't3_post', 'root-public-load', 1800);
+  await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'root-public-load' && window.__hrungnirCommentPageActivationStatus.status === 'activated_root_partial');
+  assert(await page.evaluate(() => {
+    const status = window.__hrungnirCommentPageActivationStatus;
+    const partial = document.querySelector('faceplate-partial[data-lazy-id="requested-root"]');
+    return status.diagnostics.activationMode === 'public_load'
+      && status.diagnostics.publicLoadRejected === false
+      && window.__commentActivationRootLoads.join(',') === 'requested-root'
+      && partial.dataset.loadResult === 'requested';
+  }), 'public load activated anything other than the exact validated same-post root partial');
+
+  await reset('<shreddit-comment-tree><faceplate-partial data-lazy-id="rejected-root" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial></shreddit-comment-tree>');
+  await page.evaluate(() => {
+    window.__commentActivationRootLoads = [];
+    const partial = document.querySelector('faceplate-partial[data-lazy-id="rejected-root"]');
+    partial.load = () => {
+      window.__commentActivationRootLoads.push(partial.dataset.lazyId);
+      return Promise.reject(new Error('fixture rejection'));
+    };
+  });
+  await start('t3_post', 't3_post', 'root-public-load-rejected', 1800);
+  await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'root-public-load-rejected' && window.__hrungnirCommentPageActivationStatus.diagnostics.publicLoadRejected === true);
+  assert(await page.evaluate(() => window.__commentActivationRootLoads.join(',') === 'rejected-root'
+    && window.__hrungnirCommentPageActivationStatus.diagnostics.activationMode === 'public_load'), 'rejected public load was not recorded without retrying or exposing an error event');
+
   await reset('<div style="height:900px"></div><shreddit-comment-tree><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="wrong-post" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_other"></faceplate-partial><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="unrelated-host" src="https://example.invalid/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial><shreddit-comment thingid="t1_nested-owner"><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="comment-owned" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial></shreddit-comment><faceplate-partial data-lazy-id="requested-root" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial></shreddit-comment-tree>');
   await page.evaluate(() => {
     window.__commentActivationIntersections = [];
@@ -87,8 +123,10 @@ async (page) => {
   await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'root-partial' && window.__hrungnirCommentPageActivationStatus.status === 'activated_root_partial');
   await page.waitForFunction(() => window.__commentActivationIntersections?.includes('requested-root'));
   assert(await page.evaluate(() => {
+    const status = window.__hrungnirCommentPageActivationStatus;
     const partial = document.querySelector('faceplate-partial[data-lazy-id="requested-root"]');
-    return window.__commentActivationIntersections.join(',') === 'requested-root'
+    return status.diagnostics.activationMode === 'scroll_fallback'
+      && window.__commentActivationIntersections.join(',') === 'requested-root'
       && partial.getBoundingClientRect().top < innerHeight;
   }), 'root activation did not scroll the same-post top-level lazy partial into the real IntersectionObserver viewport');
 
@@ -168,6 +206,7 @@ async (page) => {
     'native UI probe source parses in the browser without running its native journey',
     'delayed reply control activates only its requested parent, not a nested child',
     'thread-level load-more control ignores nested comment buttons',
+    'public load activates exactly one validated same-post root partial',
     'root activation scrolls only the same-post top-level lazy partial into IntersectionObserver view',
     'nested reply activation scrolls its own offscreen parent control into view',
     'disabled, aria-disabled, and aria-busy controls wait for an enabled replacement',

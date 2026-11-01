@@ -142,9 +142,30 @@
                     if (controlKeys.length > 128) {
                         delete window.__hrungnirCommentPageControls[controlKeys[0]];
                     }
+                    const publicLoad = root && typeof target.load === "function";
+                    diagnostics.activationMode = root
+                        ? publicLoad ? "public_load" : "scroll_fallback"
+                        : "reply_button_click";
+                    if (publicLoad) diagnostics.publicLoadRejected = false;
                     publish(root ? "activated_root_partial" : "clicked");
                     if (root) {
-                        target.scrollIntoView({ block: "center", inline: "nearest" });
+                        if (publicLoad) {
+                            try {
+                                const loading = target.load();
+                                if (loading && typeof loading.then === "function") {
+                                    Promise.resolve(loading).catch(() => {
+                                        if (!isCurrent()) return;
+                                        diagnostics.publicLoadRejected = true;
+                                        publish("activated_root_partial");
+                                    });
+                                }
+                            } catch (_) {
+                                diagnostics.publicLoadRejected = true;
+                                publish("activated_root_partial");
+                            }
+                        } else {
+                            target.scrollIntoView({ block: "center", inline: "nearest" });
+                        }
                     } else {
                         target.scrollIntoView({ block: "center", inline: "nearest" });
                         target.click();

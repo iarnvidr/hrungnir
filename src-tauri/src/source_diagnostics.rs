@@ -20,12 +20,15 @@ fn sanitize(value: Value) -> Value {
     if let Some(visibility) = input["pageVisibility"].as_str().filter(|s| ["visible", "hidden", "prerender"].contains(s)) {
         details.insert("pageVisibility".into(), json!(visibility));
     }
+    if let Some(mode) = input["activationMode"].as_str().filter(|s| ["public_load", "scroll_fallback", "reply_button_click"].contains(s)) {
+        details.insert("activationMode".into(), json!(mode));
+    }
     for key in ["rootPartialCount", "matchingRootPartialCount"] {
         if let Some(count) = input[key].as_u64().filter(|n| *n <= 100_000) {
             details.insert(key.into(), json!(count));
         }
     }
-    for key in ["requestedCommentScopeFound", "parentOwnedReplyButtonFound", "previousTargetStillConnected", "previousTargetChanged", "rootPartialDefined", "rootPartialHasLoadMethod"] {
+    for key in ["requestedCommentScopeFound", "parentOwnedReplyButtonFound", "previousTargetStillConnected", "previousTargetChanged", "rootPartialDefined", "rootPartialHasLoadMethod", "publicLoadRejected"] {
         if let Some(flag) = input[key].as_bool() {
             details.insert(key.into(), json!(flag));
         }
@@ -45,8 +48,26 @@ fn sanitize(value: Value) -> Value {
     json!({"available":status.is_some(),"status":status,"diagnostics":details})
 }
 
-#[cfg(target_os = "macos")]
+fn sanitize_ui(value: Value) -> Value {
+    let ready = value["ready_state"].as_str().filter(|s| ["loading", "interactive", "complete"].contains(s));
+    let visibility = value["visibility"].as_str().filter(|s| ["visible", "hidden", "prerender"].contains(s));
+    let request = value["native_request"].as_str().filter(|s| ["app_diagnostics", "snapshot"].contains(s));
+    let heartbeat = value["heartbeat"].as_u64().filter(|n| *n <= 10_000);
+    let rows = value["rows"].as_u64().filter(|n| *n <= 10_000);
+    let comments = value["comments"].as_u64().filter(|n| *n <= 10_000);
+    json!({"available":true,"ready_state":ready,"visibility":visibility,"native_request":request,"heartbeat":heartbeat,"rows":rows,"comments":comments,"search_disabled":value["search_disabled"].as_bool(),"reader_hidden":value["reader_hidden"].as_bool()})
+}
+
 pub async fn capture(app: &tauri::AppHandle, label: &str) -> Value {
+    evaluate(app, label, "JSON.stringify(window.__hrungnirCommentPageActivationStatus || null)", sanitize).await
+}
+
+pub async fn capture_ui(app: &tauri::AppHandle, label: &str) -> Value {
+    evaluate(app, label, r#"JSON.stringify({ready_state:document.readyState,visibility:document.visibilityState,native_request:window.__hrungnirUiProbeState?.native_request,heartbeat:window.__hrungnirUiProbeState?.heartbeat,rows:document.querySelectorAll('#thread-list [data-thread-id]').length,comments:document.querySelectorAll('#discussion-comments .comment').length,search_disabled:document.querySelector('#header-search-submit')?.disabled,reader_hidden:document.querySelector('#reader-panel')?.hidden})"#, sanitize_ui).await
+}
+
+#[cfg(target_os = "macos")]
+async fn evaluate(app: &tauri::AppHandle, label: &str, script_source: &'static str, sanitizer: fn(Value) -> Value) -> Value {
     use block2::RcBlock;
     use objc2::{msg_send, runtime::AnyObject, ClassType};
     use objc2_foundation::NSString;
@@ -76,7 +97,7 @@ pub async fn capture(app: &tauri::AppHandle, label: &str) -> Value {
                             } else {
                                 let string = &*(value.cast::<NSString>());
                                 serde_json::from_str::<Value>(&string.to_string())
-                                    .map(sanitize)
+                                    .map(sanitizer)
                                     .unwrap_or_else(|_| json!({"available":false,"reason":"native_eval_invalid_json"}))
                             }
                         }
@@ -86,7 +107,7 @@ pub async fn capture(app: &tauri::AppHandle, label: &str) -> Value {
                     let _ = sender.send(result);
                 }
             });
-            let script = NSString::from_str("JSON.stringify(window.__hrungnirCommentPageActivationStatus || null)");
+            let script = NSString::from_str(script_source);
             unsafe {
                 let view = native.inner().cast::<AnyObject>();
                 let _: () = msg_send![view, evaluateJavaScript: &*script, completionHandler: &*completion];
@@ -103,7 +124,7 @@ pub async fn capture(app: &tauri::AppHandle, label: &str) -> Value {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub async fn capture(_app: &tauri::AppHandle, _label: &str) -> Value {
+async fn evaluate(_app: &tauri::AppHandle, _label: &str, _script_source: &'static str, _sanitizer: fn(Value) -> Value) -> Value {
     json!({"available":false,"reason":"native_getter_macos_only"})
 }
 
