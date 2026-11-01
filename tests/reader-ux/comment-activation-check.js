@@ -95,7 +95,17 @@ async (page) => {
   await reset('<shreddit-comment thingid="t1_parent"><button disabled data-click-id="disabled">More replies</button><button aria-disabled="true" data-click-id="aria-disabled">More replies</button><div aria-busy="true"><button data-click-id="busy">More replies</button></div></shreddit-comment>');
   await start('t3_post', 't1_parent', 'replacement', 1400);
   await sleepInPage(180);
-  assert(await page.evaluate(() => window.__commentActivationClicks.length === 0 && window.__hrungnirCommentPageActivationStatus.status === 'waiting'), 'disabled, aria-disabled, or busy continuation was activated');
+  const disabledControlsState = await page.evaluate(() => ({
+    clicks: window.__commentActivationClicks,
+    status: window.__hrungnirCommentPageActivationStatus,
+    controls: [...document.querySelectorAll('#comment-activation-fixture button')].map(button => ({
+      id: button.dataset.clickId,
+      disabled: button.disabled,
+      ariaDisabled: button.getAttribute('aria-disabled'),
+      busyAncestor: Boolean(button.closest('[aria-busy="true"]')),
+    })),
+  }));
+  assert(disabledControlsState.clicks.length === 0 && disabledControlsState.status.status === 'waiting_for_reply_button', `disabled, aria-disabled, or busy continuation was activated: ${JSON.stringify(disabledControlsState)}`);
   await addButton('shreddit-comment[thingid="t1_parent"]', 'replacement', 'More replies');
   await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'replacement' && window.__hrungnirCommentPageActivationStatus.status === 'clicked');
   assert(await page.evaluate(() => window.__commentActivationClicks.join(',') === 'replacement'), 'replacement continuation did not activate after disabled controls');
@@ -105,7 +115,7 @@ async (page) => {
   await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'advance-one' && window.__hrungnirCommentPageActivationStatus.status === 'clicked');
   await start('t3_post', 't1_parent', 'same-page');
   await sleepInPage(180);
-  assert(await page.evaluate(() => window.__hrungnirCommentPageActivationStatus?.id === 'same-page' && window.__hrungnirCommentPageActivationStatus.status === 'waiting' && window.__commentActivationClicks.length === 1), 'an unchanged prior control was clicked again without new page evidence');
+  assert(await page.evaluate(() => window.__hrungnirCommentPageActivationStatus?.id === 'same-page' && window.__hrungnirCommentPageActivationStatus.status === 'waiting_for_previous_target_change' && window.__commentActivationClicks.length === 1), 'an unchanged prior control was clicked again without new page evidence');
   await page.evaluate(() => {
     const partial = document.createElement('faceplate-partial');
     partial.setAttribute('src', '/svc/shreddit/more-comments/r/example/post');
