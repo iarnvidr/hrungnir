@@ -74,6 +74,12 @@ pub fn merge_page(thread: &mut Thread, requested_parent: &str, page: Vec<Comment
                 })
                 .ok_or("comment page contains an unresolved parent")?;
         }
+        // The loop stops at the thread itself. For a root-page request that
+        // terminal ancestor is the requested parent, even though it is not an
+        // ordinary comment ID that the loop can visit.
+        if ancestor == requested_parent {
+            descended_from_requested_parent = true;
+        }
         if !descended_from_requested_parent {
             return Err("comment page returned a comment outside the requested branch".into());
         }
@@ -187,8 +193,68 @@ mod tests {
     }
 
     #[test]
+    fn root_page_accepts_inline_descendants_through_thread_ancestor() {
+        let mut thread = thread();
+        let added = merge_page(
+            &mut thread,
+            "t3_abc123",
+            vec![
+                Comment {
+                    id: "t1_rootnew".into(),
+                    parent_id: "t3_abc123".into(),
+                    body: "top-level".into(),
+                    author: None,
+                    author_flair: None,
+                },
+                Comment {
+                    id: "t1_childnew".into(),
+                    parent_id: "t1_rootnew".into(),
+                    body: "inline child".into(),
+                    author: None,
+                    author_flair: None,
+                },
+                Comment {
+                    id: "t1_grandnew".into(),
+                    parent_id: "t1_childnew".into(),
+                    body: "inline grandchild".into(),
+                    author: None,
+                    author_flair: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(added, 3);
+        assert_eq!(
+            thread.comments.iter().map(|comment| comment.id.as_str()).collect::<Vec<_>>(),
+            vec!["t1_parent", "t1_rootnew", "t1_childnew", "t1_grandnew"]
+        );
+        assert_eq!(thread.comments[3].parent_id, "t1_childnew");
+    }
+
+    #[test]
     fn page_merge_rejects_foreign_or_unresolved_branches() {
         let mut thread = thread();
+        let before = thread.comments.clone();
+        let wrong_branch = vec![
+            Comment {
+                id: "t1_otherroot".into(),
+                parent_id: "t3_abc123".into(),
+                body: "unrelated top-level".into(),
+                author: None,
+                author_flair: None,
+            },
+            Comment {
+                id: "t1_otherchild".into(),
+                parent_id: "t1_otherroot".into(),
+                body: "unrelated nested reply".into(),
+                author: None,
+                author_flair: None,
+            },
+        ];
+        assert!(merge_page(&mut thread, "t1_parent", wrong_branch).is_err());
+        assert_eq!(thread.comments, before);
+
         let bad = Comment {
             id: "t1_foreign".into(),
             parent_id: "t3_other".into(),
