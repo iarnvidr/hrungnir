@@ -362,5 +362,45 @@ async (page) => {
   await page.waitForFunction(() => document.querySelector('#search-pagination-status').textContent.includes('End of Reddit search'));
   assert(await page.locator('.thread-item').count() === 25, 'empty terminal continuation removed the current search results');
   assert(await page.evaluate(() => window.__ux.search.searchPageCalls.some(call => call.cursor === 'search-page-1')), 'empty terminal continuation did not consume its cursor');
+
+  await page.evaluate(() => {
+    Object.assign(window.__ux.search, {error:false, enableSearchPaging:true, searchPageError:false, searchPageExpired:true, holdSearchPage:true, searchPageCalls:[]});
+    window.scrollTo(0, 0);
+  });
+  await page.locator('#cache-search-input').fill('expired search proof');
+  await page.locator('#header-search-submit').click();
+  await page.waitForFunction(() => document.querySelectorAll('.thread-item').length === 25 && !document.querySelector('#header-search-submit').disabled);
+  if (!(await page.evaluate(() => window.__ux.search.searchPageCalls.length))) await page.locator('#search-load-more').click();
+  await page.waitForFunction(() => window.__ux.search.searchPageCalls.length === 1 && typeof window.__ux.search.releaseSearchPage === 'function');
+  await page.evaluate(() => window.__ux.search.releaseSearchPage());
+  await page.waitForFunction(() => document.querySelector('#search-pagination-status').textContent.includes('Search cursor expired'));
+  assert(await page.locator('#search-load-more').innerText() === 'Search again', 'expired Reddit search cursor did not offer a fresh search action');
+  await page.locator('#cache-search-input').fill('different search');
+  assert(await page.locator('#search-pagination').isHidden(), 'expired-cursor recovery controls remained visible for a different query');
+  await page.locator('#cache-search-input').fill('expired search proof');
+  assert(await page.locator('#search-load-more').innerText() === 'Search again', 'restoring the original query did not restore its expired-cursor recovery action');
+  const expiredSearchIds = await page.evaluate(() => {
+    const ids = [...document.querySelectorAll('.thread-item')].map(node => node.dataset.threadId);
+    window.__ux.search.expiredSearchIds = ids;
+    return ids;
+  });
+  assert(expiredSearchIds.length === 25, 'expired search cursor removed the current Reddit results');
+
+  await page.evaluate(() => { window.__ux.search.error = true; });
+  await page.locator('#search-load-more').click();
+  await page.waitForFunction(() => !document.querySelector('#header-search-submit').disabled && document.querySelector('#connection-status').textContent === 'Reddit search failed');
+  assert(await page.evaluate(() => JSON.stringify([...document.querySelectorAll('.thread-item')].map(node => node.dataset.threadId)) === JSON.stringify(window.__ux.search.expiredSearchIds)), 'failed fresh search replaced the results from the expired listing');
+  assert(await page.locator('.thread-item').count() === expiredSearchIds.length, 'failed fresh search removed some current results');
+  assert(await page.locator('#cache-search-input').inputValue() === 'expired search proof', 'failed fresh search cleared its query');
+  assert(await page.locator('#search-load-more').innerText() === 'Search again', 'failed fresh search removed the explicit recovery action');
+
+  await page.evaluate(() => { Object.assign(window.__ux.search, {error:false, enableSearchPaging:false, searchPageExpired:false}); window.__ux.search.rows = [...window.__ux.search.rows].reverse(); });
+  await page.locator('#search-load-more').click();
+  await page.waitForFunction(() => document.querySelector('.thread-item')?.dataset.threadId === 't3_fixture27' && !document.querySelector('#header-search-submit').disabled);
+  const freshSearchArgs = await page.evaluate(() => window.__ux.calls.filter(call => call.command === 'search_reddit' && call.args.query === 'expired search proof').map(call => call.args));
+  const restartedArgs = freshSearchArgs.at(-1);
+  assert(freshSearchArgs.length >= 3 && !Object.hasOwn(restartedArgs, 'cursor'), 'Search again reused the expired cursor instead of restarting the same search');
+  assert(restartedArgs.query === 'expired search proof' && restartedArgs.subreddit === null && restartedArgs.sort === 'relevance' && restartedArgs.period === 'all' && restartedArgs.smart === true, 'Search again changed the original query scope or search options');
+  assert(await page.locator('.thread-item').count() === 28, 'fresh search after cursor expiry did not replace results transactionally');
   return {passed:['failed subreddit preserves listing and focus','retry commits requested community','r/all redirect explanation and explicit search action','stale subreddit response cannot replace newer search','stale community completion preserves Library and clears busy state','downloaded search retry and retained focus/query','stale suggestion response cannot cross search scopes','pagination failure preserves posts and retries same cursor','pagination deduplicates and auto loads to exhaustion without scroll jump','continued media hint streams only on explicit play, survives offline save, and falls back locally','repeated continuation cursor stops safely','expired listing cursor offers a fresh transactional listing','Reddit search continuation preserves results, query scope, order, deduplication, retry cursor, scroll, and row identity','Reddit search treats an empty explicitly exhausted page as normal end-of-results','refresh rejects listing-only responses and preserves keyboard focus, comments, and video; refresh updates source total and new replies','More/search Options disclosures close with Escape and outside interaction','720px dark theme at enlarged text','1100px light theme']};
 }

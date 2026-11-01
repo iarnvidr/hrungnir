@@ -42,7 +42,7 @@ async (page) => {
   await page.evaluate(() => { window.__ux.search.commentPageScroll = window.scrollY; });
   assert(preservedWhileLoading.comments === 1 && preservedWhileLoading.body.includes('more replies available'), 'held reply fetch changed existing discussion content');
   assert(preservedWhileLoading.player, 'held reply fetch replaced the current media player');
-  await page.evaluate(() => window.__ux.search.releaseCommentPage());
+  await page.evaluate(() => { window.__ux.search.holdCommentPage = false; window.__ux.search.releaseCommentPage(); });
   await page.waitForFunction(() => document.querySelectorAll('#discussion-comments .comment').length === 3
     && document.querySelector('[data-testid="comment-page-t1_reply"]')
     && document.activeElement?.dataset?.commentId === 't1_parent');
@@ -88,7 +88,7 @@ async (page) => {
   await page.evaluate(() => window.__ux.releasePost('t3_video'));
   await page.waitForFunction(() => document.querySelector('#discussion-comments .comments-header')?.textContent === '5 comments · 1 downloaded'
     && document.querySelector('.partial-comments-note'));
-  assert(await page.locator('.comment[data-comment-id="t1_parent"] button[data-testid="collapse-t1_parent"]').innerText() === 'replies not downloaded', 'cached partial discussion without memory-only handles was presented as having no replies');
+  assert(await page.locator('.comment[data-comment-id="t1_parent"] button[data-testid="collapse-t1_parent"]').count() === 0, 'cached partial discussion without memory-only handles was given a misleading no-replies control');
   assert(await page.locator('.discussion-refresh').count() === 1, 'cached partial discussion without continuation handles did not offer a way to reacquire them');
   return {passed:['reply continuation failure preserves comments, total count, and media','reply retry retains post/parent/cursor, focus, and scroll','nested reply pages append and preserve source total distinction','top-level continuation preserves collapsed branch and only reports complete after all cursors and source total agree','partial cached discussion without volatile cursors remains labeled as incomplete and can refresh']};
 }

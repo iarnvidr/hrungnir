@@ -1333,7 +1333,8 @@
     const loading = Boolean(search.pageLoading);
     ui.searchLoadMore.hidden = search.pageExhausted || Boolean(search.pageStopReason);
     ui.searchLoadMore.setAttribute('aria-disabled', String(loading));
-    ui.searchLoadMore.textContent = search.pageError ? 'Retry search results' : loading ? 'Loading results…' : 'Load more results';
+    const expiredCursor = search.pageError && isExpiredSearchCursorError(search.pageError);
+    ui.searchLoadMore.textContent = search.pageError ? (expiredCursor ? 'Search again' : 'Retry search results') : loading ? 'Loading results…' : 'Load more results';
     ui.searchPaginationStatus.classList.toggle('error', Boolean(search.pageError));
     const loaded = search.threads.length;
     ui.searchPaginationStatus.textContent = search.pageError
@@ -1345,6 +1346,34 @@
       listingSentinelObserver.unobserve(ui.searchSentinel);
       if (canContinue && !loading && !search.pageError && !ui.browsePanel.hidden) listingSentinelObserver.observe(ui.searchSentinel);
     }
+  }
+
+  function isExpiredSearchCursorError(message) {
+    return /search\s+(?:cursor|continuation).{0,50}expired|expired.{0,50}search\s+(?:cursor|continuation)/i.test(String(message || ''));
+  }
+
+  async function restartExpiredSearch(search) {
+    if (!search || search !== redditSearch || !isExpiredSearchCursorError(search.pageError)) return;
+    const scope = $('#search-scope').value;
+    const scopeMatches = search.subreddit === null
+      ? scope === 'all'
+      : scope === 'subreddit' && search.subreddit === activeSubreddit;
+    if (search.query !== ui.cacheSearch.value.trim() || search.sort !== ui.postSort.value || search.period !== ui.topPeriod.value ||
+        search.smart !== $('#search-smart').checked || !scopeMatches || ui.browse.disabled || ui.browsePanel.hidden) return;
+    const hadFocus = document.activeElement === ui.searchLoadMore;
+    const oldSearch = search;
+    await searchReddit(search.query, search.sort, search.period);
+    const current = redditSearch;
+    const currentScopeMatches = current && (current.subreddit === null
+      ? $('#search-scope').value === 'all'
+      : $('#search-scope').value === 'subreddit' && current.subreddit === activeSubreddit);
+    const currentControlsMatch = current && !current.cached && current.query === ui.cacheSearch.value.trim() && currentScopeMatches &&
+      current.sort === ui.postSort.value && current.period === ui.topPeriod.value && current.smart === $('#search-smart').checked;
+    if (hadFocus && document.activeElement === document.body && currentControlsMatch && !ui.browsePanel.hidden) {
+      if (current === oldSearch && !ui.searchLoadMore.hidden) ui.searchLoadMore.focus({ preventScroll: true });
+      else if (current !== oldSearch) focusFirstListing();
+    }
+    return redditSearch !== oldSearch;
   }
 
   async function loadNextRedditSearchPage(search = redditSearch) {
@@ -2036,15 +2065,10 @@
     const actions = element('div', 'comment-actions');
     const children = flat ? [] : (byParent.get(comment.id) || []);
     const pageState = commentPageStates.get(commentPageStateKey(thread.id, comment.id));
-    const unavailableChildren = Boolean(
-      (pageState && pageState.cursor && !pageState.exhausted) ||
-      (!pageState && ['partial_browser', 'partial_proxy'].includes(thread.comments_status) && !completeCommentThreads.has(thread.id))
-    );
-    const collapse = element('button', '', children.length ? `− hide ${children.length} ${children.length === 1 ? 'reply' : 'replies'}` : unavailableChildren ? 'replies not downloaded' : 'no replies');
-    collapse.type = 'button';
-    collapse.dataset.testid = `collapse-${comment.id}`;
-    collapse.disabled = children.length === 0;
     if (children.length) {
+      const collapse = element('button', '', `− hide ${children.length} ${children.length === 1 ? 'reply' : 'replies'}`);
+      collapse.type = 'button';
+      collapse.dataset.testid = `collapse-${comment.id}`;
       const key = `${thread.id}:${comment.id}`;
       const expanded = !collapsedCommentIds.has(key);
       collapse.setAttribute('aria-expanded', String(expanded));
@@ -2058,8 +2082,10 @@
         childList.hidden = isExpanded;
         collapse.textContent = isExpanded ? `+ show ${children.length} ${children.length === 1 ? 'reply' : 'replies'}` : `− hide ${children.length} ${children.length === 1 ? 'reply' : 'replies'}`;
       });
+      actions.append(collapse);
+    } else if ((pageState && pageState.exhausted) || completeCommentThreads.has(thread.id)) {
+      actions.append(element('span', 'small muted', 'No replies'));
     }
-    actions.append(collapse);
     if (!flat) {
       const parentButton = element('button', '', 'parent');
       parentButton.type = 'button';
@@ -4339,7 +4365,11 @@
         }
       }, { root: null, rootMargin: '240px 0px', threshold: 0 });
     }
-    ui.searchLoadMore.addEventListener('click', () => void loadNextRedditSearchPage());
+    ui.searchLoadMore.addEventListener('click', () => {
+      const search = redditSearch;
+      if (search && isExpiredSearchCursorError(search.pageError)) void restartExpiredSearch(search);
+      else void loadNextRedditSearchPage();
+    });
     ui.listingLoadMore.addEventListener('click', () => {
       if (ui.browse.disabled || listingPageInFlight.has(activeSubreddit)) return;
       const state = listingPaginationBySubreddit.get(activeSubreddit);
