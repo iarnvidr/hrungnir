@@ -6,7 +6,7 @@ fn sanitize(value: Value) -> Value {
     let statuses = [
         "waiting", "waiting_for_requested_comment_scope", "waiting_for_root_partial",
         "waiting_for_reply_button", "waiting_for_previous_target_change",
-        "activated_root_partial", "clicked", "timed_out",
+        "activated_root_partial", "activated_nested_partial", "clicked", "timed_out",
     ];
     let status = value["status"].as_str().filter(|s| statuses.contains(s));
     let input = &value["diagnostics"];
@@ -32,12 +32,12 @@ fn sanitize(value: Value) -> Value {
     if let Some(phase) = input["publicLoadFailurePhase"].as_str().filter(|s| ["sync", "async"].contains(s)) {
         details.insert("publicLoadFailurePhase".into(), json!(phase));
     }
-    for key in ["rootPartialCount", "matchingRootPartialCount"] {
+    for key in ["rootPartialCount", "matchingRootPartialCount", "parentOwnedPartialCount", "parentOwnedLoadContentCount"] {
         if let Some(count) = input[key].as_u64().filter(|n| *n <= 100_000) {
             details.insert(key.into(), json!(count));
         }
     }
-    for key in ["requestedCommentScopeFound", "parentOwnedReplyButtonFound", "previousTargetStillConnected", "previousTargetChanged", "rootPartialDefined", "rootPartialHasLoadMethod", "rootPartialHasLoadContent", "publicLoadRejected"] {
+    for key in ["requestedCommentScopeFound", "parentOwnedReplyButtonFound", "previousTargetStillConnected", "previousTargetChanged", "rootPartialDefined", "rootPartialHasLoadMethod", "rootPartialHasLoadContent", "publicLoadRejected", "targetIsLoading", "publicLoadErrorObserved"] {
         if let Some(flag) = input[key].as_bool() {
             details.insert(key.into(), json!(flag));
         }
@@ -163,6 +163,18 @@ mod tests {
         assert_eq!(output["diagnostics"]["publicLoadFailurePhase"], "async");
         assert!(!output.to_string().contains("private"));
         let rejected = sanitize(json!({"status":"activated_root_partial","diagnostics":{"chosenMethod":"https://private.invalid","publicLoadFailureName":"private exception text","publicLoadFailurePhase":"private token"}}));
+        assert_eq!(rejected["diagnostics"], json!({}));
+    }
+
+    #[test]
+    fn nested_loader_diagnostics_keep_only_bounded_counts_and_flags() {
+        let output = sanitize(json!({"status":"activated_nested_partial","diagnostics":{"parentOwnedPartialCount":2,"parentOwnedLoadContentCount":1,"targetIsLoading":false,"publicLoadErrorObserved":true,"cursor":"private","source":"private"}}));
+        assert_eq!(output["available"], true);
+        assert_eq!(output["diagnostics"]["parentOwnedPartialCount"], 2);
+        assert_eq!(output["diagnostics"]["targetIsLoading"], false);
+        assert_eq!(output["diagnostics"]["publicLoadErrorObserved"], true);
+        assert!(!output.to_string().contains("private"));
+        let rejected = sanitize(json!({"status":"activated_nested_partial","diagnostics":{"parentOwnedPartialCount":100001,"parentOwnedLoadContentCount":-1,"targetIsLoading":"private","publicLoadErrorObserved":"private"}}));
         assert_eq!(rejected["diagnostics"], json!({}));
     }
 }

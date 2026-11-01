@@ -69,7 +69,7 @@ async (page) => {
   await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'root-owner' && window.__hrungnirCommentPageActivationStatus.status === 'timed_out');
   assert(await page.evaluate(() => window.__commentActivationClicks.length === 0), 'thread-level continuation activated a nested reply button instead of a root partial');
 
-  await reset('<shreddit-comment-tree><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="wrong-post" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_other"></faceplate-partial><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="unrelated-host" src="https://example.invalid/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial><shreddit-comment thingid="t1_nested-owner"><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="comment-owned" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial></shreddit-comment><faceplate-partial data-lazy-id="requested-root" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial></shreddit-comment-tree>');
+  await reset('<shreddit-comment-tree><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="wrong-post" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_other?top-level=1&amp;comments-remaining=25&amp;commentPositionOffset=0"></faceplate-partial><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="unrelated-host" src="https://example.invalid/svc/shreddit/more-comments/testsub/t3_post?top-level=1&amp;comments-remaining=25&amp;commentPositionOffset=0"></faceplate-partial><shreddit-comment thingid="t1_nested-owner"><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="comment-owned" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post?startingDepth=1&amp;commentParentPositions=4"></faceplate-partial></shreddit-comment><faceplate-partial data-lazy-id="requested-root" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post?top-level=1&amp;comments-remaining=25&amp;commentPositionOffset=0"></faceplate-partial></shreddit-comment-tree>');
   await page.evaluate(() => {
     window.__commentActivationRootLoads = [];
     document.querySelectorAll('faceplate-partial[data-lazy-id]').forEach(partial => {
@@ -98,7 +98,34 @@ async (page) => {
       && partial.dataset.loadResult === 'requested';
   }), 'public load activated anything other than the exact validated same-post root partial');
 
-  await reset('<shreddit-comment-tree><faceplate-partial data-lazy-id="rejected-root" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial></shreddit-comment-tree>');
+  await reset('<shreddit-comment-tree><faceplate-partial data-lazy-id="old-root" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post?top-level=1&amp;comments-remaining=25&amp;commentPositionOffset=0"></faceplate-partial></shreddit-comment-tree>');
+  await page.evaluate(() => {
+    window.__commentActivationRootLoads = [];
+    const old = document.querySelector('faceplate-partial[data-lazy-id="old-root"]');
+    old.loadContent = () => {
+      window.__commentActivationRootLoads.push('old');
+      return Promise.resolve();
+    };
+  });
+  await start('t3_post', 't3_post', 'old-root-first', 1200);
+  await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'old-root-first'
+    && window.__hrungnirCommentPageActivationStatus.status === 'activated_root_partial');
+  await page.evaluate(() => {
+    const next = document.createElement('faceplate-partial');
+    next.dataset.lazyId = 'new-root';
+    next.setAttribute('src', 'https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post?top-level=1&rootCommentOffset=25&commentPositionOffset=0');
+    next.loadContent = () => {
+      window.__commentActivationRootLoads.push('new');
+      return Promise.resolve();
+    };
+    document.querySelector('shreddit-comment-tree').append(next);
+  });
+  await start('t3_post', 't3_post', 'new-root-second', 1200);
+  await page.waitForFunction(() => window.__commentActivationRootLoads.join(',') === 'old,new');
+  assert(await page.evaluate(() => window.__hrungnirCommentPageActivationStatus?.id === 'new-root-second'
+    && window.__hrungnirCommentPageActivationStatus.status === 'activated_root_partial'), 'a fresh same-post root continuation was hidden behind an unchanged old partial');
+
+  await reset('<shreddit-comment-tree><faceplate-partial data-lazy-id="rejected-root" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post?top-level=1&amp;comments-remaining=25&amp;commentPositionOffset=0"></faceplate-partial></shreddit-comment-tree>');
   await page.evaluate(() => {
     window.__commentActivationRootLoads = [];
     const partial = document.querySelector('faceplate-partial[data-lazy-id="rejected-root"]');
@@ -119,7 +146,54 @@ async (page) => {
     && window.__hrungnirCommentPageActivationStatus.diagnostics.publicLoadFailureName === 'Error'
     && window.__hrungnirCommentPageActivationStatus.diagnostics.publicLoadFailurePhase === 'async'), 'rejected public loadContent was not recorded without retrying or exposing an error event');
 
-  await reset('<div style="height:900px"></div><shreddit-comment-tree><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="wrong-post" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_other"></faceplate-partial><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="unrelated-host" src="https://example.invalid/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial><shreddit-comment thingid="t1_nested-owner"><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="comment-owned" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial></shreddit-comment><faceplate-partial data-lazy-id="requested-root" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post"></faceplate-partial></shreddit-comment-tree>');
+  await reset('<shreddit-comment-tree><faceplate-partial data-lazy-id="alert-root" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post?top-level=1&amp;comments-remaining=25&amp;commentPositionOffset=0"></faceplate-partial></shreddit-comment-tree>');
+  await page.evaluate(() => {
+    window.__commentActivationRootLoads = [];
+    const partial = document.querySelector('faceplate-partial[data-lazy-id="alert-root"]');
+    partial.loadContent = () => {
+      window.__commentActivationRootLoads.push('alert-root');
+      if (window.__commentActivationRootLoads.length === 1) {
+        partial.dispatchEvent(new CustomEvent('faceplate-alert', {
+          detail: {cause: 'partial-request-network-error-503'},
+        }));
+      }
+      return Promise.resolve();
+    };
+  });
+  await start('t3_post', 't3_post', 'alert-first', 1000);
+  await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'alert-first'
+    && window.__hrungnirCommentPageActivationStatus.diagnostics.publicLoadErrorObserved === true);
+  await start('t3_post', 't3_post', 'alert-retry', 1000);
+  await page.waitForFunction(() => window.__commentActivationRootLoads.length === 2);
+  assert(await page.evaluate(() => window.__commentActivationRootLoads.length === 2
+    && window.__hrungnirCommentPageActivationStatus?.id === 'alert-retry'
+    && window.__hrungnirCommentPageActivationStatus.status === 'activated_root_partial'), 'a target-owned fixed partial network alert did not permit one explicit retry');
+
+  await reset('<shreddit-comment-tree><faceplate-partial data-lazy-id="descendant-alert-root" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post?top-level=1&amp;comments-remaining=25&amp;commentPositionOffset=0"><span data-error-child></span></faceplate-partial></shreddit-comment-tree>');
+  await page.evaluate(() => {
+    window.__commentActivationRootLoads = [];
+    const partial = document.querySelector('faceplate-partial[data-lazy-id="descendant-alert-root"]');
+    const child = partial.querySelector('[data-error-child]');
+    partial.loadContent = () => {
+      window.__commentActivationRootLoads.push('descendant-alert-root');
+      child.dispatchEvent(new CustomEvent('faceplate-alert', {
+        bubbles: true,
+        detail: {cause: 'partial-request-network-error-503'},
+      }));
+      return Promise.resolve();
+    };
+  });
+  await start('t3_post', 't3_post', 'descendant-alert-first', 1000);
+  await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'descendant-alert-first'
+    && window.__hrungnirCommentPageActivationStatus.status === 'activated_root_partial');
+  await start('t3_post', 't3_post', 'descendant-alert-retry', 700);
+  await sleepInPage(180);
+  assert(await page.evaluate(() => window.__commentActivationRootLoads.length === 1
+    && window.__hrungnirCommentPageActivationStatus?.id === 'descendant-alert-retry'
+    && window.__hrungnirCommentPageActivationStatus.status === 'waiting_for_previous_target_change'
+    && window.__hrungnirCommentPageActivationStatus.diagnostics.publicLoadErrorObserved === false), 'a bubbled descendant alert incorrectly unlocked a stale parent retry');
+
+  await reset('<div style="height:900px"></div><shreddit-comment-tree><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="wrong-post" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_other?top-level=1&amp;comments-remaining=25&amp;commentPositionOffset=0"></faceplate-partial><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="unrelated-host" src="https://example.invalid/svc/shreddit/more-comments/testsub/t3_post?top-level=1&amp;comments-remaining=25&amp;commentPositionOffset=0"></faceplate-partial><shreddit-comment thingid="t1_nested-owner"><faceplate-partial style="position:absolute;left:-2000px" data-lazy-id="comment-owned" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post?startingDepth=1&amp;commentParentPositions=4"></faceplate-partial></shreddit-comment><faceplate-partial data-lazy-id="requested-root" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post?top-level=1&amp;comments-remaining=25&amp;commentPositionOffset=0"></faceplate-partial></shreddit-comment-tree>');
   await page.evaluate(() => {
     window.__commentActivationIntersections = [];
     document.querySelectorAll('faceplate-partial[data-lazy-id]').forEach(partial => {
@@ -158,6 +232,69 @@ async (page) => {
   assert(await page.evaluate(() => window.__commentActivationClicks.join(',') === 'offscreen-reply'
     && document.querySelector('shreddit-comment[thingid="t1_parent"] button').getBoundingClientRect().top < innerHeight), 'nested activation did not scroll the requested offscreen reply control into view exactly once');
 
+  await reset('<shreddit-comment thingid="t1_parent"><faceplate-partial data-lazy-id="wrong-query" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post?unknown=1"></faceplate-partial><shreddit-comment thingid="t1_child"><faceplate-partial data-lazy-id="descendant" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post?startingDepth=2&amp;commentParentPositions=4,0"></faceplate-partial></shreddit-comment><faceplate-partial data-lazy-id="requested-nested" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post?startingDepth=1&amp;commentParentPositions=5"></faceplate-partial></shreddit-comment>');
+  await page.evaluate(() => {
+    window.__commentActivationPartialLoads = [];
+    document.querySelectorAll('faceplate-partial[data-lazy-id]').forEach(partial => {
+      partial.loadContent = () => {
+        window.__commentActivationPartialLoads.push(partial.dataset.lazyId);
+        return Promise.resolve();
+      };
+    });
+  });
+  await start('t3_post', 't1_parent', 'nested-public-load', 1800);
+  await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'nested-public-load' && window.__hrungnirCommentPageActivationStatus.status === 'activated_nested_partial');
+  assert(await page.evaluate(() => {
+    const status = window.__hrungnirCommentPageActivationStatus;
+    return status.diagnostics.activationMode === 'public_load_content'
+      && status.diagnostics.parentOwnedPartialCount === 1
+      && status.diagnostics.parentOwnedLoadContentCount === 1
+      && window.__commentActivationPartialLoads.join(',') === 'requested-nested';
+  }), 'nested request did not activate exactly its own validated public partial');
+
+  await reset('<shreddit-comment-tree><faceplate-partial data-load-id="busy-root" src="https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post?top-level=1&amp;comments-remaining=25&amp;commentPositionOffset=0"><span>initial placeholder</span></faceplate-partial></shreddit-comment-tree>');
+  await page.evaluate(() => {
+    window.__commentActivationRootLoads = [];
+    const current = document.querySelector('faceplate-partial[data-load-id="busy-root"]');
+    current.isLoading = false;
+    current.loadContent = () => {
+      window.__commentActivationRootLoads.push('first');
+      current.isLoading = true;
+      current.innerHTML = '<span>response placeholder</span>';
+      const unrelated = document.createElement('shreddit-comment');
+      unrelated.setAttribute('thingid', 't1_unrelated');
+      document.querySelector('shreddit-comment-tree').append(unrelated);
+      return new Promise(resolve => {
+        window.__commitCommentFragment = () => {
+          const next = document.createElement('faceplate-partial');
+          next.dataset.loadId = 'next-root';
+          next.setAttribute('src', 'https://www.reddit.com/svc/shreddit/more-comments/testsub/t3_post?top-level=1&rootCommentOffset=25&commentPositionOffset=0');
+          next.loadContent = () => {
+            window.__commentActivationRootLoads.push('next');
+            return Promise.resolve();
+          };
+          current.replaceWith(next);
+          resolve();
+        };
+      });
+    };
+  });
+  await start('t3_post', 't3_post', 'partial-body-first', 1800);
+  await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'partial-body-first' && window.__hrungnirCommentPageActivationStatus.status === 'activated_root_partial');
+  await start('t3_post', 't3_post', 'partial-body-second', 1800);
+  await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'partial-body-second'
+    && window.__hrungnirCommentPageActivationStatus.diagnostics.targetIsLoading === true);
+  // Release headers separately from the body/render commit, as the source does.
+  await page.evaluate(() => { document.querySelector('faceplate-partial[data-load-id="busy-root"]').isLoading = false; });
+  await sleepInPage(140);
+  assert(await page.evaluate(() => window.__commentActivationRootLoads.join(',') === 'first'
+    && window.__hrungnirCommentPageActivationStatus?.id === 'partial-body-second'
+    && window.__hrungnirCommentPageActivationStatus.status === 'waiting_for_previous_target_change'), 'same source control was called again while only loading/placeholder/unrelated DOM state changed');
+  await page.evaluate(() => window.__commitCommentFragment());
+  await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'partial-body-second'
+    && window.__hrungnirCommentPageActivationStatus.status === 'activated_root_partial'
+    && window.__commentActivationRootLoads.join(',') === 'first,next');
+
   await reset('<shreddit-comment thingid="t1_parent"><button disabled data-click-id="disabled">More replies</button><button aria-disabled="true" data-click-id="aria-disabled">More replies</button><div aria-busy="true"><button data-click-id="busy">More replies</button></div></shreddit-comment>');
   await start('t3_post', 't1_parent', 'replacement', 1400);
   await sleepInPage(180);
@@ -183,9 +320,9 @@ async (page) => {
   await sleepInPage(180);
   assert(await page.evaluate(() => window.__hrungnirCommentPageActivationStatus?.id === 'same-page' && window.__hrungnirCommentPageActivationStatus.status === 'waiting_for_previous_target_change' && window.__commentActivationClicks.length === 1), 'an unchanged prior control was clicked again without new page evidence');
   await page.evaluate(() => {
-    const partial = document.createElement('faceplate-partial');
-    partial.setAttribute('src', '/svc/shreddit/more-comments/r/example/post');
-    document.querySelector('shreddit-comment[thingid="t1_parent"]').append(partial);
+    const button = document.querySelector('shreddit-comment[thingid="t1_parent"] button');
+    button.textContent = 'More replies, next page';
+    button.setAttribute('aria-label', 'More replies, next page');
   });
   await page.waitForFunction(() => window.__hrungnirCommentPageActivationStatus?.id === 'same-page' && window.__hrungnirCommentPageActivationStatus.status === 'clicked');
   assert(await page.evaluate(() => window.__commentActivationClicks.length === 2), 'a changed continuation signature did not activate the next page');
@@ -228,6 +365,11 @@ async (page) => {
     'singular reply control activates only its requested parent, not a nested child',
     'thread-level load-more control ignores nested comment buttons',
     'public load activates exactly one validated same-post root partial',
+    'fresh same-post root source wins over a retained old partial',
+    'nested requests activate a validated partial owned by the exact parent and ignore invalid or descendant partials',
+    'partial activation waits for source identity to change after isLoading clears and placeholder DOM changes',
+    'target-owned fixed partial network alerts permit an explicit retry without exposing alert details',
+    'bubbled descendant partial alerts cannot unlock a stale parent retry',
     'root activation scrolls only the same-post top-level lazy partial into IntersectionObserver view',
     'nested reply activation scrolls its own offscreen parent control into view',
     'disabled, aria-disabled, and aria-busy controls wait for an enabled replacement',
