@@ -90,6 +90,7 @@ pub async fn run(app: &AppHandle) -> Value {
     app.unlisten(handler);
     let mut result = result;
     if result["status"] != "ok" {
+        let _ = window.eval("window.__hrungnirUiProbeCancel?.();");
         result["native_state"] = crate::source_diagnostics::capture_ui(app, "main").await;
     }
     result["app_identifier"] = json!(app.config().identifier);

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const WORKER: &str = "reddit-live";
+const SEARCH_DOCUMENT_LIMIT: usize = 2;
 
 fn normalize_listing_scope(input: &str) -> Result<String, String> {
     let url = tauri::Url::parse(input).map_err(|_| "Invalid listing scope")?;
@@ -281,6 +282,133 @@ struct Progress {
     page_scope: String,
     requested_cursor: Option<String>,
     more_url: Option<String>,
+    worker_label: String,
+    document_ready: bool,
+}
+
+#[derive(Clone)]
+struct SearchDocument {
+    label: String,
+    created_at: Instant,
+    last_used: Instant,
+    ready: bool,
+}
+
+fn register_search_document(
+    documents: &mut BTreeMap<String, SearchDocument>,
+    scope: &str,
+    label: String,
+    now: Instant,
+) -> Vec<String> {
+    let mut evicted = Vec::new();
+    let expired: Vec<_> = documents
+        .iter()
+        .filter(|(_, document)| now.duration_since(document.last_used) > SEARCH_CURSOR_TTL)
+        .map(|(scope, _)| scope.clone())
+        .collect();
+    for scope in expired {
+        if let Some(document) = documents.remove(&scope) {
+            evicted.push(document.label);
+        }
+    }
+    if let Some(previous) = documents.remove(scope) {
+        evicted.push(previous.label);
+    }
+    while documents.len() >= SEARCH_DOCUMENT_LIMIT {
+        let oldest = documents
+            .iter()
+            .min_by_key(|(_, document)| document.last_used)
+            .map(|(scope, _)| scope.clone());
+        if let Some(oldest) = oldest {
+            if let Some(document) = documents.remove(&oldest) {
+                evicted.push(document.label);
+            }
+        } else {
+            break;
+        }
+    }
+    documents.insert(
+        scope.to_owned(),
+        SearchDocument {
+            label,
+            created_at: now,
+            last_used: now,
+            ready: false,
+        },
+    );
+    evicted
+}
+
+fn search_document_for_cursor(
+    documents: &mut BTreeMap<String, SearchDocument>,
+    scope: &str,
+    now: Instant,
+) -> Result<String, String> {
+    let Some(document) = documents.get_mut(scope) else {
+        return Err("Search cursor expired; start the search again".into());
+    };
+    if now.duration_since(document.created_at) > SEARCH_CURSOR_TTL {
+        return Err("Search cursor expired; start the search again".into());
+    }
+    if !document.ready {
+        return Err("Search is still opening; retry this page".into());
+    }
+    document.last_used = now;
+    Ok(document.label.clone())
+}
+
+fn rekey_search_document(
+    documents: &mut BTreeMap<String, SearchDocument>,
+    old_scope: &str,
+    new_scope: &str,
+) -> Result<(), ()> {
+    if old_scope == new_scope {
+        return Ok(());
+    }
+    if documents.contains_key(new_scope) {
+        return Err(());
+    }
+    if let Some(document) = documents.remove(old_scope) {
+        documents.insert(new_scope.to_owned(), document);
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+fn remove_search_document_label(documents: &mut BTreeMap<String, SearchDocument>, label: &str) {
+    documents.retain(|_, document| document.label != label);
+}
+
+fn canonical_search_scope(input: &str) -> Result<String, String> {
+    let mut url = tauri::Url::parse(input).map_err(|_| "Invalid search URL")?;
+    if !reddit_url(url.as_str()) || !reddit_offline::browsing::search_path(url.path()) {
+        return Err("Invalid search URL".into());
+    }
+    let mut pairs: Vec<_> = url
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    pairs.sort();
+    url.set_query(None);
+    url.query_pairs_mut().extend_pairs(pairs);
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+
+fn search_document_label(scope: &str) -> String {
+    let digest = Sha256::digest(scope.as_bytes());
+    format!(
+        "reddit-search-{}",
+        digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn consume_search_cursor(cursors: &mut BTreeMap<String, SearchCursor>, token: &str) {
+    cursors.remove(token);
 }
 
 #[derive(Clone)]
@@ -565,6 +693,60 @@ mod search_cursor_tests {
     use super::*;
 
     #[test]
+    fn search_documents_retain_primary_and_smart_scope_until_bounded_lru_eviction() {
+        let now = Instant::now();
+        let mut documents = BTreeMap::new();
+        assert!(register_search_document(&mut documents, "primary", "search-primary".into(), now).is_empty());
+        documents.get_mut("primary").unwrap().ready = true;
+        assert!(register_search_document(&mut documents, "smart", "search-smart".into(), now + Duration::from_secs(1)).is_empty());
+        documents.get_mut("smart").unwrap().ready = true;
+        assert_eq!(search_document_for_cursor(&mut documents, "primary", now + Duration::from_secs(2)).unwrap(), "search-primary");
+        assert_eq!(search_document_for_cursor(&mut documents, "smart", now + Duration::from_secs(3)).unwrap(), "search-smart");
+        for page in 1..=4 {
+            assert_eq!(
+                search_document_for_cursor(&mut documents, "primary", now + Duration::from_secs(3 + page)).unwrap(),
+                "search-primary",
+            );
+        }
+        assert_eq!(documents.len(), 2, "continuation lookup must reuse, not recreate, the two source documents");
+
+        let evicted = register_search_document(&mut documents, "third", "search-third".into(), now + Duration::from_secs(8));
+        assert_eq!(evicted, ["search-smart"]);
+        assert_eq!(documents.len(), 2);
+        assert!(search_document_for_cursor(&mut documents, "smart", now + Duration::from_secs(9))
+            .unwrap_err().contains("Search cursor expired"));
+        assert_eq!(search_document_for_cursor(&mut documents, "primary", now + Duration::from_secs(9)).unwrap(), "search-primary");
+    }
+
+    #[test]
+    fn search_documents_expire_and_canonicalize_query_key_order() {
+        let mut documents = BTreeMap::new();
+        let now = Instant::now();
+        register_search_document(&mut documents, "scope", "search-scope".into(), now);
+        assert!(search_document_for_cursor(&mut documents, "scope", now + SEARCH_CURSOR_TTL + Duration::from_secs(1))
+            .unwrap_err().contains("Search cursor expired"));
+        assert_eq!(
+            canonical_search_scope("https://www.reddit.com/search/?sort=relevance&q=rust&t=all").unwrap(),
+            canonical_search_scope("https://www.reddit.com/search/?t=all&q=rust&sort=relevance").unwrap(),
+        );
+        assert!(canonical_search_scope("https://example.org/search/?q=rust").is_err());
+    }
+
+    #[test]
+    fn redirected_search_scope_collision_never_uses_another_documents_label() {
+        let now = Instant::now();
+        let mut documents = BTreeMap::new();
+        register_search_document(&mut documents, "source-a", "label-a".into(), now);
+        register_search_document(&mut documents, "source-b", "label-b".into(), now);
+        assert!(rekey_search_document(&mut documents, "source-a", "source-b").is_err());
+        assert_eq!(documents.get("source-a").unwrap().label, "label-a");
+        assert_eq!(documents.get("source-b").unwrap().label, "label-b");
+        remove_search_document_label(&mut documents, "label-a");
+        assert!(!documents.contains_key("source-a"));
+        assert_eq!(documents.get("source-b").unwrap().label, "label-b");
+    }
+
+    #[test]
     fn search_cursor_scope_binds_query_community_sort_period_and_smart() {
         let key = |query: &str, subreddit: Option<&str>, sort: &str, period: &str, smart: bool| {
             format!(
@@ -719,6 +901,9 @@ mod search_cursor_tests {
         assert_eq!(retry.continuations.front().unwrap().url, continuation.url);
         assert!(retry.visited_urls.is_empty());
         assert_eq!(retry.pending_ids.front().map(String::as_str), Some("t3_cached"));
+        let mut committed = registered;
+        consume_search_cursor(&mut committed, token);
+        assert!(!committed.contains_key(token));
     }
 
     #[test]
@@ -789,6 +974,7 @@ pub struct Browser {
     ready: tokio::sync::Notify,
     listing_cursors: Mutex<BTreeMap<String, ListingCursor>>,
     search_cursors: Mutex<BTreeMap<String, SearchCursor>>,
+    search_documents: Mutex<BTreeMap<String, SearchDocument>>,
     comment_cursors: Mutex<BTreeMap<String, CommentCursor>>,
     comment_session: Mutex<Option<CommentSession>>,
     next_comment_session: AtomicU64,
@@ -831,6 +1017,8 @@ impl Browser {
                 page_scope: String::new(),
                 requested_cursor: None,
                 more_url: None,
+                worker_label: WORKER.to_owned(),
+                document_ready: false,
             }),
             gate: tokio::sync::Mutex::new(()),
             trust_gate: tokio::sync::Mutex::new(()),
@@ -842,6 +1030,7 @@ impl Browser {
             ready: tokio::sync::Notify::new(),
             listing_cursors: Mutex::new(BTreeMap::new()),
             search_cursors: Mutex::new(BTreeMap::new()),
+            search_documents: Mutex::new(BTreeMap::new()),
             comment_cursors: Mutex::new(BTreeMap::new()),
             comment_session: Mutex::new(None),
             next_comment_session: AtomicU64::new(1),
@@ -1102,6 +1291,36 @@ impl Browser {
                         } else {
                             None
                         };
+                        if let (Some(active_scope), Some(response_url)) =
+                            (active_search_scope.as_deref(), response_url.as_ref())
+                        {
+                            let (active_generation, requested) = {
+                                let progress = browser.progress.lock().unwrap_or_else(|error| error.into_inner());
+                                (progress.generation, progress.requested_cursor.clone())
+                            };
+                            let active = tauri::Url::parse(active_scope).ok();
+                            let same_source = if search_partial {
+                                active.as_ref().is_some_and(|active| {
+                                    reddit_offline::browsing::search_partial_matches(active, response_url)
+                                }) && search_response_matches_requested_cursor(
+                                    requested.as_deref(),
+                                    response_url.as_str(),
+                                )
+                            } else {
+                                canonical_search_scope(response_url.as_str()).ok()
+                                    == canonical_search_scope(active_scope).ok()
+                            };
+                            if generation != active_generation || !same_source {
+                                browser.record_detail(
+                                    "search_continuation",
+                                    "ignored",
+                                    0,
+                                    None,
+                                    serde_json::json!({"reason": if generation != active_generation {"inactive_generation"} else {"inactive_search_scope"}}),
+                                );
+                                return;
+                            }
+                        }
                         if cfg!(debug_assertions)
                             && std::env::var_os("HRUNGNIR_NATIVE_COMMENT_PROBE").is_some()
                             && response.url.parse::<tauri::Url>().is_ok_and(|url| {
@@ -1173,12 +1392,20 @@ impl Browser {
                             }
                         }
                         if search_partial {
-                            let requested = browser
-                                .progress
-                                .lock()
-                                .unwrap_or_else(|error| error.into_inner())
-                                .requested_cursor
-                                .clone();
+                            let (requested, already_captured) = {
+                                let progress = browser.progress.lock().unwrap_or_else(|error| error.into_inner());
+                                (progress.requested_cursor.clone(), progress.requested_fragment_captured)
+                            };
+                            if requested.is_some() && already_captured {
+                                browser.record_detail(
+                                    "search_continuation",
+                                    "ignored",
+                                    0,
+                                    None,
+                                    serde_json::json!({"reason":"requested_fragment_already_captured"}),
+                                );
+                                return;
+                            }
                             if !search_response_matches_requested_cursor(
                                 requested.as_deref(),
                                 response.url.as_str(),
@@ -1386,9 +1613,9 @@ impl Browser {
         Ok(count)
     }
 
-    fn close(&self) -> Result<tokio::sync::oneshot::Receiver<Result<(), String>>, String> {
+    fn close(&self, worker_label: &str) -> Result<tokio::sync::oneshot::Receiver<Result<(), String>>, String> {
         let (done, finished) = tokio::sync::oneshot::channel();
-        if let Some(view) = self.app.get_webview_window(WORKER) {
+        if let Some(view) = self.app.get_webview_window(worker_label) {
             let destination = view.clone();
             view.with_webview(move |native| {
                 #[cfg(target_os = "linux")]
@@ -1410,7 +1637,7 @@ impl Browser {
         Ok(finished)
     }
 
-    fn start(self: &Arc<Self>, url: String, requested_cursor: Option<String>) -> Result<(), String> {
+    fn start(self: &Arc<Self>, url: String, requested_cursor: Option<String>, worker_label: String) -> Result<(), String> {
         let generation = self.proxy.begin_acquisition();
         self.proxy.set_online(true);
         let post_id = post_id_from_permalink(&url);
@@ -1458,11 +1685,14 @@ impl Browser {
             page_scope: url.clone(),
             requested_cursor,
             more_url: None,
+            worker_label: worker_label.clone(),
+            document_ready: false,
         };
+        let loaded = self.clone();
         let navigation = self.clone();
         let builder = WebviewWindowBuilder::new(
             &self.app,
-            WORKER,
+            worker_label.clone(),
             // Set the public layout preference before the first Reddit request.
             WebviewUrl::External("about:blank".parse().unwrap()),
         )
@@ -1479,8 +1709,26 @@ impl Browser {
         .initialization_script(
             "HTMLMediaElement.prototype.play=function(){this.pause();return Promise.resolve()};",
         )
-        .on_page_load(|_view, payload| {
+        .on_page_load(move |_view, payload| {
             reddit_offline::diagnostics::event("source.page_load",serde_json::json!({"state":format!("{:?}",payload.event()),"host":payload.url().host_str().unwrap_or("blank")}));
+            let finished_search = format!("{:?}", payload.event()) == "Finished"
+                && payload.url().host_str() == Some("www.reddit.com")
+                && reddit_offline::browsing::search_path(payload.url().path());
+            if finished_search {
+                let mut progress = loaded.progress.lock().unwrap_or_else(|error| error.into_inner());
+                if progress.generation == generation && progress.worker_label == worker_label {
+                    progress.document_ready = true;
+                    if let Ok(scope) = canonical_search_scope(&progress.page_scope) {
+                        if let Some(document) = loaded.search_documents.lock().unwrap_or_else(|error| error.into_inner()).get_mut(&scope) {
+                            if document.label == worker_label {
+                                document.ready = true;
+                                document.last_used = Instant::now();
+                            }
+                        }
+                    }
+                    loaded.ready.notify_one();
+                }
+            }
             eprintln!(
                 "source load: {:?}, host={}",
                 payload.event(),
@@ -1520,6 +1768,23 @@ impl Browser {
                     actual = clean;
                 }
                 actual.set_fragment(None);
+                if reddit_offline::browsing::search_path(actual.path()) {
+                    progress.page_scope = actual.to_string();
+                    if let (Ok(old_scope), Ok(new_scope)) = (
+                        canonical_search_scope(&progress.url),
+                        canonical_search_scope(actual.as_str()),
+                    ) {
+                        if old_scope != new_scope {
+                            let mut documents = navigation.search_documents.lock().unwrap_or_else(|error| error.into_inner());
+                            if rekey_search_document(&mut documents, &old_scope, &new_scope).is_err() {
+                                progress.error = Some("Search redirected to an already-open query; restart this search".into());
+                                progress.rejected_path = Some(actual.path().to_owned());
+                                navigation.ready.notify_one();
+                                return false;
+                            }
+                        }
+                    }
+                }
                 progress.url = actual.to_string();
             }
             allowed
@@ -1689,6 +1954,18 @@ impl Browser {
         }
     }
 
+    fn retire_search_capture(&self, generation: u64) {
+        self.proxy.set_online(false);
+        let mut progress = self.progress.lock().unwrap_or_else(|error| error.into_inner());
+        if progress.generation == generation {
+            // The page stays alive, but this capture epoch is over. A queued
+            // duplicate must not mutate the already returned search page.
+            progress.url.clear();
+            progress.requested_cursor = None;
+            progress.more_until = None;
+        }
+    }
+
     /// The page's own script requests a listing's remaining posts when it
     /// scrolls into view, which a hidden window may never do. Ask for them
     /// from inside the page so the request, cookies and capture are the same.
@@ -1700,16 +1977,17 @@ impl Browser {
         {
             return;
         }
-        {
+        let worker_label = {
             let progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
             if progress.generation != generation || progress.url.is_empty() {
                 return;
             }
-        }
+            progress.worker_label.clone()
+        };
         let Ok(target) = serde_json::to_string(path_and_query) else {
             return;
         };
-        if let Some(view) = self.app.get_webview_window(WORKER) {
+        if let Some(view) = self.app.get_webview_window(&worker_label) {
             let script = format!(
                 "fetch({target},{{credentials:'include'}}).then(r=>r.text()).catch(()=>{{}});"
             );
@@ -1717,6 +1995,131 @@ impl Browser {
                 eprintln!("listing continuation request failed: {error}");
             }
         }
+    }
+
+    async fn fetch_search_fragment(
+        self: &Arc<Self>,
+        scope: &str,
+        continuation: &SearchContinuation,
+    ) -> Result<(Vec<String>, Option<String>), String> {
+        let search_scope = canonical_search_scope(&continuation.search_url)?;
+        let expected_scope = canonical_search_scope(scope)?;
+        if search_scope != expected_scope {
+            return Err("Search cursor does not match this query and options".into());
+        }
+        let search = tauri::Url::parse(&search_scope).map_err(|_| "Invalid search scope")?;
+        let target = tauri::Url::parse(&format!("https://www.reddit.com{}", continuation.url))
+            .map_err(|_| "Invalid search continuation")?;
+        if !reddit_offline::browsing::search_partial_matches(&search, &target) {
+            return Err("Search cursor failed query/scope validation".into());
+        }
+        let request_path = match target.query() {
+            Some(query) => format!("{}?{query}", target.path()),
+            None => target.path().to_owned(),
+        };
+        // search_reddit_page_operation owns the shared acquisition gate for the
+        // whole user-visible search, including each retained-document request.
+        // This helper must not attempt to lock that non-reentrant gate again.
+        let label_result = search_document_for_cursor(
+            &mut self.search_documents.lock().unwrap_or_else(|error| error.into_inner()),
+            &search_scope,
+            Instant::now(),
+        );
+        let label = match label_result {
+            Ok(label) => label,
+            Err(error) => {
+                let expired = error.starts_with("Search cursor expired");
+                let document = if expired {
+                    self.search_documents.lock().unwrap_or_else(|poison| poison.into_inner()).remove(&search_scope)
+                } else {
+                    None
+                };
+                if let Some(document) = document {
+                    let browser = self.clone();
+                    let label = document.label;
+                    if let Ok(finished) = super::on_main(self.app.clone(), move || browser.close(&label)).await {
+                        let _ = tokio::time::timeout(Duration::from_secs(2), finished).await;
+                    }
+                }
+                return Err(error);
+            }
+        };
+        let active_comment_session = {
+            self.comment_session
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+                .map(|session| session.id)
+        };
+        if let Some(session_id) = active_comment_session {
+            self.close_comment_session(session_id).await;
+            self.pending_comment_page.lock().unwrap_or_else(|error| error.into_inner()).take();
+        }
+        let generation = self.proxy.begin_acquisition();
+        self.proxy.set_online(true);
+        *self.progress.lock().unwrap_or_else(|error| error.into_inner()) = Progress {
+            generation,
+            url: search_scope.clone(),
+            revision: 0,
+            error: None,
+            rejected_path: None,
+            captured: false,
+            ids: Vec::new(),
+            layout: None,
+            preference_present: true,
+            more_until: Some(Instant::now() + Duration::from_secs(25)),
+            requested_fragment_captured: false,
+            page_scope: search_scope.clone(),
+            requested_cursor: Some(request_path.clone()),
+            more_url: None,
+            worker_label: label.clone(),
+            document_ready: true,
+        };
+        let app = self.app.clone();
+        let request_label = label.clone();
+        let script_target = serde_json::to_string(&request_path).map_err(|error| error.to_string())?;
+        if let Err(error) = super::on_main(app.clone(), move || {
+            let view = app
+                .get_webview_window(&request_label)
+                .ok_or("Search cursor expired; start the search again")?;
+            view.eval(format!(
+                "fetch({script_target},{{credentials:'include'}}).then(r=>r.text()).catch(()=>{{}});"
+            ))
+            .map_err(|error| error.to_string())
+        })
+        .await
+        {
+            let generation = self.progress.lock().unwrap_or_else(|poison| poison.into_inner()).generation;
+            self.retire_search_capture(generation);
+            if error.starts_with("Search cursor expired") {
+                self.search_documents
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .remove(&search_scope);
+            }
+            return Err(error);
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+        let result = loop {
+            {
+                let progress = self.progress.lock().unwrap_or_else(|error| error.into_inner());
+                if progress.generation != generation || progress.worker_label != label {
+                    break Err("Search request was superseded; retry this page".into());
+                }
+                if let Some(error) = &progress.error {
+                    break Err(error.clone());
+                }
+                if progress.requested_fragment_captured {
+                    break Ok((progress.ids.clone(), progress.more_url.clone()));
+                }
+            }
+            if tokio::time::timeout_at(deadline, self.ready.notified()).await.is_err() {
+                break Err("Reddit did not return this search page; retry the same cursor".into());
+            }
+        };
+        self.retire_search_capture(generation);
+        result
     }
 
     fn stop_waiting_for_more(&self, generation: u64) {
@@ -2294,8 +2697,46 @@ impl Browser {
         self.record("source", "running", 0, None);
         let setup = Instant::now();
         self.record("source_startup", "running", 0, None);
-        if let Err(error) = super::on_main(self.app.clone(), move || browser.start(classic, requested_cursor)).await {
-            let _ = self.stop().await;
+        let search_scope = if classic.parse::<tauri::Url>().is_ok_and(|candidate| reddit_offline::browsing::search_path(candidate.path())) {
+            Some(canonical_search_scope(&classic)?)
+        } else {
+            None
+        };
+        let worker_label = if let Some(scope) = search_scope.as_deref() {
+            let label = search_document_label(scope);
+            let now = Instant::now();
+            let evicted = register_search_document(
+                &mut self.search_documents.lock().unwrap_or_else(|error| error.into_inner()),
+                scope,
+                label.clone(),
+                now,
+            );
+            for old_label in evicted {
+                let browser = self.clone();
+                if let Ok(finished) = super::on_main(self.app.clone(), move || browser.close(&old_label)).await {
+                    let _ = tokio::time::timeout(Duration::from_secs(2), finished).await;
+                }
+            }
+            label
+        } else {
+            WORKER.to_owned()
+        };
+        let start_label = worker_label.clone();
+        if let Err(error) = super::on_main(self.app.clone(), move || browser.start(classic, requested_cursor, start_label)).await {
+            if let Some(scope) = search_scope.as_deref() {
+                {
+                    let mut documents = self.search_documents.lock().unwrap_or_else(|poison| poison.into_inner());
+                    documents.remove(scope);
+                    remove_search_document_label(&mut documents, &worker_label);
+                }
+                let generation = self.progress.lock().unwrap_or_else(|poison| poison.into_inner()).generation;
+                self.retire_search_capture(generation);
+                let browser = self.clone();
+                let label = worker_label.clone();
+                let _ = super::on_main(self.app.clone(), move || browser.close(&label)).await;
+            } else {
+                let _ = self.stop().await;
+            }
             self.record(
                 "source_startup",
                 "failed",
@@ -2321,6 +2762,9 @@ impl Browser {
                 // A response is published only after a complete body and atomic
                 // parse/commit. There is no DOM settling interval to wait for.
                 if progress.captured {
+                    if progress.worker_label != WORKER && !progress.document_ready {
+                        deadline = deadline.min(started + Duration::from_secs(25));
+                    } else {
                     // The posts are stored; only a pending listing continuation
                     // is worth a short extra wait.
                     let requested_search = progress.requested_cursor.is_some()
@@ -2338,6 +2782,7 @@ impl Browser {
                             _ => break Ok(()),
                         }
                     }
+                    }
                 }
             }
             if tokio::time::timeout_at(
@@ -2347,11 +2792,15 @@ impl Browser {
             .await
             .is_err()
             {
-                if self.progress.lock().unwrap_or_else(|e| e.into_inner()).captured {
+                let (captured, ready, worker_label) = {
+                    let progress = self.progress.lock().unwrap_or_else(|error| error.into_inner());
+                    (progress.captured, progress.document_ready, progress.worker_label.clone())
+                };
+                if captured && (worker_label == WORKER || ready) {
                     continue;
                 }
                 break Err(
-                    "Reddit acquisition timed out; cached content is preserved".into(),
+                    "Reddit acquisition or search document readiness timed out; cached content is preserved".into(),
                 );
             }
         };
@@ -2418,7 +2867,28 @@ impl Browser {
                 self.record_comment_activation_failure(error).await;
             }
         }
-        let cleanup = if keep_comment_session {
+        let cleanup = if search_scope.is_some() && result.is_ok() {
+            let generation = self.progress.lock().unwrap_or_else(|error| error.into_inner()).generation;
+            self.retire_search_capture(generation);
+            Ok(())
+        } else if let Some(scope) = search_scope.as_deref() {
+            {
+                let mut documents = self.search_documents.lock().unwrap_or_else(|poison| poison.into_inner());
+                documents.remove(scope);
+                remove_search_document_label(&mut documents, &worker_label);
+            }
+            let generation = self.progress.lock().unwrap_or_else(|error| error.into_inner()).generation;
+            self.retire_search_capture(generation);
+            let browser = self.clone();
+            let label = worker_label.clone();
+            let closed = match super::on_main(self.app.clone(), move || browser.close(&label)).await {
+                Ok(finished) => tokio::time::timeout(Duration::from_secs(2), finished).await
+                    .map_err(|_| "Search document shutdown timed out".to_owned())?
+                    .map_err(|_| "Search document shutdown channel closed".to_owned())?,
+                Err(error) => Err(error),
+            };
+            closed
+        } else if keep_comment_session {
             Ok(())
         } else if let Some((_, _, _, session_id)) = pending_comment {
             self.close_comment_session(session_id).await;
@@ -2445,7 +2915,7 @@ impl Browser {
         let started = Instant::now();
         self.record("source_teardown", "running", 0, None);
         let browser = self.clone();
-        let result = match super::on_main(self.app.clone(), move || browser.close()).await {
+        let result = match super::on_main(self.app.clone(), move || browser.close(WORKER)).await {
             Ok(finished) => match tokio::time::timeout(Duration::from_secs(2), finished).await {
                 Ok(Ok(result)) => result,
                 _ => Err("Native source shutdown timed out".to_owned()),
@@ -2618,18 +3088,24 @@ impl Browser {
     ) -> Result<reddit_offline::desktop::SearchPageState, String> {
         let mut cursors = self.search_cursors.lock().unwrap_or_else(|error| error.into_inner());
         cursors.retain(|_, cursor| cursor.created_at.elapsed() <= SEARCH_CURSOR_TTL);
-        if replace_scope {
-            invalidate_search_generation(&mut cursors, scope);
-        }
         if continuations.is_empty() && pending_ids.is_empty() {
+            if replace_scope {
+                invalidate_search_generation(&mut cursors, scope);
+            }
             return Ok(reddit_offline::desktop::SearchPageState { cursor: None, exhausted: true });
-        }
-        if cursors.len() >= SEARCH_CURSOR_LIMIT {
-            cursors.pop_first();
         }
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(|error| format!("Could not create search paging token: {error}"))?;
         let token: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        if cursors.contains_key(&token) {
+            return Err("Could not create a unique search paging token".into());
+        }
+        if replace_scope {
+            invalidate_search_generation(&mut cursors, scope);
+        }
+        if cursors.len() >= SEARCH_CURSOR_LIMIT {
+            cursors.pop_first();
+        }
         cursors.insert(token.clone(), SearchCursor {
             scope: scope.to_owned(),
             continuations,
@@ -2707,16 +3183,9 @@ impl Browser {
             if !reddit_offline::browsing::search_partial_matches(&search, &target) {
                 return Err("Search cursor failed query/scope validation".into());
             }
-            self.acquire_page(
-                continuation.search_url.clone(),
-                false,
-                Some(continuation.url.clone()),
-            )
-            .await?;
-            let (ids, next) = {
-                let progress = self.progress.lock().unwrap_or_else(|error| error.into_inner());
-                (progress.ids.clone(), progress.more_url.clone())
-            };
+            let (ids, next) = self
+                .fetch_search_fragment(&continuation.search_url, &continuation)
+                .await?;
             let next = if let Some(url) = next {
                 let next_target = tauri::Url::parse(&format!("https://www.reddit.com{url}"))
                     .map_err(|_| "Invalid next search continuation")?;
@@ -2762,6 +3231,10 @@ impl Browser {
             cursor.visited_urls,
             false,
         )?;
+        consume_search_cursor(
+            &mut self.search_cursors.lock().unwrap_or_else(|error| error.into_inner()),
+            token,
+        );
         Ok((posts, state))
     }
 

@@ -9,9 +9,13 @@
   const continuationFailures = [];
   let stage = 'startup';
   const probeState = window.__hrungnirUiProbeState = {
-    stage, native_request: null, heartbeat: 0,
+    stage, native_request: null, heartbeat: 0, cancelled: false,
   };
   const heartbeat = setInterval(() => { probeState.heartbeat++; }, 500);
+  window.__hrungnirUiProbeCancel = () => {
+    probeState.cancelled = true;
+    clearInterval(heartbeat);
+  };
   const $ = selector => document.querySelector(selector);
   const rows = () => [...document.querySelectorAll('#thread-list .thread-item')];
   const cachedRows = () => [...document.querySelectorAll('#thread-list .cache-search-hit')];
@@ -25,7 +29,10 @@
   const wait = async (predicate, description, timeout = 45000) => {
     const deadline = performance.now() + timeout;
     while (performance.now() < deadline) {
-      if (await predicate()) return;
+      if (probeState.cancelled) throw new Error('Native UI journey cancelled');
+      const matched = await predicate();
+      if (probeState.cancelled) throw new Error('Native UI journey cancelled');
+      if (matched) return;
       await new Promise(resolve => setTimeout(resolve, 80));
     }
     throw new Error(`Timed out: ${description}`);
@@ -33,6 +40,7 @@
   // Use actual controls and rendered native results. Rust separately observes
   // source request counters; avoid polling heavyweight diagnostics through IPC.
   const nativeRead = async (command) => {
+    if (probeState.cancelled) throw new Error('Native UI journey cancelled');
     probeState.native_request = command;
     try { return await window.__TAURI__.core.invoke(command); }
     finally { probeState.native_request = null; }
@@ -61,7 +69,11 @@
     if (button && !button.hidden && !button.disabled) button.click();
     else setInput('#cache-search-input', '');
   };
-  const begin = async name => { stage = name; probeState.stage = name; await emit({ stage, finished: false }); };
+  const begin = async name => {
+    if (probeState.cancelled) throw new Error('Native UI journey cancelled');
+    stage = name; probeState.stage = name;
+    await emit({ stage, finished: false });
+  };
 
   async function search(query, scope) {
     await begin(`search:${scope}`);
@@ -94,7 +106,6 @@
             return rows().length > beforePage;
           }, `new unique ${scope} search results on continuation ${continuation}`, 45000);
         } catch (error) {
-          if (continuation === 1) throw error;
           // Keep this a failed check while allowing independent post/cache
           // controls to finish in the same coordinated app test window.
           continuationFailures.push({ scope, continuation, error: clean(error), page_counts: [...pageCounts] });
