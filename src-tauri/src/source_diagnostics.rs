@@ -14,12 +14,18 @@ fn sanitize(value: Value) -> Value {
     if let Some(ready) = input["readyState"].as_str().filter(|s| ["loading", "interactive", "complete"].contains(s)) {
         details.insert("readyState".into(), json!(ready));
     }
+    if let Some(loading) = input["rootPartialLoading"].as_str().filter(|s| ["lazy", "eager", "action", "programmatic", "auto", "other"].contains(s)) {
+        details.insert("rootPartialLoading".into(), json!(loading));
+    }
+    if let Some(visibility) = input["pageVisibility"].as_str().filter(|s| ["visible", "hidden", "prerender"].contains(s)) {
+        details.insert("pageVisibility".into(), json!(visibility));
+    }
     for key in ["rootPartialCount", "matchingRootPartialCount"] {
         if let Some(count) = input[key].as_u64().filter(|n| *n <= 100_000) {
             details.insert(key.into(), json!(count));
         }
     }
-    for key in ["requestedCommentScopeFound", "parentOwnedReplyButtonFound", "previousTargetStillConnected", "previousTargetChanged"] {
+    for key in ["requestedCommentScopeFound", "parentOwnedReplyButtonFound", "previousTargetStillConnected", "previousTargetChanged", "rootPartialDefined", "rootPartialHasLoadMethod"] {
         if let Some(flag) = input[key].as_bool() {
             details.insert(key.into(), json!(flag));
         }

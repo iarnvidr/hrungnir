@@ -5,6 +5,7 @@ use crate::{
     Comment, Result, Thread,
 };
 use scraper::{ElementRef, Html, Selector};
+use sha2::{Digest, Sha256};
 use std::io::Read;
 use url::Url;
 
@@ -508,7 +509,11 @@ pub fn parse_search_partial(
         return Err("Response was not the active public search continuation".into());
     }
     let html = decode(&response)?;
-    crate::reddit_modern::parse_search_partial(&Html::parse_document(&html), &search)
+    crate::reddit_modern::parse_search_partial(
+        &Html::parse_document(&html),
+        &search,
+        &continuation,
+    )
 }
 
 #[cfg(test)]
@@ -532,11 +537,68 @@ mod classic_comment_count_tests {
 /// result text, request query, cookies, or signed URLs.
 pub fn search_response_structure(
     response: &crate::response_capture::CapturedResponse,
+    active_search_url: &str,
 ) -> Result<serde_json::Value> {
     let html = decode(response)?;
     let document = Html::parse_document(&html);
     let response_base = Url::parse(&response.url)?;
+    let search = Url::parse(active_search_url)?;
     let count = |css: &str| document.select(&selector(css)).take(5000).count();
+    let cursor_fingerprint = |url: &Url| {
+        let mut cursor = None;
+        for (key, value) in url.query_pairs() {
+            if key == "cursor" {
+                if cursor.replace(value.into_owned()).is_some() {
+                    return None;
+                }
+            }
+        }
+        let cursor = cursor.filter(|value: &String| !value.is_empty())?;
+        let mut hash = Sha256::new();
+        hash.update(b"hrungnir-search-source-cursor-v1\0");
+        hash.update(cursor.as_bytes());
+        Some(format!("{:x}", hash.finalize()))
+    };
+    let validated_search_continuations: Vec<_> = document
+        .select(&selector("faceplate-partial[src]"))
+        .take(80)
+        .filter_map(|node| {
+            let url = search
+                .join(node.value().attr("src")?)
+                .ok()?;
+            if !crate::browsing::search_partial_matches(&search, &url) {
+                return None;
+            }
+            let mut query_keys: Vec<_> = url
+                .query_pairs()
+                .map(|(key, _)| key.into_owned())
+                .collect();
+            query_keys.sort();
+            query_keys.dedup();
+            let method = match node.value().attr("method").map(str::to_ascii_lowercase).as_deref() {
+                None => "missing",
+                Some("get") => "get",
+                Some("post") => "post",
+                Some(_) => "other",
+            };
+            let loading = match node.value().attr("loading").map(str::to_ascii_lowercase).as_deref() {
+                None => "missing",
+                Some("eager") => "eager",
+                Some("lazy") => "lazy",
+                Some("auto") => "auto",
+                Some(_) => "other",
+            };
+            Some(serde_json::json!({
+                "path":url.path(),
+                "query_keys":query_keys,
+                "cursor_fingerprint":cursor_fingerprint(&url),
+                "method":method,
+                "loading":loading,
+                "attribute_names":node.value().attrs().map(|(name, _)| name).take(32).collect::<Vec<_>>(),
+            }))
+        })
+        .collect();
+    let response_cursor_fingerprint = cursor_fingerprint(&response_base);
     let mut testids = std::collections::BTreeMap::<String, usize>::new();
     let search_navigation: Vec<_> = document
         .select(&selector(
@@ -609,6 +671,10 @@ pub fn search_response_structure(
     }
     Ok(serde_json::json!({
         "html_bytes":html.len(),
+        "request_id":response.request_id,
+        "response_cursor_fingerprint":response_cursor_fingerprint,
+        "validated_search_continuation_count":validated_search_continuations.len(),
+        "validated_search_continuations":validated_search_continuations,
         "search_result_cards":count("[data-testid=\"search-sdui-post\"]"),
         "search_result_title_links":count("a[data-testid=\"post-title-text\"][href], a[data-testid=\"post-title\"][href]"),
         "search_card_title_links":cards.iter().map(|card| card.select(&title_selector).count()).sum::<usize>(),
@@ -1009,4 +1075,44 @@ pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<Page
     }
     page.validate()?;
     Ok(page)
+}
+
+#[cfg(test)]
+mod search_structure_tests {
+    use super::*;
+
+    #[test]
+    fn search_partial_structure_records_bounded_safe_dom_metadata() {
+        let search_url = "https://www.reddit.com/search/?q=rust&sort=relevance&t=all";
+        let response_url = "https://www.reddit.com/svc/shreddit/search/?cursor=opaque-request&q=rust&sort=relevance&t=all";
+        let html = r#"
+            <faceplate-partial src="/svc/shreddit/search/?cursor=opaque-request&amp;q=rust&amp;sort=relevance&amp;t=all"
+              method="GET" loading="lazy" data-source-private="private-value">
+              <faceplate-partial src="/svc/shreddit/search/?cursor=opaque-next&amp;q=rust&amp;sort=relevance&amp;t=all"
+                method="POST" loading="auto" data-next-private="another-private-value"></faceplate-partial>
+            </faceplate-partial>
+        "#;
+        let response = crate::response_capture::CapturedResponse {
+            generation: 4,
+            request_id: 12,
+            request_cursor_fingerprint: None,
+            url: response_url.into(),
+            encoding: "identity".into(),
+            bytes: html.as_bytes().to_vec(),
+        };
+        let structure = search_response_structure(&response, search_url).unwrap();
+        assert_eq!(structure["request_id"], 12);
+        assert_eq!(structure["validated_search_continuation_count"], 2);
+        let continuations = structure["validated_search_continuations"].as_array().unwrap();
+        assert_eq!(continuations[0]["method"], "get");
+        assert_eq!(continuations[0]["loading"], "lazy");
+        assert_eq!(continuations[1]["method"], "post");
+        assert_eq!(continuations[1]["loading"], "auto");
+        assert!(continuations[0]["attribute_names"].to_string().contains("data-source-private"));
+        assert!(continuations[1]["attribute_names"].to_string().contains("data-next-private"));
+        assert!(!structure.to_string().contains("opaque-request"));
+        assert!(!structure.to_string().contains("opaque-next"));
+        assert!(!structure.to_string().contains("private-value"));
+        assert!(!structure.to_string().contains("another-private-value"));
+    }
 }

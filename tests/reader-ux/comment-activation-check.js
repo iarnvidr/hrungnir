@@ -1,5 +1,13 @@
 async (page) => {
   const assert = (value, message) => { if (!value) throw new Error(message); };
+  const nativeProbeSource = await page.evaluate(() => window.parent.__nativeUiProbeSource);
+  assert(typeof nativeProbeSource === 'string' && nativeProbeSource.startsWith('/* Dedicated native test app only.'), 'runner did not provide the exact native UI probe source');
+  const nativeProbeCompile = await page.evaluate((source) => {
+    const compiled = new Function(source);
+    return typeof compiled === 'function';
+  }, nativeProbeSource);
+  assert(nativeProbeCompile, 'native UI probe did not parse cleanly without executing its journey');
+
   const activationSource = await page.evaluate(() => window.parent.__nativeCommentActivationSource);
   assert(typeof activationSource === 'string' && activationSource.includes('faceplate-partial') && activationSource.includes('more-comments'), 'runner did not provide the production root-partial activation helper source');
   await page.evaluate((source) => { window.__testCommentPageActivation = eval(source); }, activationSource);
@@ -157,6 +165,7 @@ async (page) => {
   assert(await page.evaluate(startedAt => performance.now() - startedAt < 500, timeoutStartedAt), 'missing continuation did not time out within the expected bound');
 
   return {passed:[
+    'native UI probe source parses in the browser without running its native journey',
     'delayed reply control activates only its requested parent, not a nested child',
     'thread-level load-more control ignores nested comment buttons',
     'root activation scrolls only the same-post top-level lazy partial into IntersectionObserver view',

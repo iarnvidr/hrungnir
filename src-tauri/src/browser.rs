@@ -449,6 +449,30 @@ fn search_response_matches_requested_cursor(requested: Option<&str>, response_ur
     response.path() == target.path() && normalize(&response) == normalize(&target)
 }
 
+fn search_source_cursor_fingerprint(cursor_url: &str) -> Option<String> {
+    let url = tauri::Url::parse(&format!("https://www.reddit.com{cursor_url}")).ok()?;
+    let cursor = url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "cursor").then(|| value.into_owned()))?;
+    if cursor.is_empty() {
+        return None;
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"hrungnir-search-source-cursor-v1\0");
+    hash.update(cursor.as_bytes());
+    Some(format!("{:x}", hash.finalize()))
+}
+
+fn ordered_search_ids_fingerprint(ids: &[String]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"hrungnir-search-result-ids-v1\0");
+    for id in ids {
+        hash.update((id.len() as u64).to_be_bytes());
+        hash.update(id.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
 fn ignore_late_search_bootstrap(requested_search: bool, partial: bool, fragment_captured: bool) -> bool {
     requested_search && !partial && fragment_captured
 }
@@ -615,6 +639,59 @@ mod search_cursor_tests {
         assert!(search_response_matches_requested_cursor(Some(requested), &exact));
         let captured = true;
         assert!(ignore_late_search_bootstrap(true, false, captured));
+    }
+
+    #[test]
+    fn search_diagnostic_fingerprints_use_decoded_cursor_and_ordered_ids() {
+        assert_eq!(
+            search_source_cursor_fingerprint("/svc/shreddit/search/?cursor=%41%42&q=rust&sort=relevance&t=all"),
+            search_source_cursor_fingerprint("/svc/shreddit/search/?cursor=AB&q=rust&sort=relevance&t=all"),
+        );
+        assert_ne!(
+            search_source_cursor_fingerprint("/svc/shreddit/search/?cursor=AB&q=rust&sort=relevance&t=all"),
+            search_source_cursor_fingerprint("/svc/shreddit/search/?cursor=AC&q=rust&sort=relevance&t=all"),
+        );
+        let ids = vec!["t3_first".to_owned(), "t3_second".to_owned()];
+        assert_ne!(
+            ordered_search_ids_fingerprint(&ids),
+            ordered_search_ids_fingerprint(&ids.iter().cloned().rev().collect::<Vec<_>>()),
+        );
+    }
+
+    #[test]
+    fn advancing_search_cursors_with_repeated_result_batches_dedupe_to_seven_new_ids() {
+        let mut cursor = SearchCursor {
+            scope: "scope".into(),
+            continuations: VecDeque::from([SearchContinuation {
+                search_url: "https://www.reddit.com/search/?q=rust".into(),
+                url: "/svc/shreddit/search/?cursor=page1&q=rust&sort=relevance&t=all".into(),
+            }]),
+            pending_ids: VecDeque::new(),
+            seen_ids: (0..7).map(|index| format!("t3_initial{index}")).collect(),
+            visited_urls: BTreeSet::new(),
+            created_at: Instant::now(),
+        };
+        let repeated_batch = (0..7).map(|index| format!("t3_batch{index}")).collect::<Vec<_>>();
+        let mut total_new = 0;
+        for page in 1..=4 {
+            let request = cursor.continuations.pop_front().unwrap();
+            mark_search_continuation_visited(&mut cursor, &request.url).unwrap();
+            let seen_before = cursor.seen_ids.len();
+            append_search_fragment(
+                &mut cursor,
+                repeated_batch.clone(),
+                Some(SearchContinuation {
+                    search_url: request.search_url,
+                    url: format!("/svc/shreddit/search/?cursor=page{}&q=rust&sort=relevance&t=all", page + 1),
+                }),
+            ).unwrap();
+            total_new += cursor.seen_ids.len() - seen_before;
+            let _ = take_pending_search_ids(&mut cursor, 25);
+        }
+        assert_eq!(total_new, 7);
+        assert_eq!(cursor.seen_ids.len(), 14);
+        assert_eq!(cursor.continuations.len(), 1);
+        assert!(cursor.continuations.front().unwrap().url.contains("cursor=page5"));
     }
 
     #[test]
@@ -999,6 +1076,27 @@ impl Browser {
                             "proxy capture: generation={generation}, compressed_bytes={}",
                             response.bytes.len()
                         );
+                        let listing_partial = reddit_offline::browsing::is_listing_partial_url(&response.url);
+                        let response_url = response.url.parse::<tauri::Url>().ok();
+                        let search_partial = response_url.as_ref().is_some_and(|url| {
+                            reddit_offline::browsing::search_partial_path(url.path(), url.query())
+                        });
+                        let active_search_scope = if search_partial
+                            || response_url.as_ref().is_some_and(|url| {
+                                reddit_offline::browsing::search_path(url.path())
+                            })
+                        {
+                            Some(
+                                browser
+                                    .progress
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .url
+                                    .clone(),
+                            )
+                        } else {
+                            None
+                        };
                         if cfg!(debug_assertions)
                             && std::env::var_os("HRUNGNIR_NATIVE_COMMENT_PROBE").is_some()
                             && response.url.parse::<tauri::Url>().is_ok_and(|url| {
@@ -1028,11 +1126,16 @@ impl Browser {
                         if cfg!(debug_assertions)
                             && std::env::var_os("HRUNGNIR_NATIVE_PROBE").is_some()
                         {
-                            let structure = response.url.parse::<tauri::Url>().ok().and_then(|url| {
-                                if reddit_offline::browsing::search_path(url.path()) {
-                                    Some((
+                            let structure = response_url.as_ref().and_then(|url| {
+                                if search_partial {
+                                    active_search_scope.as_deref().map(|search_scope| (
+                                        "search_partial_structure",
+                                        reddit_offline::reddit_html::search_response_structure(&response, search_scope),
+                                    ))
+                                } else if reddit_offline::browsing::search_path(url.path()) {
+                                    active_search_scope.as_deref().map(|search_scope| (
                                         "search_structure",
-                                        reddit_offline::reddit_html::search_response_structure(&response),
+                                        reddit_offline::reddit_html::search_response_structure(&response, search_scope),
                                     ))
                                 } else if url.path() == "/r/popular"
                                     || url.path().starts_with("/r/popular/")
@@ -1064,10 +1167,6 @@ impl Browser {
                                 }
                             }
                         }
-                        let listing_partial = reddit_offline::browsing::is_listing_partial_url(&response.url);
-                        let search_partial = response.url.parse::<tauri::Url>().is_ok_and(|url| {
-                            reddit_offline::browsing::search_partial_path(url.path(), url.query())
-                        });
                         if search_partial {
                             let requested = browser
                                 .progress
@@ -2592,7 +2691,10 @@ impl Browser {
         let mut posts = take_pending_search_ids(&mut cursor, 25);
         let mut fetched = 0;
         while posts.len() < 25 && fetched < 4 && !cursor.continuations.is_empty() {
+            let queued_sources_before = cursor.continuations.len();
             let continuation = cursor.continuations.pop_front().unwrap();
+            let request_cursor_fingerprint =
+                search_source_cursor_fingerprint(&continuation.url);
             mark_search_continuation_visited(&mut cursor, &continuation.url)?;
             let search = tauri::Url::parse(&continuation.search_url).map_err(|_| "Invalid search scope")?;
             let target = tauri::Url::parse(&format!("https://www.reddit.com{}", continuation.url))
@@ -2618,7 +2720,32 @@ impl Browser {
                 }
                 Some(SearchContinuation { search_url: continuation.search_url.clone(), url })
             } else { None };
+            let parsed_count = ids.len();
+            let parsed_ids_fingerprint = ordered_search_ids_fingerprint(&ids);
+            let next_cursor_fingerprint = next
+                .as_ref()
+                .and_then(|continuation| search_source_cursor_fingerprint(&continuation.url));
+            let seen_before = cursor.seen_ids.len();
             append_search_fragment(&mut cursor, ids, next)?;
+            let new_unique_count = cursor.seen_ids.len().saturating_sub(seen_before);
+            let queued_sources_after = cursor.continuations.len();
+            self.record_detail(
+                "search_continuation_attempt",
+                "complete",
+                0,
+                None,
+                serde_json::json!({
+                    "attempt": fetched + 1,
+                    "queued_sources_before": queued_sources_before,
+                    "queued_sources_after": queued_sources_after,
+                    "request_cursor_fingerprint": request_cursor_fingerprint,
+                    "next_cursor_fingerprint": next_cursor_fingerprint,
+                    "parsed_count": parsed_count,
+                    "parsed_ids_fingerprint": parsed_ids_fingerprint,
+                    "new_unique_count": new_unique_count,
+                    "seen_count": cursor.seen_ids.len(),
+                }),
+            );
             fetched += 1;
             posts.extend(take_pending_search_ids(&mut cursor, 25 - posts.len()));
         }

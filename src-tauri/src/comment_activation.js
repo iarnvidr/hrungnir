@@ -101,6 +101,17 @@
             const rootPartial = matchingRootPartials[0] || null;
             const target = root ? rootPartial : button;
             diagnostics.parentOwnedReplyButtonFound = Boolean(button);
+            if (rootPartial) {
+                const loading = (rootPartial.getAttribute("loading") || "").toLowerCase();
+                diagnostics.rootPartialLoading = ["lazy", "eager", "action", "programmatic", "auto"]
+                    .includes(loading) ? loading : "other";
+                diagnostics.pageVisibility = document.prerendering
+                    ? "prerender"
+                    : document.visibilityState === "visible" ? "visible" : "hidden";
+                diagnostics.rootPartialDefined = typeof customElements !== "undefined"
+                    && Boolean(customElements.get("faceplate-partial"));
+                diagnostics.rootPartialHasLoadMethod = typeof rootPartial.load === "function";
+            }
 
             const targetCanActivate = root
                 ? target && target.isConnected && (() => {

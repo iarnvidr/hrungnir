@@ -6,6 +6,7 @@
   window.__hrungnirUiProbeRunId = config.run_id;
   const started = performance.now();
   const checks = [];
+  const continuationFailures = [];
   let stage = 'startup';
   const $ = selector => document.querySelector(selector);
   const rows = () => [...document.querySelectorAll('#thread-list .thread-item')];
@@ -78,11 +79,24 @@
     if (config.require_paging) {
       for (let continuation = 1; continuation <= 2; continuation++) {
         const beforePage = rows().length;
-        const button = $('#search-load-more');
-        assert(button && !button.hidden, `${scope} page ${continuation} exposed no continuation`);
-        if (button.getAttribute('aria-disabled') !== 'true') button.click();
-        await wait(() => rows().length > beforePage,
-          `new unique ${scope} search results on continuation ${continuation}`, 60000);
+        try {
+          const button = $('#search-load-more');
+          assert(button && !button.hidden, `${scope} page ${continuation} exposed no continuation`);
+          if (button.getAttribute('aria-disabled') !== 'true') button.click();
+          await wait(() => {
+            const status = $('#search-pagination-status')?.textContent || '';
+            if (/No new results|Loading stopped|Could not load more results/i.test(status)) {
+              throw new Error(clean(status));
+            }
+            return rows().length > beforePage;
+          }, `new unique ${scope} search results on continuation ${continuation}`, 45000);
+        } catch (error) {
+          if (continuation === 1) throw error;
+          // Keep this a failed check while allowing independent post/cache
+          // controls to finish in the same coordinated app test window.
+          continuationFailures.push({ scope, continuation, error: clean(error), page_counts: [...pageCounts] });
+          break;
+        }
         assert(rows()[0] === firstRow, 'Search continuation replaced an existing row');
         assert(new Set(ids()).size === rows().length, 'Continuation rendered duplicate post IDs');
         pageCounts.push(rows().length);
@@ -155,10 +169,12 @@
     assert(!completed(afterLocal, 'search', mark(beforeLocal)), 'Downloaded search started Reddit search');
     checks.push({ name: 'downloaded-search-and-reopen', post_id: selectedId,
       reddit_requests: requests(afterLocal) - requests(beforeLocal) });
-    return { name: 'native-ui', status: 'ok', finished: true, checks, state: snapshot() };
+    return { name: 'native-ui', status: continuationFailures.length ? 'failed' : 'ok',
+      finished: true, checks, continuation_failures: continuationFailures, state: snapshot() };
   }
 
   run().then(result => emit(result)).catch(error => emit({
-    status: 'failed', finished: true, stage, error: clean(error), checks, state: snapshot(),
+    status: 'failed', finished: true, stage, error: clean(error), checks,
+    continuation_failures: continuationFailures, state: snapshot(),
   }));
 })();

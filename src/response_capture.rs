@@ -9,6 +9,7 @@ use hyper::{
     service::service_fn,
     Method, Request, Response, StatusCode,
 };
+use sha2::{Digest, Sha256};
 use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
     rt::{TokioExecutor, TokioIo},
@@ -27,6 +28,73 @@ use tokio::{net::TcpStream, sync::mpsc};
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ResponseBody = UnsyncBoxBody<Bytes, BoxError>;
 const CAPTURE_LIMIT: usize = 4 * 1024 * 1024;
+
+fn search_request_cursor_fingerprint(query: Option<&str>) -> Option<String> {
+    let mut cursor = None;
+    for (key, value) in url::form_urlencoded::parse(query?.as_bytes()) {
+        if key == "cursor" {
+            if cursor.replace(value.into_owned()).is_some() {
+                return None;
+            }
+        }
+    }
+    let cursor = cursor?;
+    if cursor.is_empty() {
+        return None;
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"hrungnir-search-source-cursor-v1\0");
+    hash.update(cursor.as_bytes());
+    Some(format!("{:x}", hash.finalize()))
+}
+
+fn safe_header_enum(headers: &HeaderMap, name: &'static str) -> &'static str {
+    let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) else {
+        return "missing";
+    };
+    let value = value.trim().to_ascii_lowercase();
+    match name {
+        "accept" => match value
+            .split(',')
+            .next()
+            .unwrap_or_default()
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+        {
+            "text/html" => "html",
+            "application/xhtml+xml" => "xhtml",
+            "application/json" => "json",
+            "*/*" => "wildcard",
+            _ => "other",
+        },
+        "sec-fetch-mode" => match value.as_str() {
+            "navigate" => "navigate",
+            "cors" => "cors",
+            "no-cors" => "no-cors",
+            "same-origin" => "same-origin",
+            _ => "other",
+        },
+        "sec-fetch-dest" => match value.as_str() {
+            "document" => "document",
+            "empty" => "empty",
+            "script" => "script",
+            "style" => "style",
+            "image" => "image",
+            "font" => "font",
+            _ => "other",
+        },
+        _ => "unsupported",
+    }
+}
+
+fn safe_header_names(headers: &HeaderMap) -> Vec<String> {
+    let mut names: Vec<_> = headers.keys().map(|name| name.as_str().to_owned()).collect();
+    names.sort();
+    names.dedup();
+    names
+}
 
 pub struct CapturedResponse {
     pub generation: u64,
@@ -194,6 +262,8 @@ impl CaptureForwarder {
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.split(';').next())
                 .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/x-www-form-urlencoded"));
+        let search_partial = matches!(parts.method, Method::GET | Method::HEAD)
+            && crate::browsing::search_partial_path(path, parts.uri.query());
         let mut request_cursor_fingerprint = None;
         if cfg!(debug_assertions)
             && std::env::var_os("HRUNGNIR_NATIVE_COMMENT_PROBE").is_some()
@@ -231,7 +301,7 @@ impl CaptureForwarder {
         if !matches!(parts.method, Method::GET | Method::HEAD) && !comment_post
             || !(crate::browsing::public_content_path(path)
                 || crate::browsing::listing_partial_path(path, parts.uri.query())
-                || crate::browsing::search_partial_path(path, parts.uri.query())
+                || search_partial
                 || comment_post)
             || parts
                 .uri
@@ -242,6 +312,24 @@ impl CaptureForwarder {
                 StatusCode::FORBIDDEN,
                 "Only public community reads are enabled",
             ));
+        }
+        if cfg!(debug_assertions)
+            && std::env::var_os("HRUNGNIR_NATIVE_PROBE").is_some()
+            && search_partial
+        {
+            crate::diagnostics::event(
+                "search.request_shape",
+                serde_json::json!({
+                    "generation":generation,
+                    "request_id":request_id,
+                    "cursor_fingerprint":search_request_cursor_fingerprint(parts.uri.query()),
+                    "request_method":if parts.method == Method::GET { "get" } else { "head" },
+                    "header_names":safe_header_names(&parts.headers),
+                    "accept":safe_header_enum(&parts.headers,"accept"),
+                    "sec_fetch_mode":safe_header_enum(&parts.headers,"sec-fetch-mode"),
+                    "sec_fetch_dest":safe_header_enum(&parts.headers,"sec-fetch-dest"),
+                }),
+            );
         }
         let forwarded_body = if comment_post {
             let mut request_body = body;
@@ -575,5 +663,51 @@ mod tests {
         assert!(body.frame().await.unwrap().is_ok());
         drop(body);
         assert!(published.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn search_request_diagnostic_hashes_only_the_decoded_cursor() {
+        let encoded = search_request_cursor_fingerprint(Some(
+            "cursor=page%2Bone&q=private+query&sort=relevance&t=all",
+        ));
+        let decoded = search_request_cursor_fingerprint(Some(
+            "q=different+private+query&cursor=page%2Bone&sort=relevance&t=all",
+        ));
+        let advanced = search_request_cursor_fingerprint(Some(
+            "cursor=page%2Btwo&q=private+query&sort=relevance&t=all",
+        ));
+        assert_eq!(encoded, decoded);
+        assert_ne!(encoded, advanced);
+        assert!(search_request_cursor_fingerprint(Some("cursor=&q=x")).is_none());
+        assert!(search_request_cursor_fingerprint(Some("cursor=a&cursor=b&q=x")).is_none());
+        assert!(search_request_cursor_fingerprint(None).is_none());
+    }
+
+    #[test]
+    fn search_request_diagnostic_exposes_names_and_enum_classes_not_header_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("accept", "text/html,application/xhtml+xml".parse().unwrap());
+        headers.insert("sec-fetch-mode", "cors".parse().unwrap());
+        headers.insert("sec-fetch-dest", "empty".parse().unwrap());
+        headers.insert("cookie", "private-cookie-value".parse().unwrap());
+        headers.insert("referer", "https://www.reddit.com/private-path".parse().unwrap());
+        headers.insert("authorization", "Bearer private-token".parse().unwrap());
+
+        let names = safe_header_names(&headers);
+        assert_eq!(safe_header_enum(&headers, "accept"), "html");
+        assert_eq!(safe_header_enum(&headers, "sec-fetch-mode"), "cors");
+        assert_eq!(safe_header_enum(&headers, "sec-fetch-dest"), "empty");
+        let diagnostic = serde_json::to_string(&serde_json::json!({
+            "header_names": names,
+            "accept": safe_header_enum(&headers, "accept"),
+            "sec_fetch_mode": safe_header_enum(&headers, "sec-fetch-mode"),
+            "sec_fetch_dest": safe_header_enum(&headers, "sec-fetch-dest"),
+        })).unwrap();
+        assert!(diagnostic.contains("cookie"));
+        assert!(diagnostic.contains("authorization"));
+        assert!(!diagnostic.contains("private-cookie-value"));
+        assert!(!diagnostic.contains("private-path"));
+        assert!(!diagnostic.contains("private-token"));
+        assert!(!diagnostic.contains("text/html"));
     }
 }
