@@ -182,7 +182,7 @@
         if (args.include_media !== false) {
           if (!search.provideMedia) return new Promise(() => {}); // Simulate a stalled media download.
           const base = threads.find(t => t.id === args.id);
-          const thread = { ...base, comment_count: search.commentPagesEnabled ? 4 : base.comment_count, comments_status: 'partial_proxy', comments: search.comments || [] };
+          const thread = { ...base, comment_count: search.commentPagesEnabled || search.commentPageHandlesMissing ? 4 : base.comment_count, comments_status: 'partial_proxy', comments: search.comments || [] };
           return {
             snapshot: snap([thread]),
             media: [{ kind: 'video', name: 'Fixture clip', url: `https://asset.localhost/${'a'.repeat(64)}/${args.id}/clip.mp4` }],
@@ -208,8 +208,14 @@
         }
         await wait(posts, args.id);
         completed.push(args.id);
-        const thread = { ...threads.find(t => t.id === args.id), comments_status: 'partial_proxy', comments: search.comments || [{ id: 't1_parent', parent_id: args.id, body: 'A useful discussion, available before the video finishes.' }] };
-        return { snapshot: snap([thread]), media: [], cache: { comments_hit: false, media_hit: false } };
+        const thread = { ...threads.find(t => t.id === args.id), comment_count: search.commentPagesEnabled || search.commentPageHandlesMissing ? 4 : threads.find(t => t.id === args.id).comment_count, comments_status: 'partial_proxy', comments: search.comments || [{ id: 't1_parent', parent_id: args.id, body: 'A useful discussion, available before the video finishes.' }] };
+        return {
+          snapshot: snap([thread]), media: [], cache: { comments_hit: false, media_hit: false },
+          ...(search.commentPagesEnabled ? { comment_pages: [
+            { parent_id: args.id, cursor: 'top-1', exhausted: false },
+            { parent_id: 't1_parent', cursor: 'reply-1', exhausted: false },
+          ] } : {}),
+        };
       }
       if (command === 'fetch_link_article') {
         await wait(articles, args.id);

@@ -94,7 +94,15 @@
     $('#browse-form').requestSubmit();
     await wait(async () => completed(await diagnostics(), 'listing', beforeBrowse)
       && !$('#browse-submit').disabled && rows().length > 0, 'live subreddit UI rows');
-    checks.push({ name: 'browse:rust', rendered_count: rows().length });
+    const firstBrowseCount = rows().length;
+    const firstBrowseRow = rows()[0];
+    const browseMore = $('#listing-load-more');
+    assert(browseMore && !browseMore.hidden, 'Subreddit continuation control is unavailable');
+    if (browseMore.getAttribute('aria-disabled') !== 'true') browseMore.click();
+    await wait(() => rows().length > firstBrowseCount, 'additional native subreddit rows', 60000);
+    assert(rows()[0] === firstBrowseRow, 'Subreddit continuation replaced an existing row');
+    assert(new Set(ids()).size === rows().length, 'Subreddit continuation rendered duplicates');
+    checks.push({ name: 'browse:rust', first_count: firstBrowseCount, rendered_count: rows().length });
 
     await search('rust', 'all');
     await search('borrow checker', 'subreddit');
@@ -103,7 +111,13 @@
     const selectedId = selected.dataset.threadId;
     const title = selected.querySelector('.thread-title')?.textContent || 'borrow checker';
     selected.querySelector('.thread-open').click();
-    await wait(() => !$('#reader-panel').hidden && $('#discussion-comments .comments-header'),
+    await wait(async () => {
+      const stored = await window.__TAURI__.core.invoke('snapshot');
+      const post = stored.threads?.find(thread => thread.id === selectedId);
+      return post && post.comments_status !== 'not_loaded' && post.comments?.length > 0
+        && !$('#reader-panel').hidden && $('#discussion-comments .comment')
+        && !$('#discussion-comments .cached-listing-note');
+    },
       'real selected-post discussion', 60000);
     checks.push({ name: 'open-search-result', post_id: selectedId,
       downloaded_comments: document.querySelectorAll('#discussion-comments .comment').length });

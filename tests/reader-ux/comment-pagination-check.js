@@ -15,6 +15,8 @@ async (page) => {
   });
   await page.setViewportSize({ width: 720, height: 500 });
   await page.locator('[data-thread-id="t3_video"] .thread-open').click();
+  await page.waitForFunction(() => window.__ux.posts.has('t3_video'));
+  await page.evaluate(() => window.__ux.releasePost('t3_video'));
   await page.waitForFunction(() => document.querySelector('#discussion-comments .comments-header')?.textContent === '4 comments · 1 downloaded'
     && document.querySelector('[data-testid="comment-page-t1_parent"]')
     && document.querySelector('[data-testid="comment-page-t3_video"]'));
@@ -66,5 +68,24 @@ async (page) => {
   assert(await page.locator('.comment[data-comment-id="t1_parent"] > .comment-card .comment-body').innerText() === 'The refreshed parent comment.', 'overlapping source comment did not refresh its content');
   assert(await page.evaluate(() => [...document.querySelectorAll('.comment-list > .comment')].map(node => node.dataset.commentId).join(',') === 't1_parent,t1_second_root'), 'overlapping source comment update changed Reddit order');
   assert(await page.evaluate(() => document.querySelector('#thread-view video') === window.__ux.search.commentPlayer), 'comment completion replaced the current media player');
-  return {passed:['reply continuation failure preserves comments, total count, and media','reply retry retains post/parent/cursor, focus, and scroll','nested reply pages append and preserve source total distinction','top-level continuation preserves collapsed branch and only reports complete after all cursors and source total agree']};
+
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  await page.waitForFunction(() => document.querySelectorAll('.thread-item').length === 28);
+  await page.evaluate(() => {
+    Object.assign(window.__ux.search, {
+      provideMedia: true,
+      commentPagesEnabled: false,
+      commentPageHandlesMissing: true,
+      comments: [{ id: 't1_parent', parent_id: 't3_video', body: 'Cached reply branch without restart-safe cursor metadata.' }],
+    });
+  });
+  await page.locator('[data-thread-id="t3_video"] .thread-open').click();
+  await page.waitForFunction(() => window.__ux.posts.has('t3_video'));
+  await page.evaluate(() => window.__ux.releasePost('t3_video'));
+  await page.waitForFunction(() => document.querySelector('#discussion-comments .comments-header')?.textContent === '4 comments · 1 downloaded'
+    && document.querySelector('.partial-comments-note'));
+  assert(await page.locator('.comment[data-comment-id="t1_parent"] button[data-testid="collapse-t1_parent"]').innerText() === 'replies not downloaded', 'cached partial discussion without memory-only handles was presented as having no replies');
+  assert(await page.locator('.discussion-refresh').count() === 1, 'cached partial discussion without continuation handles did not offer a way to reacquire them');
+  return {passed:['reply continuation failure preserves comments, total count, and media','reply retry retains post/parent/cursor, focus, and scroll','nested reply pages append and preserve source total distinction','top-level continuation preserves collapsed branch and only reports complete after all cursors and source total agree','partial cached discussion without volatile cursors remains labeled as incomplete and can refresh']};
 }

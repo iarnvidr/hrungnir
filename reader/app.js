@@ -1953,7 +1953,11 @@
     }
     const control = element('div', `comment-page-control${topLevel ? ' top-level' : ''}`);
     const expired = /(?:cursor|continuation).{0,30}expired|expired.{0,30}(?:cursor|continuation)/i.test(state.error);
-    const button = element('button', 'button secondary comment-page-load', state.error ? (expired ? 'Refresh discussion' : 'Retry loading replies') : state.loading ? 'Loading replies…' : topLevel ? 'Load more comments' : 'Load more replies');
+    const buttonText = state.error
+      ? (expired ? 'Refresh discussion' : topLevel ? 'Retry loading comments' : 'Retry loading replies')
+      : state.loading ? (topLevel ? 'Loading comments…' : 'Loading replies…')
+        : topLevel ? 'Load more comments' : 'Load more replies';
+    const button = element('button', 'button secondary comment-page-load', buttonText);
     button.type = 'button';
     button.dataset.testid = `comment-page-${parentId}`;
     button.dataset.parentId = parentId;
@@ -2009,7 +2013,10 @@
     const actions = element('div', 'comment-actions');
     const children = flat ? [] : (byParent.get(comment.id) || []);
     const pageState = commentPageStates.get(commentPageStateKey(thread.id, comment.id));
-    const unavailableChildren = Boolean(pageState && pageState.cursor && !pageState.exhausted);
+    const unavailableChildren = Boolean(
+      (pageState && pageState.cursor && !pageState.exhausted) ||
+      (!pageState && ['partial_browser', 'partial_proxy'].includes(thread.comments_status) && !completeCommentThreads.has(thread.id))
+    );
     const collapse = element('button', '', children.length ? `− hide ${children.length} ${children.length === 1 ? 'reply' : 'replies'}` : unavailableChildren ? 'replies not downloaded' : 'no replies');
     collapse.type = 'button';
     collapse.dataset.testid = `collapse-${comment.id}`;
