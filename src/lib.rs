@@ -12,6 +12,7 @@ pub mod browsing;
 pub mod search_query;
 pub mod ca;
 pub mod cli;
+pub mod comment_pages;
 pub mod desktop;
 pub mod diagnostics;
 pub mod library;
@@ -28,7 +29,7 @@ pub mod reddit_modern;
 pub mod response_capture;
 pub mod trust_policy;
 
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Comment {
     pub id: String,
@@ -384,6 +385,67 @@ impl Cache {
         tx.commit()?;
         Ok(())
     }
+
+    /// Persist a validated comment-page merge, including for saved threads.
+    /// Unlike a fresh page capture, a continuation is additive discussion data
+    /// and must not be discarded by the saved-thread refresh guard.
+    pub fn update_comment_page(&mut self, thread: &Thread, budget: u64) -> Result<()> {
+        thread.validate()?;
+        let payload = serde_json::to_string(thread)?;
+        if payload.len() > 4 * 1024 * 1024 {
+            return Err("merged discussion exceeds 4 MiB per-thread import limit".into());
+        }
+        let tx = self.0.transaction()?;
+        let unprotected: bool = tx
+            .query_row(
+                &format!(
+                    "SELECT {} FROM threads WHERE id=?1",
+                    organization::UNPROTECTED
+                ),
+                [&thread.id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or("Post is no longer cached")?;
+        if unprotected && payload.len() as u64 > budget {
+            return Err("thread exceeds payload budget".into());
+        }
+        let changed = tx.execute(
+            "UPDATE threads SET captured_at=?2,bytes=?3,payload=?4 WHERE id=?1",
+            params![thread.id, thread.captured_at, payload.len() as i64, payload],
+        )?;
+        if changed != 1 {
+            return Err("Post was evicted during comment update".into());
+        }
+        if unprotected {
+            loop {
+                let used: i64 = tx.query_row(
+                    &format!(
+                        "SELECT COALESCE(SUM(bytes),0) FROM threads WHERE {}",
+                        organization::UNPROTECTED
+                    ),
+                    [],
+                    |row| row.get(0),
+                )?;
+                if used as u64 <= budget {
+                    break;
+                }
+                let removed = tx.execute(
+                    &format!(
+                        "DELETE FROM threads WHERE id=(SELECT id FROM threads WHERE id!=?1 AND {} ORDER BY captured_at,id LIMIT 1)",
+                        organization::UNPROTECTED
+                    ),
+                    [&thread.id],
+                )?;
+                if removed == 0 {
+                    return Err("Insufficient unprotected content cache space".into());
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn read(&self, id: &str) -> Result<Option<Thread>> {
         let payload: Option<String> = self
             .0

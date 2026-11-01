@@ -24,9 +24,11 @@
     rows: threads, hits: [], error: false, comments: null,
     failCommunity: null, failAllRedirect: false, holdCommunityFor: null, completedCommunities: [],
     cacheError: false, holdCache: false, completedCacheQueries: [],
+    enableSearchPaging: false, searchPageError: false, searchPageExpired: false, holdSearchPage: false, emptySearchTerminal: false, searchPageCalls: [],
       enablePaging: false, pageError: false, pageExpired: false, freshCursorNext: false, holdPage: false, pageCalls: [], repeatCursor: false, pageThreads: [],
       refreshError: false, refreshNotLoaded: false, refreshHold: false, refreshedComments: null, refreshedMediaUrls: null, provideMedia: false,
       streamCandidateCalls: [], streamPlayCalls: [], streamPlayRejectOnce: false,
+      commentPagesEnabled: false, commentPageError: false, holdCommentPage: false, commentPageCalls: [],
   };
   const pagedThreads = threads.map(thread => ({ ...thread, subreddit: 'space' }));
   window.__ux = { calls, completed, posts, articles, threads, updates, search,
@@ -80,7 +82,58 @@
       if (command === 'search_reddit') {
         if (search.hold) await new Promise(resolve => { search.release = resolve; });
         if (search.error) throw new Error('Search source unavailable');
-        return snap(args.subreddit ? search.rows.filter(thread => thread.subreddit === args.subreddit) : search.rows);
+        const rows = args.subreddit ? search.rows.filter(thread => thread.subreddit === args.subreddit) : search.rows;
+        if (args.cursor) {
+          search.searchPageCalls.push({ ...args });
+          if (search.holdSearchPage) await new Promise(resolve => { search.releaseSearchPage = resolve; });
+          if (search.searchPageExpired) throw new Error('Search cursor expired; start the search again');
+          if (search.searchPageError) throw new Error('Search continuation unavailable');
+          if (search.emptySearchTerminal) return { ...snap([]), search_page: { cursor: null, exhausted: true } };
+          return { ...snap(rows.slice(23, 28)), search_page: { cursor: null, exhausted: true } };
+        }
+        if (search.enableSearchPaging) return { ...snap(rows.slice(0, 25)), search_page: { cursor: 'search-page-1', exhausted: false } };
+        return snap(rows);
+      }
+      if (command === 'fetch_comment_page') {
+        search.commentPageCalls.push({ ...args });
+        if (search.holdCommentPage) await new Promise(resolve => { search.releaseCommentPage = resolve; });
+        if (search.commentPageError) throw new Error('Comment continuation unavailable');
+        if (args.id !== 't3_video') throw new Error('Unknown fixture post');
+        if (args.parent_id === 't1_parent' && args.cursor === 'reply-1') return {
+          parent_id: args.parent_id,
+          comments: [
+            { id: 't1_reply', parent_id: 't1_parent', body: 'First loaded reply.' },
+            { id: 't1_grandchild', parent_id: 't1_reply', body: 'Inline nested reply returned with its parent page.' },
+          ],
+          cursor: null, exhausted: true, loaded_count: 3, source_total: 5,
+          comment_pages: [
+            { parent_id: 't1_parent', cursor: null, exhausted: true },
+            { parent_id: 't1_reply', cursor: 'nested-1', exhausted: false },
+            { parent_id: 't1_grandchild', cursor: null, exhausted: true },
+          ],
+        };
+        if (args.parent_id === 't1_reply' && args.cursor === 'nested-1') return {
+          parent_id: args.parent_id,
+          comments: [{ id: 't1_greatgrandchild', parent_id: 't1_grandchild', body: 'A deeper continuation reply.' }],
+          cursor: null, exhausted: true, loaded_count: 4, source_total: 5,
+          comment_pages: [
+            { parent_id: 't1_reply', cursor: null, exhausted: true },
+            { parent_id: 't1_greatgrandchild', cursor: null, exhausted: true },
+          ],
+        };
+        if (args.parent_id === 't3_video' && args.cursor === 'top-1') return {
+          parent_id: args.parent_id,
+          comments: [
+            { id: 't1_parent', parent_id: 't3_video', body: 'The refreshed parent comment.' },
+            { id: 't1_second_root', parent_id: 't3_video', body: 'A second top-level comment.' },
+          ],
+          cursor: null, exhausted: true, loaded_count: 5, source_total: 5,
+          comment_pages: [
+            { parent_id: 't3_video', cursor: null, exhausted: true },
+            { parent_id: 't1_second_root', cursor: null, exhausted: true },
+          ],
+        };
+        throw new Error('Unknown fixture comment cursor');
       }
       if (command === 'search_cache') {
         const rows = structuredClone(search.hits);
@@ -133,8 +186,17 @@
       if (command === 'fetch_thread') {
         if (args.include_media !== false) {
           if (!search.provideMedia) return new Promise(() => {}); // Simulate a stalled media download.
-          const thread = { ...threads.find(t => t.id === args.id), comments_status: 'partial_proxy', comments: search.comments || [] };
-          return { snapshot: snap([thread]), media: [{ kind: 'video', name: 'Fixture clip', url: `https://asset.localhost/${'a'.repeat(64)}/${args.id}/clip.mp4` }], cache: { comments_hit: true, media_hit: true } };
+          const base = threads.find(t => t.id === args.id);
+          const thread = { ...base, comment_count: search.commentPagesEnabled || search.commentPageHandlesMissing ? 5 : base.comment_count, comments_status: 'partial_proxy', comments: search.comments || [] };
+          return {
+            snapshot: snap([thread]),
+            media: [{ kind: 'video', name: 'Fixture clip', url: `https://asset.localhost/${'a'.repeat(64)}/${args.id}/clip.mp4` }],
+            cache: { comments_hit: true, media_hit: true },
+            ...(search.commentPagesEnabled ? { comment_pages: [
+              { parent_id: args.id, cursor: 'top-1', exhausted: false },
+              { parent_id: 't1_parent', cursor: 'reply-1', exhausted: false },
+            ] } : {}),
+          };
         }
         if (args.refresh) {
           if (search.refreshHold) await new Promise(resolve => { search.releaseRefresh = resolve; });
@@ -151,8 +213,14 @@
         }
         await wait(posts, args.id);
         completed.push(args.id);
-        const thread = { ...threads.find(t => t.id === args.id), comments_status: 'partial_proxy', comments: search.comments || [{ id: 't1_parent', parent_id: args.id, body: 'A useful discussion, available before the video finishes.' }] };
-        return { snapshot: snap([thread]), media: [], cache: { comments_hit: false, media_hit: false } };
+        const thread = { ...threads.find(t => t.id === args.id), comment_count: search.commentPagesEnabled || search.commentPageHandlesMissing ? 5 : threads.find(t => t.id === args.id).comment_count, comments_status: 'partial_proxy', comments: search.comments || [{ id: 't1_parent', parent_id: args.id, body: 'A useful discussion, available before the video finishes.' }] };
+        return {
+          snapshot: snap([thread]), media: [], cache: { comments_hit: false, media_hit: false },
+          ...(search.commentPagesEnabled ? { comment_pages: [
+            { parent_id: args.id, cursor: 'top-1', exhausted: false },
+            { parent_id: 't1_parent', cursor: 'reply-1', exhausted: false },
+          ] } : {}),
+        };
       }
       if (command === 'fetch_link_article') {
         await wait(articles, args.id);

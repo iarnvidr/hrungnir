@@ -37,6 +37,10 @@ fn classic_thumbnail_is_separate_from_media_and_promoted_posts_are_ignored() {
     let html = r#"<div class="thing link" data-fullname="t3_preview"><a class="title" href="https://news.example.org/story">A public article</a><a class="thumbnail"><img src="//a.thumbs.redditmedia.com/photo.jpg"></a><a class="comments empty" href="/r/news/comments/preview/story/">0 comments</a></div><div class="thing link promoted" data-fullname="t3_ad"><a class="title" href="https://news.example.org/ad">Ad</a><a class="thumbnail"><img src="https://i.redd.it/ad.jpg"></a></div>"#;
     let capture = reddit_html::parse(CapturedResponse {
         generation: 0,
+        request_id: 0,
+        request_cursor_fingerprint: None,
+        status_code: 200,
+        content_type_kind: "html",
         url: "https://www.reddit.com/r/news/hot/".into(),
         encoding: String::new(),
         bytes: html.as_bytes().to_vec(),

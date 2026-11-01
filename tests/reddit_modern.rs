@@ -3,6 +3,10 @@ use reddit_offline::{browsing, reddit_html, response_capture::CapturedResponse};
 fn response(url: &str, html: &str) -> CapturedResponse {
     CapturedResponse {
         generation: 0,
+        request_id: 0,
+        request_cursor_fingerprint: None,
+        status_code: 200,
+        content_type_kind: "html",
         url: format!("https://www.reddit.com{url}"),
         encoding: String::new(),
         bytes: html.as_bytes().to_vec(),

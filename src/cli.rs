@@ -16,7 +16,7 @@ const HELP: &str = "Hrungnir --cli [--data-dir DIR] COMMAND\n\
   groups list | put FILE.json | delete ID\n\
   search QUERY | read ID | cache settings [HOURS] | doctor\n\
   fetch-reddit SUBREDDIT [--sort hot|new|top|rising] [--period PERIOD]\n\
-  search-reddit QUERY [--subreddit NAME] [--sort relevance|new|top|comments] [--period PERIOD]\n\
+  search-reddit QUERY [--subreddit NAME] [--sort relevance|new|top|comments] [--period PERIOD] [--pages 1..20]\n\
   diagnostics export FILE.zip\n\
 Live Reddit commands use the native Tauri/WKWebView worker; `search QUERY` stays local.\n\
 Saved library items default to keep forever. Downloads occur only for an explicit save-url.\n";

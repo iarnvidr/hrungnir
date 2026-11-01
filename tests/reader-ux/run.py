@@ -30,6 +30,8 @@ CHECKS = (
     "search-keyboard-check.js",
     "search-layout-check.js",
     "search-recovery-check.js",
+    "comment-pagination-check.js",
+    "comment-activation-check.js",
 )
 
 
@@ -308,7 +310,11 @@ def main() -> int:
             cdp.command("Runtime.enable")
             cdp.command("Runtime.addBinding", {"name": "__readerUxBridge"})
             cdp.command("Emulation.setDeviceMetricsOverride", {"width": 1280, "height": 900, "deviceScaleFactor": 1, "mobile": False})
+            activation_source = (HERE.parent.parent / "src-tauri" / "src" / "comment_activation.js").read_text()
+            native_probe_source = (HERE.parent.parent / "src-tauri" / "src" / "native_ui_probe.js").read_text()
             bootstrap = (HERE / "browser-facade.js").read_text()
+            bootstrap += "\nwindow.__nativeCommentActivationSource = " + json.dumps(activation_source) + ";\n"
+            bootstrap += "window.__nativeUiProbeSource = " + json.dumps(native_probe_source) + ";\n"
             cdp.command("Page.addScriptToEvaluateOnNewDocument", {"source": bootstrap})
             cdp.command("Page.navigate", {"url": url + "__runner.html"})
             cdp.wait_ready()

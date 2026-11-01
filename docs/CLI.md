@@ -13,6 +13,7 @@ hrungnir --cli fetch-reddit soccer --sort hot --period day --pages 3
 hrungnir --cli fetch-reddit all
 hrungnir --cli search-reddit 'goal clip' --subreddit soccer
 hrungnir --cli search-reddit rust --sort relevance --period all
+hrungnir --cli search-reddit rust --no-smart --pages 3
 hrungnir --cli library save t3_POST_ID Football
 hrungnir --cli library save-url 'https://example.org/article' article Reading
 hrungnir --cli library save-url 'https://www.youtube.com/watch?v=VIDEO_ID' video Clips
@@ -31,7 +32,9 @@ Replace example URLs/IDs with the chosen item. `library save` protects an alread
 
 `search QUERY` and `library search QUERY` stay local. `search-reddit QUERY` acquires public Reddit search results; add `--subreddit NAME` for a community-scoped search. Live commands accept `--sort` and `--period` options and return a nonzero process status with JSON error output if acquisition fails. An empty search is a successful empty result. Reddit routes that redirect outside public community pages, such as the current `/r/all` redirect, remain unavailable; the CLI does not follow them into account or home pages.
 
-`fetch-reddit --pages N` requests 1–20 subreddit-listing pages (default 1). The first page contains the posts Reddit server-rendered for that listing; it can have fewer than 25 posts. Each later page consumes one validated continuation fragment and returns at most 25 posts, along with an opaque cursor and explicit exhaustion state. Pagination deduplicates post IDs and keeps complete cached post bodies/comments locally; listing rows carry source-reported `comment_count` separately from the cached comment subset. A listing refresh can update that total without replacing the cached discussion. Search results do not currently paginate. Cursors are tied to the listing scope and expire after 15 minutes; refresh the listing if one expires.
+`fetch-reddit --pages N` requests 1–20 subreddit-listing pages (default 1). The first page contains the posts Reddit server-rendered for that listing; it can have fewer than 25 posts. Each later page consumes one validated continuation fragment and returns at most 25 posts, along with an opaque cursor and explicit exhaustion state. Pagination deduplicates post IDs and keeps complete cached post bodies/comments locally; listing rows carry source-reported `comment_count` separately from the cached comment subset. A listing refresh can update that total without replacing the cached discussion.
+
+`search-reddit --pages N` requests 1–20 public search pages (default 1), globally or within `--subreddit NAME`. The first page contains Reddit's server-rendered results and may contain fewer than 25 posts; each continuation fragment adds at most 25. Search results preserve source order, deduplicate post IDs, and return `search_page.cursor` plus `search_page.exhausted` in the JSON result. Cursors are opaque, bound to the search query/scope/sort/period/smart setting, and expire after 15 minutes. Re-run the same search if a cursor expires.
 
 Example group JSON:
 

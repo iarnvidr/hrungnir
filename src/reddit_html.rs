@@ -5,6 +5,7 @@ use crate::{
     Comment, Result, Thread,
 };
 use scraper::{ElementRef, Html, Selector};
+use sha2::{Digest, Sha256};
 use std::io::Read;
 use url::Url;
 
@@ -120,6 +121,502 @@ fn decode(response: &crate::response_capture::CapturedResponse) -> Result<String
     Ok(String::from_utf8(decoded).map_err(|error| error.utf8_error())?)
 }
 
+/// Debug-only native probe summary for comment continuation markup. The summary
+/// deliberately records route paths and query-key names only, never cursor or
+/// session values from Reddit's rendered HTML.
+pub fn comment_response_structure(
+    response: &crate::response_capture::CapturedResponse,
+) -> Result<serde_json::Value> {
+    let html = decode(response)?;
+    let document = Html::parse_document(&html);
+    let route_summary = |raw: &str| {
+        let parsed = url::Url::parse("https://www.reddit.com")
+            .ok()
+            .and_then(|base| base.join(raw).ok());
+        parsed.map(|url| {
+            let query_shapes: Vec<_> = url
+                .query_pairs()
+                .map(|(key, value)| {
+                    let value = value.as_ref();
+                    let shape = if value.is_empty() {
+                        "empty"
+                    } else if value.bytes().all(|byte| byte.is_ascii_digit()) {
+                        "digits"
+                    } else if matches!(value, "true" | "false") {
+                        "boolean"
+                    } else {
+                        "opaque"
+                    };
+                    if key == "sort" {
+                        serde_json::json!({"key":key,"shape":shape,"length":value.len(),"enum":value})
+                    } else {
+                        serde_json::json!({"key":key,"shape":shape,"length":value.len()})
+                    }
+                })
+                .collect();
+            serde_json::json!({"path":url.path(),"query_shapes":query_shapes})
+        })
+    };
+    let partials = document
+        .select(&selector("faceplate-partial[src]"))
+        .map(|element| {
+            let value = element.value();
+            let src = value.attr("src").unwrap_or_default();
+            let route = route_summary(src);
+            let parent_comment = element
+                .ancestors()
+                .filter_map(ElementRef::wrap)
+                .find(|ancestor| ancestor.value().name() == "shreddit-comment");
+            serde_json::json!({
+                "slot":value.attr("slot"),
+                "element":value.name(),
+                "route":route,
+                "name":value.attr("name"),
+                "parent_comment_id":parent_comment.and_then(|comment| comment.value().attr("thingid")),
+                "attribute_names":value.attrs().map(|(name, _)| name).take(24).collect::<Vec<_>>(),
+            })
+        })
+        .filter(|partial| {
+            let path = partial["route"]["path"].as_str().unwrap_or_default();
+            let slot = partial["slot"].as_str().unwrap_or_default();
+            let name = partial["name"].as_str().unwrap_or_default();
+            slot == "load-after" || path.contains("comment") || name.contains("comment")
+        })
+        .take(40)
+        .collect::<Vec<_>>();
+    let controls = document
+        .select(&selector("button, a[href]"))
+        .filter_map(|element| {
+            let value = element.value();
+            let label = value
+                .attr("aria-label")
+                .or_else(|| value.attr("slot"))
+                .map(str::to_owned)
+                .unwrap_or_else(|| text(element, 120));
+            if !label.to_ascii_lowercase().contains("more")
+                && !label.to_ascii_lowercase().contains("continue")
+                && !label.to_ascii_lowercase().contains("repl")
+            {
+                return None;
+            }
+            let route = value.attr("href").and_then(|href| {
+                route_summary(href).map(|summary| summary["path"].clone())
+            });
+            let parent = element
+                .ancestors()
+                .filter_map(ElementRef::wrap)
+                .find(|ancestor| ancestor.value().name() == "shreddit-comment");
+            Some(serde_json::json!({
+                "element":value.name(),
+                "label":label.chars().take(120).collect::<String>(),
+                "route_path":route,
+                "comment_id":parent.and_then(|comment| comment.value().attr("thingid")),
+                "attribute_names":value.attrs().map(|(name, _)| name).take(24).collect::<Vec<_>>(),
+            }))
+        })
+        .take(40)
+        .collect::<Vec<_>>();
+    let reply_controls = document
+        .select(&selector("button"))
+        .filter_map(|button| {
+            let value = button.value();
+            let label = value
+                .attr("aria-label")
+                .map(str::to_owned)
+                .unwrap_or_else(|| text(button, 80));
+            if !label.to_ascii_lowercase().contains("more replies")
+                && !label.to_ascii_lowercase().contains("continue")
+            {
+                return None;
+            }
+            let parent = button
+                .ancestors()
+                .filter_map(ElementRef::wrap)
+                .find(|ancestor| ancestor.value().name() == "shreddit-comment");
+            let reload_route = parent
+                .and_then(|comment| comment.value().attr("reload-url"))
+                .and_then(route_summary);
+            Some(serde_json::json!({
+                "label":label.chars().take(80).collect::<String>(),
+                "class":value.attr("class").map(|class| class.chars().take(160).collect::<String>()),
+                "comment_id":parent.and_then(|comment| comment.value().attr("thingid")),
+                "reload_route":reload_route,
+                "comment_attribute_names":parent.map(|comment| comment.value().attrs().map(|(name, _)| name).take(32).collect::<Vec<_>>()),
+            }))
+        })
+        .take(40)
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "comment_tree_count":document.select(&selector("shreddit-comment-tree")).count(),
+        "rendered_comment_count":document.select(&selector("shreddit-comment[thingid]")).count(),
+        "partial_count":document.select(&selector("faceplate-partial[src]")).count(),
+        "partials":partials,
+        "more_controls":controls,
+        "reply_controls":reply_controls,
+    }))
+}
+
+/// Return only the parent identities that have a validated continuation in a
+/// rendered public discussion page or comment fragment. Source URLs and their
+/// transient request tokens never leave the acquisition process.
+pub fn comment_page_parents(
+    response: &crate::response_capture::CapturedResponse,
+    thread_id: &str,
+) -> Result<Vec<String>> {
+    if !thread_id.starts_with("t3_")
+        || !(3..=16).contains(&thread_id[3..].len())
+        || !thread_id[3..].bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err("Invalid post identity for comment continuation".into());
+    }
+    let base = Url::parse(&response.url)?;
+    let base_parts: Vec<_> = base.path().trim_matches('/').split('/').collect();
+    if !crate::browsing::reddit_url(&response.url) {
+        return Err("Comment page source is not a public discussion".into());
+    }
+    let expected_post_suffix = thread_id.strip_prefix("t3_").unwrap_or_default();
+    let expected_subreddit = if base_parts.len() >= 4
+        && base_parts[0] == "r"
+        && base_parts[2] == "comments"
+        && base_parts[3] == expected_post_suffix
+    {
+        base_parts[1]
+    } else if base_parts.len() == 5
+        && base_parts[..3] == ["svc", "shreddit", "more-comments"]
+        && base_parts[4] == thread_id
+    {
+        base_parts[3]
+    } else {
+        return Err("Comment page source is not scoped to the requested post".into());
+    };
+    let html = decode(response)?;
+    let document = Html::parse_document(&html);
+    let mut parents = Vec::new();
+    let mut seen_parents = std::collections::HashSet::new();
+    for partial in document.select(&selector("faceplate-partial[src]")) {
+        let Some(src) = partial.value().attr("src") else {
+            continue;
+        };
+        let Ok(url) = base.join(src) else {
+            continue;
+        };
+        let route_parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
+        let same_origin = url.origin() == base.origin();
+        let same_scope = route_parts.len() == 5
+            && route_parts[..3] == ["svc", "shreddit", "more-comments"]
+            && route_parts[3].eq_ignore_ascii_case(expected_subreddit)
+            && route_parts[4] == thread_id;
+        if !same_origin || !same_scope {
+            continue;
+        }
+        if !crate::browsing::comment_more_partial_path(url.path(), url.query()) {
+            return Err("Unsupported public comment continuation query shape".into());
+        }
+        let parent = partial
+            .ancestors()
+            .filter_map(ElementRef::wrap)
+            .find(|ancestor| ancestor.value().name() == "shreddit-comment")
+            .and_then(|comment| comment.value().attr("thingid"))
+            .unwrap_or(thread_id);
+        if parent == thread_id
+            || (parent.starts_with("t1_")
+                && (3..=16).contains(&parent[3..].len())
+                && parent[3..].bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        {
+            if seen_parents.insert(parent.to_owned()) {
+                parents.push(parent.to_owned());
+            }
+        }
+    }
+    Ok(parents)
+}
+
+#[derive(Debug)]
+pub struct CommentPageFragment {
+    pub comments: Vec<Comment>,
+    pub continuation_parents: Vec<String>,
+}
+
+pub const COMMENT_PAGE_BRANCH_MISMATCH: &str =
+    "Comment response contained no replies for the requested branch";
+
+fn comment_depth(comment: ElementRef<'_>) -> usize {
+    comment
+        .ancestors()
+        .filter_map(ElementRef::wrap)
+        .filter(|ancestor| ancestor.value().name() == "shreddit-comment")
+        .count()
+}
+
+fn own_comment_body(comment: ElementRef<'_>, id: &str) -> Option<String> {
+    comment
+        .select(&selector("[slot=\"comment\"]"))
+        .find(|body| {
+            body.ancestors()
+                .filter_map(ElementRef::wrap)
+                .find(|owner| owner.value().name() == "shreddit-comment")
+                .and_then(|owner| owner.value().attr("thingid"))
+                == Some(id)
+        })
+        .map(|body| text(body, 3000))
+        .filter(|body| !body.is_empty())
+}
+
+fn valid_comment_id(id: &str) -> bool {
+    id.starts_with("t1_")
+        && id.len() <= 32
+        && id[3..].bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+/// Return bounded, value-free structure counts for a comment-page parser
+/// mismatch. This intentionally never emits comment text, identities, URLs, or
+/// continuation cursor values.
+pub fn comment_page_shape(
+    response: &crate::response_capture::CapturedResponse,
+    thread_id: &str,
+    requested_parent: &str,
+) -> Result<serde_json::Value> {
+    let html = decode(response)?;
+    let document = Html::parse_document(&html);
+    let total_comment_nodes = document
+        .select(&selector("shreddit-comment[thingid]"))
+        .count();
+    let mut scanned = 0usize;
+    let mut with_parent = 0usize;
+    let mut missing_parent = 0usize;
+    let mut with_body = 0usize;
+    let mut usable = 0usize;
+    let mut requested_parent_usable = 0usize;
+    let mut root_depth_zero = 0usize;
+    let mut dom_depth_nonzero = 0usize;
+    let mut root_depth_zero_missing_parent = 0usize;
+    let mut root_depth_zero_usable = 0usize;
+    let mut dom_nested_missing_parent = 0usize;
+    let mut foreign_post = 0usize;
+    let mut source_depth_zero = 0usize;
+    let mut source_depth_missing = 0usize;
+    let mut source_depth_nonzero = 0usize;
+    let mut source_depth_zero_missing_parent = 0usize;
+    let mut source_depth_zero_usable = 0usize;
+    for comment in document
+        .select(&selector("shreddit-comment[thingid]"))
+        .take(1000)
+    {
+        scanned += 1;
+        let value = comment.value();
+        let depth = comment_depth(comment);
+        let id = value.attr("thingid").unwrap_or_default();
+        let depth_attr = value.attr("depth").map(str::trim);
+        let has_source_depth_zero = depth_attr == Some("0");
+        if has_source_depth_zero {
+            source_depth_zero += 1;
+        } else if depth_attr.is_some() {
+            source_depth_nonzero += 1;
+        } else {
+            source_depth_missing += 1;
+        }
+        let parent = value
+            .attr("parentid")
+            .map(str::trim)
+            .filter(|parent| !parent.is_empty());
+        if parent.is_some() {
+            with_parent += 1;
+        } else {
+            missing_parent += 1;
+            if depth == 0 {
+                root_depth_zero_missing_parent += 1;
+            } else {
+                dom_nested_missing_parent += 1;
+            }
+            if has_source_depth_zero {
+                source_depth_zero_missing_parent += 1;
+            }
+        }
+        if depth == 0 {
+            root_depth_zero += 1;
+        } else {
+            dom_depth_nonzero += 1;
+        }
+        let body = own_comment_body(comment, id);
+        if body.is_some() {
+            with_body += 1;
+        }
+        let post_matches = value
+            .attr("postid")
+            .is_none_or(|post_id| post_id == thread_id);
+        if !post_matches {
+            foreign_post += 1;
+        }
+        let fallback_root_parent = parent.is_none()
+            && requested_parent == thread_id
+            && depth == 0
+            && has_source_depth_zero;
+        let normalized_parent = parent.or_else(|| fallback_root_parent.then_some(thread_id));
+        let is_usable = valid_comment_id(id) && post_matches && body.is_some()
+            && normalized_parent.is_some();
+        if is_usable {
+            usable += 1;
+            if depth == 0 {
+                root_depth_zero_usable += 1;
+            }
+            if has_source_depth_zero {
+                source_depth_zero_usable += 1;
+            }
+            if normalized_parent == Some(requested_parent) {
+                requested_parent_usable += 1;
+            }
+        }
+    }
+    let trimmed_html = html.trim_start();
+    let body_starts_json = trimmed_html.starts_with('{') || trimmed_html.starts_with('[');
+    let raw_comment_markers = html.to_ascii_lowercase().matches("<shreddit-comment").count();
+    Ok(serde_json::json!({
+        "status_code": response.status_code,
+        "content_type": response.content_type_kind,
+        "response_bytes": response.bytes.len(),
+        "request_parent_is_root": requested_parent == thread_id,
+        "comment_nodes_total": total_comment_nodes,
+        "comment_nodes_scanned": scanned,
+        "comment_nodes_truncated": total_comment_nodes > scanned,
+        "comment_nodes_with_parent": with_parent,
+        "comment_nodes_missing_parent": missing_parent,
+        "comment_nodes_with_own_body": with_body,
+        "comment_nodes_usable": usable,
+        "requested_parent_usable": requested_parent_usable,
+        "dom_depth_zero_nodes": root_depth_zero,
+        "dom_depth_nonzero_nodes": dom_depth_nonzero,
+        "dom_depth_zero_missing_parent": root_depth_zero_missing_parent,
+        "dom_depth_zero_usable": root_depth_zero_usable,
+        "dom_nested_missing_parent": dom_nested_missing_parent,
+        "foreign_post_nodes": foreign_post,
+        "source_depth_zero_nodes": source_depth_zero,
+        "source_depth_missing_nodes": source_depth_missing,
+        "source_depth_nonzero_nodes": source_depth_nonzero,
+        "source_depth_zero_missing_parent": source_depth_zero_missing_parent,
+        "source_depth_zero_usable": source_depth_zero_usable,
+        "raw_comment_markers": raw_comment_markers,
+        "template_nodes": document.select(&selector("template")).count(),
+        "script_nodes": document.select(&selector("script")).count(),
+        "body_starts_json": body_starts_json,
+    }))
+}
+
+/// Parse the returned branch for the parent whose validated continuation was
+/// requested. Reddit can inline nested replies in the same fragment; retain
+/// those descendants so their own continuations remain reachable.
+pub fn parse_comment_page(
+    response: &crate::response_capture::CapturedResponse,
+    thread_id: &str,
+    parent_id: &str,
+    subreddit: &str,
+) -> Result<CommentPageFragment> {
+    let url = Url::parse(&response.url)?;
+    let route_parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
+    if !crate::browsing::comment_more_partial_path(url.path(), url.query())
+        || route_parts.get(3).is_none_or(|community| !community.eq_ignore_ascii_case(subreddit))
+        || route_parts.get(4).is_none_or(|post| *post != thread_id)
+    {
+        return Err("Comment response did not match the requested public post".into());
+    }
+    let html = decode(response)?;
+    let document = Html::parse_document(&html);
+    let mut candidates = Vec::new();
+    let mut known_ids = std::collections::HashSet::new();
+    let mut body_bytes = 0usize;
+    for element in document.select(&selector("shreddit-comment[thingid]")) {
+        let value = element.value();
+        let Some(id) = value.attr("thingid").filter(|id| valid_comment_id(id)) else {
+            continue;
+        };
+        if value.attr("postid").is_some_and(|post| post != thread_id)
+            || !known_ids.insert(id.to_owned()) {
+            continue;
+        }
+        let dom_depth = comment_depth(element);
+        let source_depth_zero = value.attr("depth").map(str::trim) == Some("0");
+        let actual_parent = value
+            .attr("parentid")
+            .map(str::trim)
+            .filter(|parent| !parent.is_empty())
+            .or_else(|| {
+                (parent_id == thread_id && dom_depth == 0 && source_depth_zero)
+                    .then_some(thread_id)
+            });
+        let Some(actual_parent) = actual_parent else {
+            continue;
+        };
+        let Some(body) = own_comment_body(element, id) else {
+            continue;
+        };
+        body_bytes = body_bytes.saturating_add(body.len());
+        if body_bytes > 350_000 || candidates.len() == 300 {
+            return Err("Comment response exceeded its page budget".into());
+        }
+        candidates.push(Comment {
+            id: id.to_owned(),
+            parent_id: actual_parent.to_owned(),
+            body,
+            author: value
+                .attr("author")
+                .map(|author| author.chars().take(100).collect::<String>())
+                .filter(|author| !author.is_empty()),
+            author_flair: None,
+        });
+    }
+    // Keep only the requested parent and comments whose complete ancestor
+    // chain is represented in this fragment. This excludes unrelated branches
+    // while preserving inline grandchildren and deeper replies.
+    fn append_children(
+        parent: &str,
+        candidates: &[Comment],
+        children: &std::collections::BTreeMap<String, Vec<usize>>,
+        included: &mut std::collections::HashSet<String>,
+        output: &mut Vec<Comment>,
+    ) {
+        if let Some(indices) = children.get(parent) {
+            for index in indices {
+                let comment = &candidates[*index];
+                if included.insert(comment.id.clone()) {
+                    output.push(comment.clone());
+                    append_children(&comment.id, candidates, children, included, output);
+                }
+            }
+        }
+    }
+    let mut children = std::collections::BTreeMap::<String, Vec<usize>>::new();
+    for (index, comment) in candidates.iter().enumerate() {
+        children.entry(comment.parent_id.clone()).or_default().push(index);
+    }
+    let mut included_ids = std::collections::HashSet::new();
+    let mut comments = Vec::new();
+    append_children(parent_id, &candidates, &children, &mut included_ids, &mut comments);
+    if comments.is_empty() {
+        return Err(COMMENT_PAGE_BRANCH_MISMATCH.into());
+    }
+    let source_parents = comment_page_parents(response, thread_id)?;
+    let mut continuation_parents = Vec::new();
+    let mut seen_continuations = std::collections::HashSet::new();
+    for source_parent in source_parents {
+        // A fragment-level continuation has no enclosing comment element. In
+        // this parser its scope is the branch the caller explicitly requested,
+        // not the whole thread's top-level feed.
+        let parent = if source_parent == thread_id && parent_id != thread_id {
+            parent_id
+        } else {
+            source_parent.as_str()
+        };
+        if (parent == parent_id || included_ids.contains(parent))
+            && seen_continuations.insert(parent.to_owned())
+        {
+            continuation_parents.push(parent.to_owned());
+        }
+    }
+    Ok(CommentPageFragment {
+        comments,
+        continuation_parents,
+    })
+}
+
 fn interim_page(document: &Html, post: bool) -> Option<&'static str> {
     if document
         .select(&selector("form input[name=\"js_challenge\"]"))
@@ -160,6 +657,25 @@ pub fn parse_listing_partial(
     crate::reddit_modern::parse_partial(&Html::parse_document(&html), &listing, limit)
 }
 
+/// Parse Reddit's observed search-results cursor endpoint for the active,
+/// validated search URL. The service URL is never accepted from UI input.
+pub fn parse_search_partial(
+    response: crate::response_capture::CapturedResponse,
+    search_url: &str,
+) -> Result<PageCapture> {
+    let search = Url::parse(search_url)?;
+    let continuation = Url::parse(&response.url)?;
+    if !crate::browsing::search_partial_matches(&search, &continuation) {
+        return Err("Response was not the active public search continuation".into());
+    }
+    let html = decode(&response)?;
+    crate::reddit_modern::parse_search_partial(
+        &Html::parse_document(&html),
+        &search,
+        &continuation,
+    )
+}
+
 #[cfg(test)]
 mod classic_comment_count_tests {
     use super::*;
@@ -181,11 +697,96 @@ mod classic_comment_count_tests {
 /// result text, request query, cookies, or signed URLs.
 pub fn search_response_structure(
     response: &crate::response_capture::CapturedResponse,
+    active_search_url: &str,
 ) -> Result<serde_json::Value> {
     let html = decode(response)?;
     let document = Html::parse_document(&html);
+    let response_base = Url::parse(&response.url)?;
+    let search = Url::parse(active_search_url)?;
     let count = |css: &str| document.select(&selector(css)).take(5000).count();
+    let cursor_fingerprint = |url: &Url| {
+        let mut cursor = None;
+        for (key, value) in url.query_pairs() {
+            if key == "cursor" {
+                if cursor.replace(value.into_owned()).is_some() {
+                    return None;
+                }
+            }
+        }
+        let cursor = cursor.filter(|value: &String| !value.is_empty())?;
+        let mut hash = Sha256::new();
+        hash.update(b"hrungnir-search-source-cursor-v1\0");
+        hash.update(cursor.as_bytes());
+        Some(format!("{:x}", hash.finalize()))
+    };
+    let validated_search_continuations: Vec<_> = document
+        .select(&selector("faceplate-partial[src]"))
+        .take(80)
+        .filter_map(|node| {
+            let url = search
+                .join(node.value().attr("src")?)
+                .ok()?;
+            if !crate::browsing::search_partial_matches(&search, &url) {
+                return None;
+            }
+            let mut query_keys: Vec<_> = url
+                .query_pairs()
+                .map(|(key, _)| key.into_owned())
+                .collect();
+            query_keys.sort();
+            query_keys.dedup();
+            let method = match node.value().attr("method").map(str::to_ascii_lowercase).as_deref() {
+                None => "missing",
+                Some("get") => "get",
+                Some("post") => "post",
+                Some(_) => "other",
+            };
+            let loading = match node.value().attr("loading").map(str::to_ascii_lowercase).as_deref() {
+                None => "missing",
+                Some("eager") => "eager",
+                Some("lazy") => "lazy",
+                Some("auto") => "auto",
+                Some(_) => "other",
+            };
+            Some(serde_json::json!({
+                "path":url.path(),
+                "query_keys":query_keys,
+                "cursor_fingerprint":cursor_fingerprint(&url),
+                "method":method,
+                "loading":loading,
+                "attribute_names":node.value().attrs().map(|(name, _)| name).take(32).collect::<Vec<_>>(),
+            }))
+        })
+        .collect();
+    let response_cursor_fingerprint = cursor_fingerprint(&response_base);
     let mut testids = std::collections::BTreeMap::<String, usize>::new();
+    let search_navigation: Vec<_> = document
+        .select(&selector(
+            "faceplate-partial[src], a[rel~='next'][href], button[rel~='next']",
+        ))
+        .take(40)
+        .filter_map(|node| {
+            let target = node
+                .value()
+                .attr("src")
+                .or_else(|| node.value().attr("href"))?;
+            let url = response_base.join(target).ok()?;
+            let mut query_keys: Vec<_> = url
+                .query_pairs()
+                .map(|(key, _)| key.into_owned())
+                .collect();
+            query_keys.sort();
+            query_keys.dedup();
+            Some(serde_json::json!({
+                "tag": node.value().name(),
+                "path": url.path(),
+                "query_keys": query_keys,
+                "slot": node.value().attr("slot"),
+                "rel": node.value().attr("rel"),
+                "testid": node.value().attr("data-testid"),
+            }))
+        })
+        .collect();
     let cards: Vec<_> = document
         .select(&selector("[data-testid=\"search-sdui-post\"]"))
         .take(100)
@@ -207,7 +808,6 @@ pub fn search_response_structure(
             }
         }
     }
-    let response_base = Url::parse(&response.url)?;
     let preview_card_paths: Vec<Vec<String>> = preview_cards
         .iter()
         .map(|card| {
@@ -231,6 +831,10 @@ pub fn search_response_structure(
     }
     Ok(serde_json::json!({
         "html_bytes":html.len(),
+        "request_id":response.request_id,
+        "response_cursor_fingerprint":response_cursor_fingerprint,
+        "validated_search_continuation_count":validated_search_continuations.len(),
+        "validated_search_continuations":validated_search_continuations,
         "search_result_cards":count("[data-testid=\"search-sdui-post\"]"),
         "search_result_title_links":count("a[data-testid=\"post-title-text\"][href], a[data-testid=\"post-title\"][href]"),
         "search_card_title_links":cards.iter().map(|card| card.select(&title_selector).count()).sum::<usize>(),
@@ -243,6 +847,7 @@ pub fn search_response_structure(
         "sort_dropdowns":count("search-sort-dropdown-menu"),
         "next_links_or_buttons":count("a[rel=\"next\"], button[aria-label*=\"Next\"], button[aria-label*=\"next\"]"),
         "listing_continuations":count("faceplate-partial[slot=\"load-after\"][src]"),
+        "search_navigation":search_navigation,
         "search_testids":testids,
     }))
 }
@@ -630,4 +1235,46 @@ pub fn parse(response: crate::response_capture::CapturedResponse) -> Result<Page
     }
     page.validate()?;
     Ok(page)
+}
+
+#[cfg(test)]
+mod search_structure_tests {
+    use super::*;
+
+    #[test]
+    fn search_partial_structure_records_bounded_safe_dom_metadata() {
+        let search_url = "https://www.reddit.com/search/?q=rust&sort=relevance&t=all";
+        let response_url = "https://www.reddit.com/svc/shreddit/search/?cursor=opaque-request&q=rust&sort=relevance&t=all";
+        let html = r#"
+            <faceplate-partial src="/svc/shreddit/search/?cursor=opaque-request&amp;q=rust&amp;sort=relevance&amp;t=all"
+              method="GET" loading="lazy" data-source-private="private-value">
+              <faceplate-partial src="/svc/shreddit/search/?cursor=opaque-next&amp;q=rust&amp;sort=relevance&amp;t=all"
+                method="POST" loading="auto" data-next-private="another-private-value"></faceplate-partial>
+            </faceplate-partial>
+        "#;
+        let response = crate::response_capture::CapturedResponse {
+            generation: 4,
+            request_id: 12,
+            request_cursor_fingerprint: None,
+            status_code: 200,
+            content_type_kind: "html",
+            url: response_url.into(),
+            encoding: "identity".into(),
+            bytes: html.as_bytes().to_vec(),
+        };
+        let structure = search_response_structure(&response, search_url).unwrap();
+        assert_eq!(structure["request_id"], 12);
+        assert_eq!(structure["validated_search_continuation_count"], 2);
+        let continuations = structure["validated_search_continuations"].as_array().unwrap();
+        assert_eq!(continuations[0]["method"], "get");
+        assert_eq!(continuations[0]["loading"], "lazy");
+        assert_eq!(continuations[1]["method"], "post");
+        assert_eq!(continuations[1]["loading"], "auto");
+        assert!(continuations[0]["attribute_names"].to_string().contains("data-source-private"));
+        assert!(continuations[1]["attribute_names"].to_string().contains("data-next-private"));
+        assert!(!structure.to_string().contains("opaque-request"));
+        assert!(!structure.to_string().contains("opaque-next"));
+        assert!(!structure.to_string().contains("private-value"));
+        assert!(!structure.to_string().contains("another-private-value"));
+    }
 }

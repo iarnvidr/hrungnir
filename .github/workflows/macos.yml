@@ -64,7 +64,10 @@ jobs:
           # macOS /var is a system symlink; fixtures need its physical path.
           export TMPDIR="$(python3 -c 'import pathlib, tempfile; print(pathlib.Path(tempfile.gettempdir()).resolve())')"
           cargo test --locked
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
           python3 scripts/test-ffmpeg-lgpl.py
+          python3 scripts/test-macos-policy.py
+          python3 scripts/test-actions-native-reader.py
 
       - name: Assemble app bundle
         run: python3 scripts/package-macos.py
@@ -105,3 +108,42 @@ jobs:
             artifacts/native-receipt.json
           if-no-files-found: error
           retention-days: 90
+
+      - name: Build isolated hidden native test app
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "14.0"
+          CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
+        run: |
+          cargo build --locked --example replay-comment-page --target aarch64-apple-darwin
+          python3 scripts/test-comment-replay.py "$CARGO_TARGET_DIR/aarch64-apple-darwin/debug/examples/replay-comment-page"
+          cargo tauri build --debug --no-bundle --target aarch64-apple-darwin --config src-tauri/tauri.test.conf.json
+
+      - name: Package and bind native test artifact
+        env:
+          SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 scripts/package-macos.py --test
+          app="artifacts/native-test/Hrungnir Test.app"
+          codesign --force --sign - "$app/Contents/Resources/bin/yt-dlp"
+          codesign --force --sign - "$app/Contents/Resources/bin/ffmpeg"
+          codesign --force --sign - "$app/Contents/Resources/bin/hrungnir-comment-replay"
+          codesign --force --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          version="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
+          archive="artifacts/native-test/Hrungnir-Test-$version-macos-arm64.zip"
+          python3 scripts/archive-macos.py --test
+          python3 scripts/actions-native-reader.py receipt \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --source-head "$SOURCE_HEAD" --checkout-sha "$GITHUB_SHA" \
+            --version "$version" --archive "$archive" \
+            --output artifacts/native-test/test-receipt.json
+
+      - name: Upload isolated native test app
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hrungnir-native-reader-test-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/native-test/*.zip
+            artifacts/native-test/test-receipt.json
+          if-no-files-found: error
+          retention-days: 30

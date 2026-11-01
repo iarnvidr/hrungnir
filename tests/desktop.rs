@@ -9,6 +9,57 @@ fn capture(store: &DesktopStore, url: &str, thread: &reddit_offline::Thread) {
 }
 
 #[test]
+fn comment_page_merge_persists_new_replies_and_preserves_source_total() {
+    let root = std::env::temp_dir().join(format!(
+        "hrungnir-comment-page-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let database = root.join("cache.sqlite");
+    let store = DesktopStore::new(database.clone());
+    let mut thread: reddit_offline::Thread =
+        serde_json::from_str(include_str!("../fixtures/thread.json")).unwrap();
+    thread.source = Some("proxy".into());
+    thread.subreddit = "AskReddit".into();
+    thread.permalink = Some("https://www.reddit.com/r/AskReddit/comments/fixture/title/".into());
+    thread.comment_count = Some(900);
+    thread.comments_status = Some("partial_proxy".into());
+    capture(
+        &store,
+        "https://www.reddit.com/r/AskReddit/comments/fixture/title/",
+        &thread,
+    );
+
+    let loaded = store
+        .merge_comment_page(
+            "t3_fixture",
+            "t1_parent",
+            vec![reddit_offline::Comment {
+                id: "t1_page1".into(),
+                parent_id: "t1_parent".into(),
+                body: "newreplysearchmarker from next page".into(),
+                author: Some("reader".into()),
+                author_flair: None,
+            }],
+        )
+        .unwrap();
+    assert_eq!(loaded, 3);
+    let reopened_store = DesktopStore::new(database);
+    let reopened = reopened_store
+        .read("t3_fixture")
+        .unwrap()
+        .unwrap();
+    assert!(reopened.comments.iter().any(|comment| comment.id == "t1_page1"));
+    assert_eq!(reopened.comment_count, Some(900));
+    assert_eq!(reopened.comments_status.as_deref(), Some("partial_proxy"));
+    assert!(!reopened.missing.iter().any(|id| id == "t1_page1"));
+    let hits = reopened_store.search("newreplysearchmarker", None, 10).unwrap();
+    assert!(hits.iter().any(|hit| hit.id == "t3_fixture" && hit.comment_id.as_deref() == Some("t1_page1")));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn listing_and_search_refresh_do_not_downgrade_ready_discussions_or_media() {
     for empty in [false, true] {
         let root = std::env::temp_dir().join(format!(

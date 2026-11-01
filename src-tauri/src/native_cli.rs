@@ -18,6 +18,7 @@ pub enum Command {
         sort: String,
         period: String,
         smart: bool,
+        pages: usize,
     },
 }
 
@@ -97,6 +98,10 @@ pub fn parse(args: &[String]) -> Result<Option<Request>, String> {
                 pages = take_value(&args, &mut index, "--pages")?.parse().map_err(|_| "--pages must be between 1 and 20")?;
                 if !(1..=20).contains(&pages) { return Err("--pages must be between 1 and 20".into()); }
             }
+            "--pages" if verb == "search-reddit" => {
+                pages = take_value(&args, &mut index, "--pages")?.parse().map_err(|_| "--pages must be between 1 and 20")?;
+                if !(1..=20).contains(&pages) { return Err("--pages must be between 1 and 20".into()); }
+            }
             "--subreddit" if verb == "search-reddit" => {
                 subreddit = Some(take_value(&args, &mut index, "--subreddit")?);
             }
@@ -137,6 +142,7 @@ pub fn parse(args: &[String]) -> Result<Option<Request>, String> {
             sort,
             period,
             smart,
+            pages,
         }
     };
     Ok(Some(Request { data_dir, command }))
@@ -163,20 +169,56 @@ pub async fn run(app: AppHandle, browser: Arc<Browser>, request: Request) {
             sort,
             period,
             smart,
+            pages,
         } => {
-            let result = crate::search_reddit_operation(
-                &browser,
-                None,
-                &query,
-                subreddit.as_deref(),
-                &sort,
-                &period,
-                smart,
-            )
-            .await;
+            let mut cursor = None;
+            let mut combined: Option<reddit_offline::desktop::Snapshot> = None;
+            let mut failure = None;
+            for _ in 0..pages {
+                match crate::search_reddit_page_operation(
+                    &browser,
+                    None,
+                    &query,
+                    subreddit.as_deref(),
+                    &sort,
+                    &period,
+                    smart,
+                    cursor.as_deref(),
+                )
+                .await
+                {
+                    Ok(mut page) => {
+                        let next = page.search_page.as_ref().and_then(|state| state.cursor.clone());
+                        if let Some(current) = combined.as_mut() {
+                            for thread in page.threads.drain(..) {
+                                if current.threads.iter().all(|existing| existing.id != thread.id) {
+                                    current.threads.push(thread);
+                                }
+                            }
+                            current.media_hints.extend(page.media_hints);
+                            current.link_previews.extend(page.link_previews);
+                            current.search_page = page.search_page;
+                        } else {
+                            combined = Some(page);
+                        }
+                        cursor = next;
+                        if cursor.is_none() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        failure = Some(error);
+                        break;
+                    }
+                }
+            }
+            let result = match failure {
+                Some(error) => Err(error),
+                None => combined.ok_or_else(|| "Search returned no pages".to_owned()),
+            };
             (
                 "search-reddit",
-                json!({"query":query,"subreddit":subreddit,"sort":sort,"period":period,"smart":smart}),
+                json!({"query":query,"subreddit":subreddit,"sort":sort,"period":period,"smart":smart,"pages":pages}),
                 result,
             )
         }
@@ -269,8 +311,29 @@ mod tests {
         ];
         let request = parse(&args).unwrap().unwrap();
         assert!(
-            matches!(request.command, Command::Search { query, subreddit, sort, period, smart } if query == "blue team goal" && subreddit.as_deref() == Some("soccer") && sort == "new" && period == "week" && !smart)
+            matches!(request.command, Command::Search { query, subreddit, sort, period, smart, pages } if query == "blue team goal" && subreddit.as_deref() == Some("soccer") && sort == "new" && period == "week" && !smart && pages == 1)
         );
+    }
+
+    #[test]
+    fn live_search_cli_bounds_requested_page_count() {
+        let args = [
+            "search-reddit".into(),
+            "rust".into(),
+            "--pages".into(),
+            "2".into(),
+        ];
+        let request = parse(&args).unwrap().unwrap();
+        assert!(matches!(request.command, Command::Search { pages: 2, .. }));
+        for count in ["0", "21", "many"] {
+            let args = [
+                "search-reddit".into(),
+                "rust".into(),
+                "--pages".into(),
+                count.into(),
+            ];
+            assert!(parse(&args).is_err());
+        }
     }
 
     #[test]

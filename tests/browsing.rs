@@ -1,12 +1,13 @@
 use reddit_offline::{
     browsing::{
-        classic_url, is_listing_partial_url, listing_partial_path, listing_url,
+        classic_url, comment_more_form_body, comment_more_form_cursor_fingerprint, comment_more_partial_path, is_listing_partial_url, listing_partial_path, listing_url, search_partial_matches, search_partial_path, search_url,
         public_content_path, reddit_url, select_listing_threads, subreddit_url,
         without_challenge_params,
     },
     desktop::DesktopStore,
     proxy::allowed_host,
 };
+use url::Url;
 
 #[test]
 fn listing_sort_is_requested_from_reddit_not_guessed_from_cache_age() {
@@ -240,5 +241,108 @@ fn only_the_listing_continuation_is_allowed_beyond_public_pages() {
     )));
     assert!(!is_listing_partial_url(
         "https://example.com/svc/shreddit/community-more-posts/hot/?name=soccer"
+    ));
+}
+
+#[test]
+fn comment_continuations_require_the_observed_scoped_route_query_and_form() {
+    let child_path = "/svc/shreddit/more-comments/AskReddit/t3_1xkbciw";
+    let child_query = "sort=CONFIDENCE&startingDepth=1&seeker-session=true&commentParentPositions=25";
+    let top_query = "top-level=1&rootCommentOffset=7&commentPositionOffset=32";
+    let legacy_top_query = "top-level=1&comments-remaining=2100&commentPositionOffset=25";
+    assert!(comment_more_partial_path(child_path, Some(child_query)));
+    assert!(comment_more_partial_path(child_path, Some(top_query)));
+    assert!(comment_more_partial_path(child_path, Some(legacy_top_query)));
+    for observed in [
+        "startingDepth=1&commentPositionOffset=1&commentParentPositions=26",
+        "startingDepth=2&commentParentPositions=27,0",
+        "top-level=1&rootCommentOffset=7&commentPositionOffset=32",
+        "sort=CONFIDENCE&startingDepth=3&seeker-session=true&commentParentPositions=0,0,0",
+        "sort=CONFIDENCE&startingDepth=1&seeker-session=true&commentPositionOffset=5&commentParentPositions=0",
+    ] {
+        assert!(comment_more_partial_path(child_path, Some(observed)), "{observed}");
+    }
+    assert!(comment_more_form_body(b"csrf_token=synthetic&cursor=synthetic"));
+    assert!(comment_more_form_body(b"cursor=synthetic&csrf_token=synthetic"));
+    assert!(comment_more_form_body(b"csrf_token=&cursor=synthetic"));
+    let first_cursor = comment_more_form_cursor_fingerprint(b"csrf_token=token-one&cursor=source-page-one").unwrap();
+    let repeated_cursor = comment_more_form_cursor_fingerprint(b"csrf_token=rotated&cursor=source-page-one").unwrap();
+    let advanced_cursor = comment_more_form_cursor_fingerprint(b"csrf_token=rotated&cursor=source-page-two").unwrap();
+    assert_eq!(first_cursor, repeated_cursor, "CSRF rotation does not imply source pagination advanced");
+    assert_ne!(first_cursor, advanced_cursor);
+    assert!(comment_more_form_cursor_fingerprint(b"csrf_token=x&cursor=").is_none());
+
+    for (path, query) in [
+        (child_path, None),
+        (child_path, Some("sort=CONFIDENCE&startingDepth=1&seeker-session=true")),
+        (child_path, Some("sort=NEW&startingDepth=1&seeker-session=true&commentParentPositions=25")),
+        (child_path, Some("sort=CONFIDENCE&startingDepth=1&commentParentPositions=25")),
+        (child_path, Some("sort=CONFIDENCE&startingDepth=999&seeker-session=true&commentParentPositions=25")),
+        (child_path, Some("sort=CONFIDENCE&startingDepth=1&seeker-session=false&commentParentPositions=25")),
+        (child_path, Some("sort=CONFIDENCE&startingDepth=1&seeker-session=true&commentParentPositions=25&extra=x")),
+        (child_path, Some("startingDepth=2&commentParentPositions=27")),
+        (child_path, Some("startingDepth=2&commentParentPositions=27,0,1")),
+        (child_path, Some("startingDepth=2&commentParentPositions=27,,0")),
+        (child_path, Some("startingDepth=1&commentParentPositions=10001")),
+        (child_path, Some("startingDepth=129&commentParentPositions=0")),
+        (child_path, Some("startingDepth=1&commentPositionOffset=-1&commentParentPositions=0")),
+        (child_path, Some("startingDepth=1&commentParentPositions=0&commentParentPositions=1")),
+        (child_path, Some("top-level=1&rootCommentOffset=7&comments-remaining=8&commentPositionOffset=32")),
+        (child_path, Some("top-level=1&rootCommentOffset=7&commentPositionOffset=32&sort=CONFIDENCE&seeker-session=true")),
+        ("/svc/shreddit/more-comments/AskReddit/t3_1xkbciw/", Some(child_query)),
+        ("/svc/shreddit/more-comments/AskReddit/t3_1xkbciw/extra", Some(child_query)),
+        ("/svc/shreddit/more-comments/AskReddit/t3_../", Some(child_query)),
+        ("/svc/shreddit/more-comments/AskReddit/t3_t3_1xkbciw", Some(child_query)),
+        ("/svc/shreddit/graphql", Some(child_query)),
+        ("/svc/shreddit/more-comments/AskReddit/t3_1xkbciw", Some("top-level=0&rootCommentOffset=1&commentPositionOffset=25")),
+        ("/svc/shreddit/more-comments/AskReddit/t3_1xkbciw", Some("top-level=1&rootCommentOffset=1&commentPositionOffset=25&extra=1")),
+        ("/svc/shreddit/more-comments/AskReddit/t3_1xkbciw", Some("top-level=0&comments-remaining=1&commentPositionOffset=25")),
+        ("/svc/shreddit/more-comments/AskReddit/t3_1xkbciw", Some("top-level=1&comments-remaining=1&commentPositionOffset=25&extra=1")),
+    ] {
+        assert!(!comment_more_partial_path(path, query), "{path}?{query:?}");
+    }
+    for body in [
+        b"csrf_token=x".as_slice(),
+        b"csrf_token=x&cursor=y&extra=z",
+        b"csrf_token=x&cursor=y&cursor=z",
+        b"csrf_token=x&cursor=",
+        b"csrf_token=x&cursor=bad%0Avalue",
+    ] {
+        assert!(!comment_more_form_body(body), "{body:?}");
+    }
+    assert!(!comment_more_form_body(&vec![b'x'; 32 * 1024 + 1]));
+}
+
+#[test]
+fn search_continuations_are_exact_and_bound_to_query_scope_sort_and_period() {
+    let global = Url::parse(&search_url("rust", None, "relevance", "all").unwrap()).unwrap();
+    let global_next = Url::parse(
+        "https://www.reddit.com/svc/shreddit/search/?cursor=opaque1&q=rust&sort=relevance&t=all",
+    )
+    .unwrap();
+    assert!(search_partial_path(global_next.path(), global_next.query()));
+    assert!(search_partial_matches(&global, &global_next));
+
+    let scoped = Url::parse(&search_url("borrow checker", Some("rust"), "new", "week").unwrap()).unwrap();
+    let scoped_next = Url::parse(
+        "https://www.reddit.com/svc/shreddit/r/rust/search/?cursor=opaque2&q=borrow+checker&sort=new&t=week",
+    )
+    .unwrap();
+    assert!(search_partial_matches(&scoped, &scoped_next));
+    for invalid in [
+        "https://www.reddit.com/svc/shreddit/search/?cursor=x&q=rust&sort=new&t=all",
+        "https://www.reddit.com/svc/shreddit/r/soccer/search/?cursor=x&q=borrow+checker&sort=new&t=week",
+        "https://www.reddit.com/svc/shreddit/r/rust/search/?cursor=x&q=borrow+checker&sort=new&t=month",
+        "https://www.reddit.com/svc/shreddit/r/rust/search/?cursor=x&cursor=y&q=borrow+checker&sort=new&t=week",
+        "https://www.reddit.com/svc/shreddit/graphql/?cursor=x&q=borrow+checker&sort=new&t=week",
+        "https://example.com/svc/shreddit/search/?cursor=x&q=rust&sort=relevance&t=all",
+    ] {
+        let url = Url::parse(invalid).unwrap();
+        assert!(!search_partial_matches(&scoped, &url), "{invalid}");
+    }
+    assert!(!search_partial_path("/svc/shreddit/search/", Some("q=rust&sort=relevance&t=all")));
+    assert!(!search_partial_path(
+        "/svc/shreddit/search/",
+        Some("cursor=x&q=rust&sort=relevance&t=all&extra=1")
     ));
 }

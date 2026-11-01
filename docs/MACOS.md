@@ -8,7 +8,7 @@ The app bundles its reader, Rust/SQLite core, yt-dlp and FFmpeg. No Node, Python
 
 ## Build verification versus native Mac verification
 
-The app is cross-compiled from Linux, assembled as a native ARM bundle and ad-hoc signed. Structural checks cover main executable architecture/system dependencies and code/resource hashes; media helpers are independently signed before the bundle. These checks do not prove native Mac launch, WKWebView behavior, Apple's codesign assessment or Gatekeeper acceptance.
+GitHub Actions compiles the Apple Silicon app on macOS, assembles its bundle and ad-hoc signs it. Structural checks cover main executable architecture/system dependencies and code/resource hashes; media helpers are independently signed before the bundle. These checks do not prove native Mac launch, WKWebView behavior, Apple's codesign assessment or Gatekeeper acceptance.
 
 The user's 0.5.2 Mac screenshot and support ZIP now establish launch, local reading and successful proxy acquisition after using certificate recovery: three completed TLS/HTTP captures, including a 943 ms listing. They also exposed the article-thumbnail media failure corrected in 0.5.3. This is user-provided native evidence, not an automated Mac test. Native verification of the revised 0.5.4 search, settings and video playback remains pending.
 
@@ -46,10 +46,24 @@ Choose a new ZIP filename. This fetches a soccer listing and one comments page t
 
 Data lives under `~/Library/Application Support/io.github.iarnvidr.hrungnir/`. Structured content is `cache.sqlite`; completed media is in `media/`; website data belongs to the app's own webview store. Text pruning does not delete independently cached media or shrink SQLite allocation.
 
-## Rebuild and Linux verification
+## GitHub Actions builds and native verification
 
-For local Mac development, install the Rust Tauri CLI and use `sh scripts/dev.sh`; it uses a separate app identity and data directory. Prepare media helpers with `python3 scripts/fetch-media-tools.py`. See the README for the distributable source build. Release packaging from Linux uses `bash scripts/build-macos.sh` and a disposable SDK/zigbuild/rcodesign container.
+All Rust compilation, application builds, build-based tests, and release packaging run in GitHub Actions. Do not run local Cargo or Tauri build/test commands. The Actions workflow runs the core and Tauri Rust checks, the Python/CDP reader suite in its Linux container, and the macOS native test-artifact build. Existing portable CLI commands and non-compiling Python/shell policy checks may still be run locally.
 
-Linux development needs yt-dlp, FFmpeg, GTK/WebKit and the Tauri build prerequisites. Native checks use Xvfb, OS clicks, screenshots, SQLite inspection and WebDriver. WebKitWebDriver can invalidate its inspector when a background source window is destroyed; the acquisition flow is therefore also checked with OS clicks and persisted results. Cached rendering/playback can be checked after a fresh process start without an acquisition window.
+To run the native reader verification for a completed Actions run, replace `RUN_ID` with that run's numeric GitHub Actions run ID:
+
+```sh
+sh scripts/test-native-reader.sh RUN_ID
+```
+
+The script downloads the dedicated hidden native test artifact for that run and verifies its source-bound receipt, archive hash, test identity and signature before launching it. It does not build locally. The artifact uses `src-tauri/tauri.test.conf.json`, a separate test identity, a fresh explicit data root and temporary web storage; it does not use the installed app's profile. The report and `native.log` are preserved in the printed isolated directory; add `--output-dir PATH` to choose its parent directory. A failed check exits nonzero. The native launch gate remains one run per 30 minutes; inspect its remaining interval with `python3 scripts/native-test-window.py`. App-backed live Reddit CLI commands also count as native launches. The standalone `reddit-offline --cli` cache, local search and library checks do not open an app.
+
+If the calling shell times out, do not retry the run or remove its scratch directory. Check the runner first with `python3 -B scripts/actions-native-reader.py status`. A `running` state means the global lock is still held; wait and check again. Clean up scratch only after status reports a terminal or interrupted/stopped state (the lock is free) and the recorded child PID has exited. The runner inherits the lock into the native app so a timed-out parent cannot make a second run appear safe.
+
+The dedicated test reader window stays hidden and unfocused. No host test browser or browser driver is used. ChromeDriver is forbidden, and no macOS quarantine, Gatekeeper or other host security settings may be changed to run tests.
+
+The test artifact also includes `Contents/Resources/bin/hrungnir-comment-replay`, a standalone offline parser utility built and tested in Actions. Reader probes may retain up to four private comment response captures in their isolated `comment-fixtures` directory. Run the utility with a capture path to inspect structural counts without opening the app or making a network request. Its output omits comment bodies, identities, URLs and cursors. Keep raw captures private; preserve only the redacted report and delete captures, downloaded archives, extracted apps and disposable data after the batch has exited. The replay utility is excluded from production bundles.
+
+The browser interaction suite runs in the Linux Actions container with Python/CDP and Chromium, not on a host Mac browser. Its results do not prove native macOS WKWebView behavior; the verified macOS test artifact covers that separate path.
 
 `scripts/live-smoke.py` is the historical 0.2.0 Live/Saved harness; it does not describe the 0.3.0 contract. `scripts/unified-smoke.py` exercises the current local reader/media flow.

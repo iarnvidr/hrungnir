@@ -1,6 +1,6 @@
 //! Shared desktop operations. Every call uses the same disk-backed cache as the CLI.
 pub use crate::SearchHit;
-use crate::{Cache, Result, Thread};
+use crate::{Cache, Comment, Result, Thread};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,30 @@ pub const PAYLOAD_BUDGET: u64 = 10 * 1024 * 1024;
 pub struct ListingPageState {
     pub cursor: Option<String>,
     pub exhausted: bool,
+}
+
+#[derive(Serialize)]
+pub struct SearchPageState {
+    pub cursor: Option<String>,
+    pub exhausted: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CommentPageState {
+    pub parent_id: String,
+    pub cursor: Option<String>,
+    pub exhausted: bool,
+}
+
+#[derive(Serialize)]
+pub struct CommentPageResponse {
+    pub parent_id: String,
+    pub comments: Vec<Comment>,
+    pub cursor: Option<String>,
+    pub exhausted: bool,
+    pub loaded_count: usize,
+    pub source_total: Option<u64>,
+    pub comment_pages: Vec<CommentPageState>,
 }
 
 #[derive(Serialize)]
@@ -30,6 +54,8 @@ pub struct Snapshot {
     pub diagnostics: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub listing_page: Option<ListingPageState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_page: Option<SearchPageState>,
 }
 
 /// A path owned by the native application, never supplied by web content.
@@ -125,6 +151,7 @@ impl DesktopStore {
             position: cache.position()?,
             diagnostics: cache.summary()?,
             listing_page: None,
+            search_page: None,
         })
     }
 
@@ -266,6 +293,36 @@ impl DesktopStore {
         cache.import_batch(&threads, PAYLOAD_BUDGET)?;
         cache.save_browser(&page.url, page.scroll_y)?;
         Ok(cache.list()?.len())
+    }
+
+    /// Merge and persist one validated page of comments into an existing post.
+    pub fn merge_comment_page(
+        &self,
+        id: &str,
+        parent_id: &str,
+        comments: Vec<Comment>,
+    ) -> Result<usize> {
+        if !(id.starts_with("t3_")
+            && (3..=16).contains(&id[3..].len())
+            && id[3..].bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        {
+            return Err("Invalid post identity for comment page".into());
+        }
+        let mut cache = Cache::open(&self.path)?;
+        let mut thread = cache
+            .read(id)?
+            .ok_or("Post is no longer cached; refresh the subreddit")?;
+        if !matches!(thread.source.as_deref(), Some("proxy" | "browser"))
+            || thread.permalink.as_deref().is_none_or(|url| !crate::browsing::reddit_url(url))
+        {
+            return Err("Only a cached public Reddit discussion can be expanded".into());
+        }
+        crate::comment_pages::merge_page(&mut thread, parent_id, comments)?;
+        thread.captured_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+        cache.update_comment_page(&thread, PAYLOAD_BUDGET)?;
+        Ok(thread.comments.len())
     }
 
     pub fn browser_position(&self) -> Result<Option<(String, f64)>> {
