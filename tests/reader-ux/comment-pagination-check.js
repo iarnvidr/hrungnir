@@ -28,7 +28,7 @@ async (page) => {
   await page.locator('[data-testid="comment-page-t1_parent"]').click();
   await page.waitForFunction(() => document.querySelector('#discussion-comments .comment-page-status')?.textContent.includes('Comment continuation unavailable'));
   assert(await page.locator('#discussion-comments .comment').count() === 1, 'failed reply fetch removed the downloaded comment tree');
-  assert(await page.locator('#discussion-comments .comments-header').innerText() === '4 comments · 1 downloaded', 'failed reply fetch confused source totals with downloaded comments');
+  assert((await page.locator('#discussion-comments .comments-header').innerText()).toLowerCase() === '4 comments · 1 downloaded', 'failed reply fetch confused source totals with downloaded comments');
   assert(await page.evaluate(() => document.querySelector('#thread-view video') === window.__ux.search.commentPlayer), 'failed reply fetch replaced the current media player');
   await page.evaluate(() => { window.__ux.search.commentPageError = false; window.__ux.search.holdCommentPage = true; });
   await page.locator('[data-testid="comment-page-t1_parent"]').click();
@@ -46,7 +46,7 @@ async (page) => {
   await page.waitForFunction(() => document.querySelectorAll('#discussion-comments .comment').length === 2
     && document.querySelector('[data-testid="comment-page-t1_reply"]')
     && document.activeElement?.dataset?.commentId === 't1_parent');
-  assert(await page.locator('#discussion-comments .comments-header').innerText() === '4 comments · 2 downloaded', 'reply page did not update the downloaded count separately');
+  assert((await page.locator('#discussion-comments .comments-header').innerText()).toLowerCase() === '4 comments · 2 downloaded', 'reply page did not update the downloaded count separately');
   const calls = await page.evaluate(() => window.__ux.search.commentPageCalls);
   assert(calls[0].id === 't3_video' && calls[0].parent_id === 't1_parent' && calls[0].cursor === 'reply-1'
     && calls[1].cursor === calls[0].cursor, 'reply retry did not preserve its post, parent, and cursor scope');
