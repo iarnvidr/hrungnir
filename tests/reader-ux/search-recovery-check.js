@@ -321,7 +321,7 @@ async (page) => {
   assert(!recoveredPaginationStatus.includes('cursor expired'), `fresh continuation reused an expired cursor; status: ${recoveredPaginationStatus}`);
   assert(await page.locator('.thread-item').count() >= 25, 'expired cursor recovery lost the clean first page');
   await page.evaluate(() => {
-    Object.assign(window.__ux.search, {enableSearchPaging:true, searchPageError:true, holdSearchPage:false, searchPageCalls:[]});
+    Object.assign(window.__ux.search, {enableSearchPaging:true, searchPageError:true, holdSearchPage:true, searchPageCalls:[]});
   });
   await page.locator('#search-scope').selectOption('all');
   await page.evaluate(() => window.scrollTo(0, 0));
@@ -330,15 +330,19 @@ async (page) => {
   await page.waitForFunction(() => document.querySelectorAll('.thread-item').length === 25 && !document.querySelector('#header-search-submit').disabled);
   assert(await page.locator('#search-pagination').isVisible(), 'Reddit search did not expose continuation controls');
   if (!(await page.evaluate(() => window.__ux.search.searchPageCalls.length))) await page.locator('#search-load-more').click();
+  await page.waitForFunction(() => window.__ux.search.searchPageCalls.length === 1 && typeof window.__ux.search.releaseSearchPage === 'function');
+  assert(await page.evaluate(() => window.__ux.search.searchPageCalls.length === 1), 'initial search continuation triggered duplicate requests while becoming actionable');
+  await page.evaluate(() => window.__ux.search.releaseSearchPage());
   await page.waitForFunction(() => document.querySelector('#search-pagination-status').textContent.includes('continuation unavailable'));
   const firstSearchPageIds = await page.evaluate(() => [...document.querySelectorAll('.thread-item')].map(node => node.dataset.threadId));
   assert(firstSearchPageIds.length === 25, 'failed search continuation removed or replaced current results');
   assert(await page.locator('#cache-search-input').inputValue() === 'continuation proof', 'failed search continuation cleared the query');
   await page.evaluate(() => { window.__ux.search.searchPageError = false; window.__ux.search.holdSearchPage = true; });
   await page.locator('#search-load-more').click();
-  await page.waitForFunction(() => window.__ux.search.searchPageCalls.length === 2 && typeof window.__ux.search.releaseSearchPage === 'function');
+  await page.waitForFunction(() => window.__ux.search.searchPageCalls.length >= 2 && typeof window.__ux.search.releaseSearchPage === 'function');
   assert(await page.locator('.thread-item').count() === 25, 'held search continuation changed visible results before it completed');
   const searchPageArgs = await page.evaluate(() => window.__ux.search.searchPageCalls);
+  assert(searchPageArgs.length === 2, `retry issued ${searchPageArgs.length} continuation requests instead of one failed request and one retry`);
   assert(searchPageArgs[0].cursor === 'search-page-1' && searchPageArgs[1].cursor === searchPageArgs[0].cursor, 'search retry did not reuse the failed continuation cursor');
   assert(searchPageArgs[1].query === 'continuation proof' && searchPageArgs[1].subreddit === null && searchPageArgs[1].sort === 'relevance' && searchPageArgs[1].smart === true, 'search continuation lost its original query scope or options');
   const initialSearchArgs = await page.evaluate(() => window.__ux.calls.find(call => call.command === 'search_reddit' && call.args.query === 'continuation proof')?.args);

@@ -1979,6 +1979,29 @@
     container.append(control);
   }
 
+  function isCommentPageDescendantList(comments, requestedParentId, existingComments) {
+    if (!Array.isArray(comments)) return false;
+    const returnedById = new Map();
+    for (const comment of comments) {
+      if (!comment || typeof comment.id !== 'string' || !/^t1_[A-Za-z0-9_]+$/.test(comment.id) ||
+          typeof comment.parent_id !== 'string' || comment.id === requestedParentId || returnedById.has(comment.id)) return false;
+      returnedById.set(comment.id, comment);
+    }
+    const knownById = new Map((existingComments || []).map((comment) => [comment.id, comment]));
+    for (const comment of comments) {
+      const visited = new Set([comment.id]);
+      let ancestorId = comment.parent_id;
+      while (ancestorId !== requestedParentId) {
+        if (typeof ancestorId !== 'string' || visited.has(ancestorId)) return false;
+        visited.add(ancestorId);
+        const ancestor = returnedById.get(ancestorId) || knownById.get(ancestorId);
+        if (!ancestor || typeof ancestor.parent_id !== 'string') return false;
+        ancestorId = ancestor.parent_id;
+      }
+    }
+    return true;
+  }
+
   async function focusAnchor(threadId, anchor, node) {
     document.querySelectorAll('.anchor-target').forEach((item) => item.classList.remove('anchor-target'));
     if (node) node.classList.add('anchor-target');
@@ -2699,16 +2722,14 @@
     try {
       const result = await invoke('fetch_comment_page', { id: threadId, parent_id: parentId, cursor });
       if (commentPageGenerationByThread.get(threadId) !== generation || commentPageStates.get(key) !== state) return;
-      if (!result || result.parent_id !== parentId || !Array.isArray(result.comments) ||
-          !result.comments.every((comment) => comment && /^t1_[A-Za-z0-9_]+$/.test(comment.id) && comment.parent_id === parentId) ||
+      const current = threadCache.get(threadId);
+      if (!result || !current || result.parent_id !== parentId || !isCommentPageDescendantList(result.comments, parentId, current.comments) ||
           !(result.cursor === null || typeof result.cursor === 'string') || typeof result.exhausted !== 'boolean' ||
           (result.cursor === null && !result.exhausted) || !Number.isSafeInteger(result.loaded_count) || result.loaded_count < 0 ||
           !(result.source_total === null || (Number.isSafeInteger(result.source_total) && result.source_total >= 0)) ||
           (result.comment_pages !== undefined && !Array.isArray(result.comment_pages))) {
         throw new Error('The reader received an invalid comment continuation page.');
       }
-      const current = threadCache.get(threadId);
-      if (!current) return;
       const mergedComments = [...(current.comments || [])];
       const positions = new Map(mergedComments.map((comment, index) => [comment.id, index]));
       for (const comment of result.comments) {

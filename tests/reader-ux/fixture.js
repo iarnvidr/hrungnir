@@ -100,20 +100,24 @@
         if (args.id !== 't3_video') throw new Error('Unknown fixture post');
         if (args.parent_id === 't1_parent' && args.cursor === 'reply-1') return {
           parent_id: args.parent_id,
-          comments: [{ id: 't1_reply', parent_id: 't1_parent', body: 'First loaded reply.' }],
-          cursor: null, exhausted: true, loaded_count: 2, source_total: 4,
+          comments: [
+            { id: 't1_reply', parent_id: 't1_parent', body: 'First loaded reply.' },
+            { id: 't1_grandchild', parent_id: 't1_reply', body: 'Inline nested reply returned with its parent page.' },
+          ],
+          cursor: null, exhausted: true, loaded_count: 3, source_total: 5,
           comment_pages: [
             { parent_id: 't1_parent', cursor: null, exhausted: true },
             { parent_id: 't1_reply', cursor: 'nested-1', exhausted: false },
+            { parent_id: 't1_grandchild', cursor: null, exhausted: true },
           ],
         };
         if (args.parent_id === 't1_reply' && args.cursor === 'nested-1') return {
           parent_id: args.parent_id,
-          comments: [{ id: 't1_grandchild', parent_id: 't1_reply', body: 'A deeper loaded reply.' }],
-          cursor: null, exhausted: true, loaded_count: 3, source_total: 4,
+          comments: [{ id: 't1_greatgrandchild', parent_id: 't1_grandchild', body: 'A deeper continuation reply.' }],
+          cursor: null, exhausted: true, loaded_count: 4, source_total: 5,
           comment_pages: [
             { parent_id: 't1_reply', cursor: null, exhausted: true },
-            { parent_id: 't1_grandchild', cursor: null, exhausted: true },
+            { parent_id: 't1_greatgrandchild', cursor: null, exhausted: true },
           ],
         };
         if (args.parent_id === 't3_video' && args.cursor === 'top-1') return {
@@ -122,7 +126,7 @@
             { id: 't1_parent', parent_id: 't3_video', body: 'The refreshed parent comment.' },
             { id: 't1_second_root', parent_id: 't3_video', body: 'A second top-level comment.' },
           ],
-          cursor: null, exhausted: true, loaded_count: 4, source_total: 4,
+          cursor: null, exhausted: true, loaded_count: 5, source_total: 5,
           comment_pages: [
             { parent_id: 't3_video', cursor: null, exhausted: true },
             { parent_id: 't1_second_root', cursor: null, exhausted: true },
@@ -182,7 +186,7 @@
         if (args.include_media !== false) {
           if (!search.provideMedia) return new Promise(() => {}); // Simulate a stalled media download.
           const base = threads.find(t => t.id === args.id);
-          const thread = { ...base, comment_count: search.commentPagesEnabled || search.commentPageHandlesMissing ? 4 : base.comment_count, comments_status: 'partial_proxy', comments: search.comments || [] };
+          const thread = { ...base, comment_count: search.commentPagesEnabled || search.commentPageHandlesMissing ? 5 : base.comment_count, comments_status: 'partial_proxy', comments: search.comments || [] };
           return {
             snapshot: snap([thread]),
             media: [{ kind: 'video', name: 'Fixture clip', url: `https://asset.localhost/${'a'.repeat(64)}/${args.id}/clip.mp4` }],
@@ -208,7 +212,7 @@
         }
         await wait(posts, args.id);
         completed.push(args.id);
-        const thread = { ...threads.find(t => t.id === args.id), comment_count: search.commentPagesEnabled || search.commentPageHandlesMissing ? 4 : threads.find(t => t.id === args.id).comment_count, comments_status: 'partial_proxy', comments: search.comments || [{ id: 't1_parent', parent_id: args.id, body: 'A useful discussion, available before the video finishes.' }] };
+        const thread = { ...threads.find(t => t.id === args.id), comment_count: search.commentPagesEnabled || search.commentPageHandlesMissing ? 5 : threads.find(t => t.id === args.id).comment_count, comments_status: 'partial_proxy', comments: search.comments || [{ id: 't1_parent', parent_id: args.id, body: 'A useful discussion, available before the video finishes.' }] };
         return {
           snapshot: snap([thread]), media: [], cache: { comments_hit: false, media_hit: false },
           ...(search.commentPagesEnabled ? { comment_pages: [
